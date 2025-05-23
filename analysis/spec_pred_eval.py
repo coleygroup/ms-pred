@@ -31,6 +31,23 @@ def cos_sim_fn(pred_ar, true_spec):
     return cos_sim
 
 
+def entropy_sim_fn(pred_ar, true_spec):
+    def norm_peaks(prob):
+        return prob / (prob.sum(axis=-1, keepdims=True) + 1e-22)
+
+    def entropy(prob):
+        # assert np.all(np.abs(prob.sum(axis=-1) - 1) < 5e-3), f"Diff to 1: {np.max(np.abs(prob.sum(axis=-1) - 1))}"
+        return -np.sum(prob * np.log(prob + 1e-22), axis=-1)
+
+    norm_pred = norm_peaks(pred_ar)
+    norm_true = norm_peaks(true_spec)
+    entropy_pred = entropy(norm_pred)
+    entropy_targ = entropy(norm_true)
+    entropy_mix = entropy((norm_pred + norm_true) / 2)
+    entropy_sim = 1 - (2 * entropy_mix - entropy_pred - entropy_targ) / np.log(4)
+    return entropy_sim
+
+
 def get_args():
     """get_args."""
     parser = argparse.ArgumentParser()
@@ -52,14 +69,14 @@ def get_args():
 
 def process_spec_file(spec_name, num_bins: int, upper_limit: int, spec_dir: Path):
     """process_spec_file."""
-    spec_file = spec_dir / f"{spec_name}.json"
-    loaded_json = json.load(open(spec_file, "r"))
+    spec_h5 = common.HDF5Dataset(spec_dir)
+    loaded_json = json.loads(spec_h5.read_str(f"{spec_name}.json"))
 
     if loaded_json.get("output_tbl") is None:
         return None
 
     # Load without adduct involved
-    mz = loaded_json["output_tbl"]["formula_mass_no_adduct"]
+    mz = loaded_json["output_tbl"]["mono_mass"]
     inten = loaded_json["output_tbl"]["ms2_inten"]
     spec_ar = np.vstack([mz, inten]).transpose(1, 0)
     binned = common.bin_spectra([spec_ar], num_bins, upper_limit)
@@ -74,22 +91,45 @@ def main(args):
     """main."""
     dataset = args.dataset
     formula_dir_name = args.formula_dir_name
-    data_folder = Path(f"data/spec_datasets/{dataset}/subformulae/{formula_dir_name}/")
+    data_folder = Path(f"data/spec_datasets/{dataset}/subformulae/{formula_dir_name}")
     min_inten = args.min_inten
     max_peaks = args.max_peaks
+    data_label = data_folder.parent.parent / 'labels.tsv'
+    data_df = pd.read_csv(data_label, sep='\t')
+    name_to_ion = dict(data_df[["spec", "ionization"]].values)
 
     binned_pred_file = Path(args.binned_pred_file)
     outfile = args.outfile
     if outfile is None:
         outfile = binned_pred_file.parent / "pred_eval.yaml"
-        outfile_grouped = binned_pred_file.parent / "pred_eval_grouped.tsv"
+    outfile_grouped_template = str(outfile.parent / "pred_eval_grouped_{}.tsv")
 
-    pred_specs = pickle.load(open(binned_pred_file, "rb"))
-    pred_spec_ars = pred_specs["preds"]
-    pred_smiles = pred_specs["smiles"]
-    pred_spec_names = pred_specs["spec_names"]
-    upper_limit = pred_specs["upper_limit"]
-    num_bins = pred_specs["num_bins"]
+    pred_specs = common.HDF5Dataset(binned_pred_file)
+    upper_limit = pred_specs.attrs["upper_limit"]
+    num_bins = pred_specs.attrs["num_bins"]
+
+    pred_spec_ars = []
+    pred_smiles = []
+    pred_spec_names = []
+    collision_energies = []
+    ion_types = []
+    # iterate over h5 layers
+    for pred_spec_obj in pred_specs.h5_obj.values():
+        for smiles_obj in pred_spec_obj.values():
+            smiles = None
+            name = None
+            for collision_eng_key, collision_eng_obj in smiles_obj.items():
+                if name is None:
+                    name = collision_eng_obj.attrs['spec_name']
+                if smiles is None:
+                    smiles = collision_eng_obj.attrs['smiles']
+                name = common.rm_collision_str(name)
+                collision_eng_key = common.get_collision_energy(collision_eng_key)
+                pred_spec_ars.append(collision_eng_obj['spec'][:])
+                pred_smiles.append(smiles)
+                pred_spec_names.append(name + f'_collision {float(collision_eng_key):.0f}')
+                collision_energies.append(collision_eng_key)
+                ion_types.append(name_to_ion[name])
 
     read_spec = partial(
         process_spec_file,
@@ -98,12 +138,12 @@ def main(args):
         spec_dir=data_folder,
     )
     true_specs = common.chunked_parallel(
-        pred_spec_names, read_spec, chunks=100, max_cpu=16, timeout=4000, max_retries=3
+        pred_spec_names, read_spec, chunks=100, max_cpu=16
     )
     running_lists = defaultdict(lambda: [])
     output_entries = []
-    for pred_ar, pred_smi, pred_spec, true_spec in zip(
-        pred_spec_ars, pred_smiles, pred_spec_names, true_specs
+    for pred_ar, pred_smi, pred_spec, collision_energy, ion_type, true_spec in zip(
+        pred_spec_ars, pred_smiles, pred_spec_names, collision_energies, ion_types, true_specs
     ):
         if true_spec is None:
             continue
@@ -124,6 +164,7 @@ def main(args):
 
         cos_sim = cos_sim_fn(pred_ar, true_spec)
         mse = np.mean((pred_ar - true_spec) ** 2)
+        entropy_sim = entropy_sim_fn(pred_ar, true_spec)
 
         # Compute validity
         # Get all possible bins that would be valid
@@ -149,17 +190,18 @@ def main(args):
         copy_true[max_possible_bin] = 0
         cos_sim_zero_pep = cos_sim_fn(copy_pred, copy_true)
 
-        possible_set = set(possible)
-        pred_set = set(pos_bins)
-        overlap = pred_set.intersection(possible_set)
-
-        # Check invalid smiles here
-        invalid = pred_set.difference(possible_set)
-
-        if len(pred_set) == 0:
-            frac_valid = 1.0
-        else:
-            frac_valid = len(overlap) / len(pred_set)
+        # TODO computing validity should use masses with adduct and consider adduct transfer
+        # possible_set = set(possible)
+        # pred_set = set(pos_bins)
+        # overlap = pred_set.intersection(possible_set)
+        #
+        # # Check invalid smiles here
+        # invalid = pred_set.difference(possible_set)
+        #
+        # if len(pred_set) == 0:
+        #     frac_valid = 1.0
+        # else:
+        #     frac_valid = len(overlap) / len(pred_set)
 
         # Compute true overlap
         true_inds = np.argwhere(true_spec > min_inten).flatten()
@@ -179,20 +221,24 @@ def main(args):
             "cos_sim": float(cos_sim),
             "cos_sim_zero_pep": float(cos_sim_zero_pep),
             "mse": float(mse),
-            "frac_valid": float(frac_valid),
+            "entropy_sim": float(entropy_sim),
+            # "frac_valid": float(frac_valid),
             "overlap_coeff": float(overlap_coeff),
             "coverage": float(coverage),
             "len_targ": len(true_bins),
             "len_pred": len(pos_bins),
             "compound_mass": smiles_mass,
             "mass_bin": common.bin_mass_results(smiles_mass),
+            "collision_bin": common.bin_collision_results(collision_energy),
+            "ion_type": ion_type,
         }
 
         output_entries.append(output_entry)
         running_lists["cos_sim"].append(cos_sim)
         running_lists["cos_sim_zero_pep"].append(cos_sim_zero_pep)
         running_lists["mse"].append(mse)
-        running_lists["frac_valid"].append(frac_valid)
+        running_lists["entropy_sim"].append(entropy_sim)
+        # running_lists["frac_valid"].append(frac_valid)
         running_lists["overlap_coeff"].append(overlap_coeff)
         running_lists["coverage"].append(coverage)
         running_lists["len_targ"].append(len(true_bins))
@@ -211,16 +257,17 @@ def main(args):
         final_output[f"sem_{k}"] = float(sem(v))
 
     df = pd.DataFrame(output_entries)
-    df_grouped = pd.concat(
-        [df.groupby("mass_bin").mean(numeric_only=True), df.groupby("mass_bin").size()], axis=1
-    )
-    df_grouped = df_grouped.rename({0: "num_examples"}, axis=1)
+    for grouped_key in ["mass_bin", "collision_bin", "ion_type"]:
+        df_grouped = pd.concat(
+            [df.groupby(grouped_key).mean(numeric_only=True), df.groupby(grouped_key).size()], axis=1
+        )
+        df_grouped = df_grouped.rename({0: "num_examples"}, axis=1)
 
-    all_mean = df.mean(numeric_only=True)
-    all_mean["num_examples"] = len(df)
-    all_mean.name = "avg"
-    df_grouped = pd.concat([df_grouped, all_mean.to_frame().T], axis=0)
-    df_grouped.to_csv(outfile_grouped, sep="\t")
+        all_mean = df.mean(numeric_only=True)
+        all_mean["num_examples"] = len(df)
+        all_mean.name = "avg"
+        df_grouped = pd.concat([df_grouped, all_mean.to_frame().T], axis=0)
+        df_grouped.to_csv(outfile_grouped_template.format(grouped_key), sep="\t")
 
     with open(outfile, "w") as fp:
         out_str = yaml.dump(final_output, indent=2)

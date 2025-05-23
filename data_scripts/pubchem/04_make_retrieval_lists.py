@@ -94,10 +94,8 @@ def main(max_k, workers, input_map, input_dataset_folder, split_file):
     output_pickle = retrieval_folder / f"cands_pickled{split_stem}_{max_k}.p"
     output_df = retrieval_folder / f"cands_df{split_stem}_{max_k}.tsv"
 
-    input_smiles_labels = input_dataset_folder / "labels.tsv"
-
     # spec, ikey, smiles, formula
-    headers = ["spec", "inchikey", "smiles", "formula", "ionization"]
+    headers = ["spec", "inchikey", "smiles", "formula", "ionization", "precursor", "collision_energies"]
 
     # DEBUG
     # df = df[df['spec'] == 'CCMSLIB00003111357']
@@ -162,6 +160,8 @@ def main(max_k, workers, input_map, input_dataset_folder, split_file):
         formula = entry["formula"]
         true_smiles = entry["smiles"]
         true_ion = entry["ionization"]
+        true_precursor = entry["precursor"]
+        colli_engs = entry["collision_energies"]
         for (cand_smi, cand_ikey), cand_tani in zip(entry["cands"], entry["tani_sims"]):
             new_entry = {
                 "spec": spec,
@@ -171,6 +171,8 @@ def main(max_k, workers, input_map, input_dataset_folder, split_file):
                 "smiles": cand_smi,
                 "ionization": true_ion,
                 "inchikey": cand_ikey,
+                "precursor": true_precursor,
+                "collision_energies": colli_engs,
             }
             entries.append(new_entry)
     df_out = pd.DataFrame(entries)
@@ -192,16 +194,9 @@ if __name__ == "__main__":
 
     # Modify here to create various datasets
     compute_entries = [
-        #{"dataset": "nist20", "max_k": 50, "split": "split_1.tsv"},
-        #{"dataset": "nist20", "max_k": 50, "split": "split_1_500.tsv"},
-        #{"dataset": "nist20", "max_k": None, "split": "split_1_500.tsv"},
-        #{"dataset": "nist20", "max_k": 50, "split": "split_1_1000.tsv"},
-        #{"dataset": "nist20", "max_k": None, "split": "split_1_1000.tsv"},
-        {"dataset": "canopus_train_public", "max_k": 50, "split": "split_1.tsv"},
-
-        #{"dataset": "nist20", "max_k": 50, "split": "split_1_1000.tsv"},
-        #{"dataset": "casmi22", "max_k": None, "split": "all_split.tsv"},
-        #{"dataset": "casmi22", "max_k": None, "split": "priority_split.tsv"},
+        {"dataset": "nist20", "max_k": 50, "split": "split_1.tsv"},
+        {"dataset": "nist20", "max_k": 50, "split": "scaffold_1.tsv"},
+        # {"dataset": "canopus_train_public", "max_k": 50, "split": "split_1.tsv"},
     ]
 
     for test_entry in compute_entries:

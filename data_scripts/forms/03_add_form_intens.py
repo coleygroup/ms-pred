@@ -4,6 +4,7 @@ import numpy as np
 import argparse
 import copy
 from pathlib import Path
+from tqdm import tqdm
 
 import ms_pred.magma.run_magma as run_magma
 import ms_pred.common as common
@@ -23,44 +24,38 @@ def get_args():
 
 
 def relabel_tree(
-    pred_form_file: Path,
-    true_form_file: Path,
-    out_form_file: Path,
+    pred_form_folder: Path,
+    true_form_folder: Path,
+    pred_form_name: str,
+    true_form_name: str,
+    out_form_name: str,
     add_binned: bool,
     add_raw,
 ):
-    """relabel_tree.
-
-    Args:
-        pred_form_file (Path): pred_form_file
-        true_form_file (Path): true_form_file
-        out_form_file (Path): out_form_file
-        add_binned (bool): add_binned
-        add_raw (bool): add_raw
-
-    Returns:
-        None:
-    """
-    if not true_form_file.exists():
+    """relabel_tree"""
+    if not true_form_name:
         return
 
-    pred_form = json.load(open(pred_form_file, "r"))
-    true_form = json.load(open(true_form_file, "r"))
+    pred_form_h5 = common.HDF5Dataset(pred_form_folder)
+    true_form_h5 = common.HDF5Dataset(true_form_folder)
+
+    pred_form = json.loads(pred_form_h5.read_str(pred_form_name))
+    true_form = json.loads(true_form_h5.read_str(true_form_name))
 
     if true_form["output_tbl"] is None:
         return
 
     pred_tbl, true_tbl = pred_form.get("output_tbl", None), true_form["output_tbl"]
     if pred_tbl is None:
-        pred_tbl = {"formula_mass_no_adduct": []}
+        pred_tbl = {"mono_mass": []}
 
     # Use rel inten
     true_form_to_inten = dict(zip(true_tbl["formula"], true_tbl["rel_inten"]))
 
     if add_binned:
         bins = np.linspace(0, 1500, 15000)
-        true_pos = np.digitize(true_tbl["formula_mass_no_adduct"], bins)
-        pred_pos = np.digitize(pred_tbl["formula_mass_no_adduct"], bins)
+        true_pos = np.digitize(true_tbl["mono_mass"], bins)
+        pred_pos = np.digitize(pred_tbl["mono_mass"], bins)
         bin_to_inten = dict()
         for i, j in zip(true_pos, true_tbl["rel_inten"]):
             bin_to_inten[i] = max(j, bin_to_inten.get(i, 0))
@@ -69,13 +64,13 @@ def relabel_tree(
         new_intens = [true_form_to_inten.get(i, 0.0) for i in pred_tbl["formula"]]
 
     if add_raw:
-        raw_spec = list(zip(true_tbl["formula_mass_no_adduct"], true_tbl["rel_inten"]))
+        raw_spec = list(zip(true_tbl["mono_mass"], true_tbl["rel_inten"]))
         pred_tbl["raw_spec"] = raw_spec
 
     pred_tbl["rel_inten"] = new_intens
     pred_tbl["ms2_inten"] = new_intens
-    with open(out_form_file, "w") as fp:
-        json.dump(pred_form, fp, indent=2)
+
+    return out_form_name, json.dumps(pred_form, indent=2)
 
 
 def main():
@@ -90,32 +85,46 @@ def main():
     if out_form_folder is None:
         out_form_folder = pred_form_folder
     out_form_folder = Path(out_form_folder)
-    out_form_folder.mkdir(exist_ok=True)
+    out_form_folder.parent.mkdir(exist_ok=True)
 
     num_workers = args.num_workers
-    pred_form_files = list(pred_form_folder.glob("*.json"))
-    true_form_files = [
-        true_form_folder / i.name.replace("pred_", "") for i in pred_form_files
-    ]
-    out_form_files = [out_form_folder / i.name for i in pred_form_files]
+    pred_form_h5 = common.HDF5Dataset(pred_form_folder)
+    pred_form_names = list(pred_form_h5.get_all_names())
+    true_form_h5 = common.HDF5Dataset(true_form_folder)
+    true_form_names = [i.replace("pred_", "") for i in pred_form_names]
+    true_form_names = [i if i in true_form_h5 else "" for i in true_form_names]
+    out_form_names = pred_form_names
+    pred_form_h5.close()
+    true_form_h5.close()
+
     arg_dicts = [
         {
-            "pred_form_file": i,
-            "true_form_file": j,
-            "out_form_file": k,
+            "pred_form_folder": pred_form_folder,
+            "true_form_folder": true_form_folder,
+            "pred_form_name": i,
+            "true_form_name": j,
+            "out_form_name": k,
             "add_raw": add_raw,
             "add_binned": add_binned,
         }
-        for i, j, k in zip(pred_form_files, true_form_files, out_form_files)
+        for i, j, k in zip(pred_form_names, true_form_names, out_form_names)
     ]
 
     # Run
     wrapper_fn = lambda arg_dict: relabel_tree(**arg_dict)
+
+    def output_fn(out_dicts):
+        h5 = common.HDF5Dataset(out_form_folder, mode='w')
+        for tup in out_dicts:
+            h5.write_str(tup[0], tup[1])
+        h5.close()
+
     # Debug
     if num_workers == 0:
-        [wrapper_fn(i) for i in arg_dicts]
+        out_dicts = [wrapper_fn(i) for i in tqdm(arg_dicts)]
+        output_fn(out_dicts)
     else:
-        common.chunked_parallel(arg_dicts, wrapper_fn, max_cpu=num_workers)
+        common.chunked_parallel(arg_dicts, wrapper_fn, output_func=output_fn, chunks=1000, max_cpu=num_workers)
 
 
 if __name__ == "__main__":

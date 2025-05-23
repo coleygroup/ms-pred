@@ -1,0 +1,62 @@
+# please modify the following configuration accordingly to your own environment
+# you could create multiple entries for different hostnames
+
+example: # modify example to your hostname
+  python_path: '/path/to/your/python'
+  gen_ckpt: '/path/to/dag_nist20/split_1_rnd1/version_0/best.ckpt'
+  inten_ckpt: '/path/to/dag_inten_nist20/split_1_rnd1/version_1/best.ckpt'
+  cuda_devices: 0  # == CUDA_VISIBLE_DEVICES
+  batch_size: 8
+  num_workers: 6  # adjust batch_size and num_workers to maximize your GPU util within your GPU memory
+  sparse_k: 100  # number of predicted peaks by ICEBERG-Score
+  max_nodes: 100  # number of nodes in fragmentation DAG predicted by ICEBERG-Gen
+  threshold: 0.0
+  binned_out: False
+  ppm: 20
+  num_bins: 15000
+  dist_func: 'entropy'
+
+Runzhong-G14:
+  python_path: '/home/roger/miniforge3/envs/ms-main/bin/python'
+  gen_ckpt: '/home/roger/ms-models/iceberg_results_20241111/dag_nist20/split_1_rnd1/version_0/best.ckpt'
+  inten_ckpt: '/home/roger/ms-models/iceberg_results_20241111/dag_inten_nist20/split_1_rnd1/version_1/best.ckpt'
+  cuda_devices: 0
+  batch_size: 8
+  num_workers: 6
+  sparse_k: 100
+  max_nodes: 100
+  threshold: 0.0
+  binned_out: False
+  ppm: 20
+  num_bins: 15000
+  dist_func: 'entropy'
+
+molgpu01:
+  python_path: '/home/runzhong/mambaforge/envs/ms-main/bin/python'
+  gen_ckpt: '/home/runzhong/ms-models/iceberg_results_20241111/dag_nist20/split_1_rnd1/version_0/best.ckpt'
+  inten_ckpt: '/home/runzhong/ms-models/iceberg_results_20241111/dag_inten_nist20/split_1_rnd1/version_1/best.ckpt'
+  cuda_devices: [2, 3]
+  batch_size: 8
+  num_workers: 12
+  sparse_k: 100
+  max_nodes: 100
+  threshold: 0.0
+  binned_out: False
+  ppm: 20
+  num_bins: 15000
+  dist_func: 'entropy'
+
+molgpu02:
+  clone: molgpu01
+
+molgpu03:
+  clone: molgpu01
+
+molgpu04:
+  clone: molgpu01
+
+molgpu05:
+  clone: molgpu01
+
+molgpu06:
+  clone: molgpu01

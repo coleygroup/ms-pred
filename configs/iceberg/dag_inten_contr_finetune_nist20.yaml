@@ -1,0 +1,90 @@
+launcher_args: {experiment_name: dag_inten_nist20,
+  script_name: "src/ms_pred/dag_pred/train_contr_inten.py",
+  slurm_script: launcher_scripts/generic_slurm.sh, 
+  launch_method: local,
+  visible_devices: [0, 1]
+}
+universal_args:
+  _slurm_args:
+  - {_num_gpu: 1, cpus-per-task: 7, job-name: forward_train, mem-per-cpu: 8G, 
+    nodelist: 'node[1236]', time: '1-18:00:00'}
+  debug: [false]
+  debug-overfit: [false]
+  gpu: [true]
+
+  seed: [1]
+  num-workers: [64]
+  batch-size: [32]
+  max-epochs: [10]
+  num-decoys: [3]
+
+  dataset-name: [nist20]
+  split-name: [split_1.tsv]
+
+  learning-rate: [0.0005]
+  lr-decay-rate: [0.825]
+  contr-weight: [1]
+
+  dropout: [0.1]
+  mpnn-type: [GGNN]
+  pe-embed-k: [0]
+  pool-op: [avg]
+  hidden-size: [256]
+  weight-decay: [1e-7]
+  set-layers: [0]
+  frag-set-layers: [3]
+  mlp-layers: [1]
+  gnn-layers: [4]
+  loss-fn: [entropy]
+  root-encode: [gnn]
+  inject-early: [false]
+
+  include-unshifted-mz: [true]
+  binned-targs: [true] 
+  embed-adduct: [true]
+  embed-collision: [true]
+  embed-elem-group: [true]
+  grad-accumulate: [1]
+  encode-forms: [true]
+  add-hs: [true]
+  sk-tau: [0.05]
+
+iterative_args:
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd1]
+     magma-dag-folder: [results/dag_nist20/split_1_rnd1/preds_train_100_inten.hdf5]
+     decoy-path: ['results/dag_nist20/split_1_rnd1/preds_train_100/decoy_tree_preds/decoy_tree_preds_chunk_{}.hdf5']
+     train-checkpoint: [results/dag_inten_nist20/split_1_rnd1/version_0/best.ckpt]
+     seed: [1]
+
+#  -  split-name: [split_1.tsv]
+#     save-dir: [split_1_rnd2]
+#     magma-dag-folder: [results/dag_nist20/split_1_rnd2/preds_train_100_inten.hdf5]
+#     decoy-path: ['results/dag_nist20/split_1_rnd2/preds_train_100/decoy_tree_preds/decoy_tree_preds_chunk_{}.hdf5']
+#     train-checkpoint: [results/dag_inten_nist20/split_1_rnd2/version_0/best.ckpt]
+#     seed: [2]
+#
+#  -  split-name: [split_1.tsv]
+#     save-dir: [split_1_rnd3]
+#     magma-dag-folder: [results/dag_nist20/split_1_rnd3/preds_train_100_inten.hdf5]
+#     decoy-path: ['results/dag_nist20/split_1_rnd3/preds_train_100/decoy_tree_preds/decoy_tree_preds_chunk_{}.hdf5']
+#     train-checkpoint: [results/dag_inten_nist20/split_1_rnd3/version_0/best.ckpt]
+#     seed: [3]
+#
+#  -  split-name: [scaffold_1.tsv]
+#     save-dir: [scaffold_1_rnd1]
+#     magma-dag-folder: [results/dag_nist20/scaffold_1_rnd1/preds_train_100_inten.hdf5]
+#     decoy-path: ['results/dag_nist20/scaffold_1_rnd1/preds_train_100/decoy_tree_preds/decoy_tree_preds_chunk_{}.hdf5']
+#     train-checkpoint: [results/dag_inten_nist20/scaffold_1_rnd1/version_0/best.ckpt]
+#
+#  -  split-name: [scaffold_1.tsv]
+#     save-dir: [scaffold_1_rnd2]
+#     magma-dag-folder: [results/dag_nist20/scaffold_1_rnd2/preds_train_100_inten.hdf5]
+#     decoy-path: ['results/dag_nist20/scaffold_1_rnd2/preds_train_100/decoy_tree_preds/decoy_tree_preds_chunk_{}.hdf5']
+#     train-checkpoint: [results/dag_inten_nist20/scaffold_1_rnd2/version_0/best.ckpt]
+#
+#  -  split-name: [scaffold_1.tsv]
+#     save-dir: [scaffold_1_rnd3]
+#     magma-dag-folder: [results/dag_nist20/scaffold_1_rnd3/preds_train_100_inten.hdf5]
+#     decoy-path: ['results/dag_nist20/scaffold_1_rnd3/preds_train_100/decoy_tree_preds/decoy_tree_preds_chunk_{}.hdf5']
+#     train-checkpoint: [results/dag_inten_nist20/scaffold_1_rnd3/version_0/best.ckpt]

@@ -2,26 +2,113 @@
 import sys
 import copy
 import logging
-from pathlib import Path
+from pathlib import Path, PosixPath
 import json
 from itertools import groupby, islice
 from typing import Tuple, List
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
+import h5py
+import hashlib
+from matplotlib import pyplot as plt
 
 import ms_pred.common.chem_utils as chem_utils
 
-from pytorch_lightning.loggers import LightningLoggerBase
+try:
+    from pytorch_lightning.loggers import LightningLoggerBase as Logger
+    from pytorch_lightning.loggers.base import rank_zero_experiment
+except ImportError: # pytorch_lightning >= 1.9
+    from pytorch_lightning.loggers.logger import Logger, rank_zero_experiment
 from pytorch_lightning.utilities import rank_zero_only
-from pytorch_lightning.loggers.base import rank_zero_experiment
+
+NIST_COLLISION_ENERGY_MEAN = 40.260853377886264
+NIST_COLLISION_ENERGY_STD = 31.604227557486197
 
 
 def get_data_dir(dataset_name: str) -> Path:
     return Path("data/spec_datasets") / dataset_name
 
+class HDF5Dataset:
+    """
+    A dataset as a HDF5 file
+    """
+    def __init__(self, path, mode="r"):
+        self.path = path
+        self.h5_obj = h5py.File(path, mode=mode)
+        self.attrs = self.h5_obj.attrs
 
-def setup_logger(save_dir, log_name="output.log", debug=False):
+    def __getitem__(self, idx):
+        return self.h5_obj[idx]
+
+    def __setitem__(self, key, value):
+        self.h5_obj[key] = value
+
+    def __contains__(self, idx):
+        return idx in self.h5_obj
+
+    def get_all_names(self):
+        return self.h5_obj.keys()
+
+    def read_str(self, name, encoding='utf-8') -> str:
+        if '/' in name:  # has group
+            groupname, name = name.rsplit('/', 1)
+            grp = self.h5_obj[groupname]
+        else:
+            grp = self.h5_obj
+        str_obj = grp[name][0]
+        if type(str_obj) is not bytes:
+            raise TypeError(f'Wrong type of {name}')
+        return str_obj.decode(encoding)
+
+    def write_str(self, name, data):
+        if '/' in name:  # has group
+            groupname, name = name.rsplit('/', 1)
+            grp = self.h5_obj.require_group(groupname)
+        else:
+            grp = self.h5_obj
+        dt = h5py.special_dtype(vlen=str)
+        ds = grp.create_dataset(name, (1,), dtype=dt, compression="gzip")
+        ds[0] = data
+
+    def write_dict(self, dict):
+        """dict entries: {filename: data}"""
+        for filename, data in dict.items():
+            self.write_str(filename, data)
+
+    def write_list_of_tuples(self, list_of_tuples):
+        """each tuple is (filename, data)"""
+        for tup in list_of_tuples:
+            if tup is None:
+                continue
+            self.write_str(tup[0], tup[1])
+
+    def read_data(self, name) -> np.ndarray:
+        """read a numpy array object"""
+        return self.h5_obj[name][:]
+
+    def write_data(self, name, data):
+        """write a numpy array object"""
+        self.h5_obj.create_dataset(name, data=data)
+
+    def read_attr(self, name) -> dict:
+        """read attribute of name as a dict"""
+        return {k: v for k, v in self.h5_obj[name].attrs.items()}
+
+    def update_attr(self, name, inp_dict):
+        """write inp_dict to name's attribute"""
+        cur_obj = self.h5_obj[name].attrs
+        for k, v in inp_dict.items():
+            cur_obj[k] = v
+
+    def close(self):
+        self.h5_obj.close()
+
+    def flush(self):
+        self.h5_obj.flush()
+
+
+def setup_logger(save_dir, log_name="output.log", debug=False, custom_label=""):
     """Create output directory"""
     save_dir = Path(save_dir)
     save_dir.mkdir(exist_ok=True, parents=True)
@@ -42,7 +129,7 @@ def setup_logger(save_dir, log_name="output.log", debug=False):
     # Define basic logger
     logging.basicConfig(
         level=level,
-        format="%(asctime)s %(levelname)s: %(message)s",
+        format=custom_label + "%(asctime)s %(levelname)s: %(message)s",
         handlers=[
             stream_handler,
             file_handler,
@@ -57,7 +144,8 @@ def setup_logger(save_dir, log_name="output.log", debug=False):
     logger.addHandler(logging.FileHandler(log_file))
 
 
-class ConsoleLogger(LightningLoggerBase):
+
+class ConsoleLogger(Logger):
     """Custom console logger class"""
 
     def __init__(self):
@@ -103,18 +191,23 @@ class ConsoleLogger(LightningLoggerBase):
 # Parsing
 
 
-def parse_spectra(spectra_file: str) -> Tuple[dict, List[Tuple[str, np.ndarray]]]:
+def parse_spectra(spectra_file: [str, list]) -> Tuple[dict, List[Tuple[str, np.ndarray]]]:
     """parse_spectra.
 
     Parses spectra in the SIRIUS format and returns
 
     Args:
-        spectra_file (str): Name of spectra file to parse
+        spectra_file (str or list): Name of spectra file to parse or lines of parsed spectra
     Return:
         Tuple[dict, List[Tuple[str, np.ndarray]]]: metadata and list of spectra
             tuples containing name and array
     """
-    lines = [i.strip() for i in open(spectra_file, "r").readlines()]
+    if type(spectra_file) is str or type(spectra_file) is PosixPath:
+        lines = [i.strip() for i in open(spectra_file, "r").readlines()]
+    elif type(spectra_file) is list:
+        lines = [i.strip() for i in spectra_file]
+    else:
+        raise ValueError(f'type of variable spectra_file not understood, got {type(spectra_file)}')
 
     group_num = 0
     metadata = {}
@@ -159,8 +252,9 @@ def parse_spectra(spectra_file: str) -> Tuple[dict, List[Tuple[str, np.ndarray]]
             metadata.update(entries)
         group_num += 1
 
-    metadata["_FILE_PATH"] = spectra_file
-    metadata["_FILE"] = Path(spectra_file).stem
+    if type(spectra_file) is str:
+        metadata["_FILE_PATH"] = spectra_file
+        metadata["_FILE"] = Path(spectra_file).stem
     return metadata, spectras
 
 def spec_to_ms_str(
@@ -189,6 +283,64 @@ def spec_to_ms_str(
     spec_str = "\n\n".join(spec_strs)
     output = f"{header}\n{comments}\n\n{spec_str}"
     return output
+
+
+def parse_spectra_mgf(
+    mgf_file: str, max_num = None
+) -> List[Tuple[dict, List[Tuple[str, np.ndarray]]]]:
+    """parse_spectr_mgf.
+
+    Parses spectra in the MGF file formate, with
+
+    Args:
+        mgf_file (str) : str
+        max_num (Optional[int]): If set, only parse this many
+    Return:
+        List[Tuple[dict, List[Tuple[str, np.ndarray]]]]: metadata and list of spectra
+            tuples containing name and array
+    """
+
+    key = lambda x: x.strip() == "BEGIN IONS"
+    parsed_spectra = []
+    with open(mgf_file, "r") as fp:
+
+        for (is_header, group) in tqdm(groupby(fp, key)):
+
+            if is_header:
+                continue
+
+            meta = dict()
+            spectra = []
+            # Note: Sometimes we have multiple scans
+            # This mgf has them collapsed
+            cur_spectra_name = "spec"
+            cur_spectra = []
+            group = list(group)
+            for line in group:
+                line = line.strip()
+                if not line:
+                    pass
+                elif line == "END IONS" or line == "BEGIN IONS":
+                    pass
+                elif "=" in line:
+                    k, v = [i.strip() for i in line.split("=", 1)]
+                    meta[k] = v
+                else:
+                    mz, intens = line.split()
+                    cur_spectra.append((float(mz), float(intens)))
+
+            if len(cur_spectra) > 0:
+                cur_spectra = np.vstack(cur_spectra)
+                spectra.append((cur_spectra_name, cur_spectra))
+                parsed_spectra.append((meta, spectra))
+            else:
+                pass
+                # print("no spectra found for group: ", "".join(group))
+
+            if max_num is not None and len(parsed_spectra) > max_num:
+                # print("Breaking")
+                break
+        return parsed_spectra
 
 
 def parse_cfm_out(spectra_file: str, max_merge=False) -> Tuple[dict, pd.DataFrame]:
@@ -256,12 +408,56 @@ def parse_cfm_out(spectra_file: str, max_merge=False) -> Tuple[dict, pd.DataFram
     sub_h = lambda x: chem_utils.formula_difference(x, "H") if "H" in x else x
     less_h = [sub_h(i) for i in full_spec["form"].values]
     full_spec["form_no_h"] = less_h
-    full_spec["formula_mass_no_adduct"] = [chem_utils.formula_mass(i) for i in less_h]
+    full_spec["formula_mass"] = [chem_utils.formula_mass(i) for i in full_spec["form"].values]
     full_spec["ionization"] = "[M+H]+"
     return meta_data, full_spec
 
 
-def process_spec_file(meta, tuples, precision=4):
+def merge_specs(specs_list, precision=4, merge_method='sum'):
+    mz_to_inten_pair = {}
+    new_tuples = []
+    for spec in specs_list.values():
+        for tup in spec:
+            mz, inten = tup
+            mz_ind = np.round(mz, precision)
+            cur_pair = mz_to_inten_pair.get(mz_ind)
+            if cur_pair is None:
+                mz_to_inten_pair[mz_ind] = tup
+                new_tuples.append(tup)
+            else:
+                if merge_method == 'sum':
+                    cur_pair[1] += inten  # sum merging
+                elif merge_method == 'max':
+                    cur_pair[1] = max(cur_pair[1], inten)  # max merging
+                else:
+                    raise ValueError(f'Unknown merge_method {merge_method}')
+
+    merged_spec = np.vstack(new_tuples)
+    merged_spec = merged_spec[merged_spec[:, 1] > 0]
+    if len(merged_spec) == 0:
+        return
+    merged_spec[:, 1] = merged_spec[:, 1] / merged_spec[:, 1].max()
+
+    return {'nan': merged_spec}
+
+def merge_intens(spec_dict):
+    merged_intens = np.zeros_like(next(iter(spec_dict.values())))
+    for spec in spec_dict.values():
+        merged_intens += spec
+    merged_intens = merged_intens / merged_intens.max()
+    return {'nan': merged_intens}
+
+
+def merge_mz(mzs, ppm=20):
+    if not isinstance(mzs, float) and mzs is not None:
+        if (max(mzs) - min(mzs)) / max(mzs) * 1e6 > ppm:
+            raise ValueError(f'mass difference is larger than threshold ppm={ppm}. Got {mzs}')
+        mz = np.mean(mzs).item()
+        return mz
+    else:  # is float
+        return mzs
+
+def process_spec_file(meta, tuples, precision=4, merge_specs=True, exclude_parent=False):
     """process_spec_file."""
 
     parent_mass = meta.get("parentmass", None)
@@ -272,40 +468,66 @@ def process_spec_file(meta, tuples, precision=4):
     parent_mass = float(parent_mass)
 
     # First norm spectra
-    fused_tuples = [x for _, x in tuples if x.size > 0]
+    fused_tuples = {ce: x for ce, x in tuples if x.size > 0}
 
     if len(fused_tuples) == 0:
         return
 
-    mz_to_inten_pair = {}
-    new_tuples = []
-    for i in fused_tuples:
-        for tup in i:
-            mz, inten = tup
-            mz_ind = np.round(mz, precision)
-            cur_pair = mz_to_inten_pair.get(mz_ind)
-            if cur_pair is None:
-                mz_to_inten_pair[mz_ind] = tup
-                new_tuples.append(tup)
-            elif inten > cur_pair[1]:
-                cur_pair[1] = inten
-            else:
-                pass
+    if merge_specs:
+        mz_to_inten_pair = {}
+        new_tuples = []
+        for i in fused_tuples.values():
+            for tup in i:
+                mz, inten = tup
+                mz_ind = np.round(mz, precision)
+                cur_pair = mz_to_inten_pair.get(mz_ind)
+                if cur_pair is None:
+                    mz_to_inten_pair[mz_ind] = tup
+                    new_tuples.append(tup)
+                elif inten > cur_pair[1]:
+                    cur_pair[1] = inten # max merging
+                else:
+                    pass
 
-    merged_spec = np.vstack(new_tuples)
-    merged_spec = merged_spec[merged_spec[:, 0] <= (parent_mass + 1)]
-    merged_spec[:, 1] = merged_spec[:, 1] / merged_spec[:, 1].max()
+        merged_spec = np.vstack(new_tuples)
+        if exclude_parent:
+            merged_spec = merged_spec[merged_spec[:, 0] <= (parent_mass - 1)]
+        else:
+            merged_spec = merged_spec[merged_spec[:, 0] <= (parent_mass + 1)]
+        merged_spec = merged_spec[merged_spec[:, 1] > 0]
+        if len(merged_spec) == 0:
+            return
+        merged_spec[:, 1] = merged_spec[:, 1] / merged_spec[:, 1].max()
 
-    # Sqrt intensities here
-    merged_spec[:, 1] = np.sqrt(merged_spec[:, 1])
-    return merged_spec
+        # Sqrt intensities here
+        merged_spec[:, 1] = np.sqrt(merged_spec[:, 1])
+        return merged_spec
+    else:
+        new_specs = {}
+        for k, v in fused_tuples.items():
+            new_spec = np.vstack(v)
+            new_spec = new_spec[new_spec[:, 0] <= (parent_mass + 1)]
+            new_spec = new_spec[new_spec[:, 1] > 0]
+            if len(new_spec) == 0:
+                continue
+            new_spec[:, 1] = new_spec[:, 1] / new_spec[:, 1].max()
+
+            # Sqrt intensities here
+            new_spec[:, 1] = np.sqrt(new_spec[:, 1])
+
+            new_specs[k] = new_spec
+        return new_specs
+
+def bin_from_file(spec_file, num_bins, upper_limit) -> Tuple[dict, np.ndarray]:
+    """bin_from_file.
+    """
+    return bin_from_str(open(spec_file, 'r').read(), num_bins, upper_limit)
 
 
-def bin_form_file(spec_file, num_bins, upper_limit) -> Tuple[dict, np.ndarray]:
-    """bin_form_file.
-
+def bin_from_str(spec_str, num_bins, upper_limit) -> Tuple[dict, np.ndarray]:
+    """bin_from_str
     Args:
-        spec_file:
+        spec_str:
         num_bins:
         upper_limit:
 
@@ -313,12 +535,12 @@ def bin_form_file(spec_file, num_bins, upper_limit) -> Tuple[dict, np.ndarray]:
         Tuple[dict, np.ndarray]:
     """
 
-    loaded_json = json.load(open(spec_file, "r"))
+    loaded_json = json.loads(spec_str)
     if loaded_json["output_tbl"] is None:
         return {}, None
 
-    # Load without adduct involved
-    mz = loaded_json["output_tbl"]["formula_mass_no_adduct"]
+    # Load with adduct involved
+    mz = loaded_json["output_tbl"]["mono_mass"]
     inten = loaded_json["output_tbl"]["ms2_inten"]
 
     # Don't renorm; already procesed prior!
@@ -474,6 +696,60 @@ def bin_mass_results(
             return m_str
 
 
+def bin_peak_results(
+    spec,
+    peak_bins=[
+        (0, 5),
+        (5, 10),
+        (10, 15),
+        (15, 20),
+        (20, 25),
+        (25, 30),
+        (30, 40),
+        (40, 500),
+    ],
+    binned_spec = True,
+    reduction = 'mean',  # mean / max / min
+):
+    """bin_peak_results.
+
+    Use to stratify results
+    """
+    if binned_spec:
+        num_peaks = [np.sum(sp > 0) for sp in spec.values()]
+    else:
+        num_peaks = [np.sum(sp[:, 1] > 0)  for sp in spec.values()]
+    reduction_func = eval('np.' + reduction)
+    num_peaks = reduction_func(num_peaks)
+    for i, j in peak_bins:
+        m_str = f"({i}, {j}]"
+        if num_peaks <= j and num_peaks > i:
+            return m_str
+
+def bin_collision_results(
+    collision_energy,
+    bins=[
+        (0, 10),
+        (10, 20),
+        (20, 30),
+        (30, 40),
+        (50, 100),
+        (100, 1000),
+    ],
+):
+    """bin_collision_results.
+
+    Use to stratify results
+    """
+    collision_energy = float(collision_energy)
+    if f'{collision_energy:.0f}' == 'nan':
+        return "null"
+    for i, j in bins:
+        m_str = f"{i} - {j}"
+        if collision_energy <= j and collision_energy > i:
+            return m_str
+
+
 def batches(it, chunk_size: int):
     """Consume an iterable in batches of size chunk_size""" ""
     it = iter(it)
@@ -482,7 +758,7 @@ def batches(it, chunk_size: int):
 
 def batches_num_chunks(it, num_chunks: int):
     """Consume an iterable in batches of size chunk_size""" ""
-    chunk_size = len(it) // num_chunks
+    chunk_size = len(it) // num_chunks + 1
     return batches(it, chunk_size)
 
 
@@ -511,7 +787,8 @@ def build_mgf_str(
                 break
 
         for k, v in meta.items():
-            str_rows.append(f"{k.upper().replace(' ', '_')}={v}")
+            if k not in parent_mass_keys:
+                str_rows.append(f"{k.upper().replace(' ', '_')}={v}")
 
         if merge_charges:
             spec_ar = np.vstack([i[1] for i in spec])
@@ -527,59 +804,77 @@ def build_mgf_str(
     full_out = "\n\n".join(entries)
     return full_out
 
-def parse_spectra_mgf(
-    mgf_file: str, max_num = None
-) -> List[Tuple[dict, List[Tuple[str, np.ndarray]]]]:
-    """parse_spectr_mgf.
 
-    Parses spectra in the MGF file formate, with
+def np_stack_padding(it, axis=0):
 
-    Args:
-        mgf_file (str) : str
-        max_num (Optional[int]): If set, only parse this many
-    Return:
-        List[Tuple[dict, List[Tuple[str, np.ndarray]]]]: metadata and list of spectra
-            tuples containing name and array
-    """
+    def resize(row, size):
+        new = np.array(row)
+        new.resize(size)
+        return new
 
-    key = lambda x: x.strip() == "BEGIN IONS"
-    parsed_spectra = []
-    with open(mgf_file, "r") as fp:
+    # find longest row length
+    max_shape = [max(i) for i in zip(*[j.shape for j in it])]
+    mat = np.stack([resize(row, max_shape) for row in it], axis=axis)
+    return mat
 
-        for (is_header, group) in tqdm(groupby(fp, key)):
 
-            if is_header:
-                continue
+def nce_to_ev(nce, precursor_mz):
+    if type(nce) is str:
+        output_type = 'str'
+        if '.' in nce:  # decimal points
+            decimal_num = len(nce.strip().split('.')[-1])
+        else:
+            decimal_num = 0
+        nce = float(nce)
+    elif type(nce) is int:
+        output_type = 'int'
+    elif type(nce) is float:
+        output_type = 'float'
+    else:
+        raise TypeError(f'Input NCE type {type(nce)} is not understood')
 
-            meta = dict()
-            spectra = []
-            # Note: Sometimes we have multiple scans
-            # This mgf has them collapsed
-            cur_spectra_name = "spec"
-            cur_spectra = []
-            group = list(group)
-            for line in group:
-                line = line.strip()
-                if not line:
-                    pass
-                elif line == "END IONS" or line == "BEGIN IONS":
-                    pass
-                elif "=" in line:
-                    k, v = [i.strip() for i in line.split("=", 1)]
-                    meta[k] = v
-                else:
-                    mz, intens = line.split()
-                    cur_spectra.append((float(mz), float(intens)))
+    ev = nce * precursor_mz / 500
 
-            if len(cur_spectra) > 0:
-                cur_spectra = np.vstack(cur_spectra)
-                spectra.append((cur_spectra_name, cur_spectra))
-                parsed_spectra.append((meta, spectra))
-            else:
-                pass
-                # print("no spectra found for group: ", "".join(group))
+    if output_type == 'str':
+        format_str = '{' + f':.{decimal_num}f' + '}'
+        return format_str.format(ev)
+    elif output_type == 'int':
+        return int(round(ev))
+    else:
+        return float(ev)
 
-            if max_num is not None and len(parsed_spectra) > max_num:
-                # print("Breaking")
-                break
-        return parsed_spectra
+
+def ev_to_nce(ev, precursor_mz):
+    nce = ev * 500 / precursor_mz
+    return nce
+
+
+def md5(fname, chunk_size=4096):
+    hash_md5 = hashlib.md5()
+    with open(fname, "rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            hash_md5.update(chunk)
+    return hash_md5.hexdigest()
+
+
+def str_to_hash(inp_str, digest_size=16):
+    return hashlib.blake2b(inp_str.encode("ascii"), digest_size=digest_size).hexdigest()
+
+
+def rm_collision_str(key: str) -> str:
+    """remove `_collision VALUE` from the string"""
+    keys = key.split('_collision')
+    if len(keys) == 2:
+        return keys[0]
+    elif len(keys) == 1:
+        return key
+    else:
+        raise ValueError(f'Unrecognized key: {key}')
+
+
+def is_iterable(obj):
+    try:
+        iter(obj)
+        return True
+    except TypeError:
+        return False

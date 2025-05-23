@@ -14,10 +14,7 @@ from . import gf_data_utils
 logger = logging.getLogger(__name__)
 
 PRETRAINED_MODEL_URLS = {
-   # "pcqm4mv1_graphormer_base": "https://ml2md.blob.core.windows.net/graphormer-ckpts/checkpoint_best_pcqm4mv1.pt",
-   # "pcqm4mv2_graphormer_base": "https://ml2md.blob.core.windows.net/graphormer-ckpts/checkpoint_best_pcqm4mv2.pt",
     "pcqm4mv2_graphormer_base": "https://zenodo.org/record/8399738/files/checkpoint_best_pcqm4mv2.pt?download=1",
-   # "oc20is2re_graphormer3d_base": "https://szheng.blob.core.windows.net/graphormer/modelzoo/oc20is2re/checkpoint_last_oc20_is2re.pt",
 }
 
 

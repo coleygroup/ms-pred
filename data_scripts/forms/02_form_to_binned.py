@@ -53,10 +53,10 @@ def bin_forms(
 
     tbl = forms.get("output_tbl")
     if tbl is None:
-        tbl = {"rel_inten": [], "formula_mass_no_adduct": []}
+        tbl = {"rel_inten": [], "mono_mass": []}
 
     intens = tbl["rel_inten"]
-    mz = tbl["formula_mass_no_adduct"]
+    mz = tbl["mono_mass"]
 
     # Cap at min
     mz, intens = np.array(mz), np.array(intens)
@@ -71,12 +71,12 @@ def bin_forms(
     spec_ar = np.vstack([mz, intens]).transpose(1, 0)
 
     # Bin intensities
-    binned = common.bin_spectra([spec_ar], num_bins, upper_limit, pool_fn="max")
+    binned = common.bin_spectra([spec_ar], num_bins, upper_limit, pool_fn="max")[0]
     return binned, smiles
 
 
 def bin_form_file(
-    form_file: dict, max_peaks: int, upper_limit: int, num_bins: int, min_inten: float
+    form_filename: dict, h5_path: str, max_peaks: int, upper_limit: int, num_bins: int, min_inten: float
 ):
     """bin_dag_file.
 
@@ -91,7 +91,8 @@ def bin_form_file(
         np.ndarray:
         str
     """
-    forms = json.load(open(form_file, "r"))
+    h5 = common.HDF5Dataset(h5_path)
+    forms = json.loads(h5.read_str(form_filename))
     return bin_forms(forms, max_peaks, upper_limit, num_bins, min_inten)
 
 
@@ -104,12 +105,13 @@ def main():
     num_bins, upper_limit = args.num_bins, args.upper_limit
     num_workers = args.num_workers
     form_folder = Path(args.form_folder)
-    form_files = list(form_folder.glob("*.json"))
+    form_h5 = common.HDF5Dataset(form_folder)
 
     if out is None:
-        out = form_folder.parent / f"{form_folder.stem}_binned.p"
+        out = form_folder.parent / f"{form_folder.stem}_binned.hdf5"
 
-    spec_names = [i.stem.replace("pred_", "") for i in form_files]
+    form_files = list(form_h5.get_all_names())
+    spec_names = [Path(i).stem.replace("pred_", "") for i in form_files]
 
     # Test case
     # dag_file = dag_files[0]
@@ -119,6 +121,7 @@ def main():
 
     read_dag_file = partial(
         bin_form_file,
+        h5_path=form_folder,
         max_peaks=max_peaks,
         upper_limit=upper_limit,
         num_bins=num_bins,
@@ -136,16 +139,18 @@ def main():
         outs = [read_dag_file(i) for i in form_files]
         binned, smis = zip(*outs)
 
-    binned_stack = np.concatenate(binned, 0)
-    output = {
-        "preds": binned_stack,
-        "smiles": smis,
-        "spec_names": spec_names,
-        "num_bins": num_bins,
-        "upper_limit": upper_limit,
-    }
-    with open(out, "wb") as fp:
-        pickle.dump(output, fp)
+    binned_h5 = common.HDF5Dataset(out, mode='w')
+    binned_h5.attrs['num_bins'] = num_bins
+    binned_h5.attrs['upper_limit'] = upper_limit
+    binned_h5.attrs['sparse_out'] = False
+    for bin_spec, smi, spec_name_with_ce in zip(binned, smis, spec_names):
+        spec_name = common.rm_collision_str(spec_name_with_ce)
+        colli_eng = common.get_collision_energy(spec_name_with_ce)
+        inchikey = common.inchikey_from_smiles(smi)
+        h5_name = f'pred_{spec_name}/ikey {inchikey}/collision {colli_eng}'
+        binned_h5.write_data(h5_name + '/spec', bin_spec)
+        binned_h5.update_attr(h5_name, {'smiles': smi, 'ikey': inchikey, 'spec_name': spec_name})
+    binned_h5.close()
 
 
 if __name__ == "__main__":

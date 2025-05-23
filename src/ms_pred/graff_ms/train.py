@@ -63,6 +63,7 @@ def add_graff_ms_train_args(parser):
         "--form-dir-name", default="magma_subform_50_with_raw", action="store"
     )
     parser.add_argument("--embed-adduct", default=False, action="store_true")
+    parser.add_argument("--embed-collision-energy", default=False, action="store_true")
     parser.add_argument("--num-fixed-forms", default=10000, action="store", type=int)
     return parser
 
@@ -80,7 +81,7 @@ def train_model():
 
     save_dir = kwargs["save_dir"]
     common.setup_logger(save_dir, log_name="graff_train.log", debug=kwargs["debug"])
-    pl.utilities.seed.seed_everything(kwargs.get("seed"))
+    pl.seed_everything(kwargs.get("seed"))
 
     # Dump args
     yaml_args = yaml.dump(kwargs)
@@ -108,8 +109,9 @@ def train_model():
     test_df = df.iloc[test_inds]
 
     subform_stem = kwargs["form_dir_name"]
-    subformula_folder = Path(data_dir) / "subformulae" / subform_stem
-    form_map = {i.stem: Path(i) for i in subformula_folder.glob("*.json")}
+    subformula_h5_path = Path(data_dir) / "subformulae" / subform_stem
+    subformula_h5 = common.HDF5Dataset(subformula_h5_path)
+    form_map = {Path(i).stem: i for i in subformula_h5.get_all_names()}
     graph_featurizer = nn_utils.MolDGLGraph(pe_embed_k=kwargs["pe_embed_k"])
     atom_feats = graph_featurizer.atom_feats
     bond_feats = graph_featurizer.bond_feats
@@ -119,6 +121,7 @@ def train_model():
     train_dataset = graff_ms_data.BinnedDataset(
         train_df,
         form_map=form_map,
+        form_h5=subformula_h5_path,
         data_dir=data_dir,
         num_bins=num_bins,
         # num_workers=num_workers,
@@ -128,6 +131,7 @@ def train_model():
     val_dataset = graff_ms_data.BinnedDataset(
         val_df,
         form_map=form_map,
+        form_h5=subformula_h5_path,
         data_dir=data_dir,
         num_bins=num_bins,
         # num_workers=num_workers,
@@ -137,6 +141,7 @@ def train_model():
     test_dataset = graff_ms_data.BinnedDataset(
         test_df,
         form_map=form_map,
+        form_h5=subformula_h5_path,
         data_dir=data_dir,
         num_bins=num_bins,
         # num_workers=num_workers,
@@ -198,6 +203,7 @@ def train_model():
         num_bond_feats=graph_featurizer.num_bond_feats,
         lr_decay_rate=kwargs["lr_decay_rate"],
         embed_adduct=kwargs["embed_adduct"],
+        embed_collision_energy=kwargs["embed_collision_energy"],
         num_fixed_forms=num_fixed_forms,
     )
     model.set_fixed_forms(fixed_forms)
@@ -231,7 +237,7 @@ def train_model():
     trainer = pl.Trainer(
         logger=[tb_logger, console_logger],
         accelerator="gpu" if kwargs["gpu"] else "cpu",
-        gpus=1 if kwargs["gpu"] else 0,
+        devices=1 if kwargs["gpu"] else 0,
         callbacks=callbacks,
         gradient_clip_val=5,
         min_epochs=kwargs["min_epochs"],

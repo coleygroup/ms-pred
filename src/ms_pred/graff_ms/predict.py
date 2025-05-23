@@ -122,51 +122,43 @@ def predict():
     device = torch.device("cuda") if gpu else torch.device("cpu")
     model.to(device)
 
-    spec_names_ar, smiles_ar, preds = [], [], []
+    out_file = Path(kwargs["save_dir"]) / "binned_preds.hdf5"
+    h5 = common.HDF5Dataset(out_file, mode='w')
+    h5.attrs['num_bins'] = model.output_dim
+    h5.attrs['upper_limit'] = model.upper_limit
+    h5.attrs['sparse_out'] = kwargs["sparse_out"]
     with torch.no_grad():
         for batch in tqdm(pred_loader):
-            graphs, smiles, full_forms, adducts = (
+            graphs, smiles, full_forms, adducts, collision_energies, nces = (
                 batch["graphs"],
                 batch["names"],
                 batch["full_forms"],
                 batch["adducts"],
+                batch["collision_energies"],
+                batch["nces"],
             )
             spec_names = batch["spec_names"]
             graphs = graphs.to(device)
             adducts = adducts.to(device)
             full_forms = full_forms.to(device)
+            nces = nces.to(device)
 
-            output = model.predict(graphs, full_forms, adducts)
+            output = model.predict(graphs, full_forms, adducts, nces)
             output_spec = output["spec"].cpu().detach().numpy()
-            smiles_ar.append(smiles)
-            spec_names_ar.append(spec_names)
-            # Shrink it to only top k, ordering inds, intens
 
+            # Shrink it to only top k, ordering inds, intens
             if sparse_out:
                 best_inds = np.argsort(output_spec, -1)[:, ::-1][:, :sparse_k]
                 best_intens = np.take_along_axis(output_spec, best_inds, -1)
                 output_spec = np.stack([best_inds, best_intens], -1)
 
-            preds.append(output_spec)
+            for spec_name, smi, collision_energy, out_spec in zip(spec_names, smiles, collision_energies, output_spec):
+                inchikey = common.inchikey_from_smiles(smi)
+                h5_name = f'pred_{spec_name}/ikey {inchikey}/collision {collision_energy}'
+                h5.write_data(h5_name + '/spec', out_spec)
+                h5.update_attr(h5_name, {'smiles': smi, 'ikey': inchikey, 'spec_name': spec_name})
 
-        spec_names_ar = [j for i in spec_names_ar for j in i]
-        smiles_ar = [j for i in smiles_ar for j in i]
-        inchikeys = [common.inchikey_from_smiles(i) for i in smiles_ar]
-        preds = np.vstack(preds)
-
-        output = {
-            "preds": preds,
-            "smiles": smiles_ar,
-            "ikeys": inchikeys,
-            "spec_names": spec_names_ar,
-            "num_bins": model.output_dim,
-            "upper_limit": model.upper_limit,
-            "sparse_out": sparse_out,
-        }
-
-        out_file = Path(kwargs["save_dir"]) / "binned_preds.p"
-        with open(out_file, "wb") as fp:
-            pickle.dump(output, fp)
+    h5.close()
 
 
 if __name__ == "__main__":

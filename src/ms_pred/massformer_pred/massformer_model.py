@@ -43,6 +43,7 @@ class MassFormer(pl.LightningModule):
         loss_fn: str = "mse",
         warmup: int = 1000,
         embed_adduct: bool = True,
+        embed_collision_energy: bool = True,
         **kwargs,
     ):
         """ """
@@ -56,6 +57,7 @@ class MassFormer(pl.LightningModule):
         self.use_reverse = use_reverse
         self.warmup = warmup
         self.embed_adduct = embed_adduct
+        self.embed_collision_energy = embed_collision_energy
 
         adduct_shift = 0
         if self.embed_adduct:
@@ -64,6 +66,10 @@ class MassFormer(pl.LightningModule):
             self.adduct_embedder = nn.Parameter(onehot.float())
             self.adduct_embedder.requires_grad = False
             adduct_shift = adduct_types
+
+        ce_shift = 0
+        if self.embed_collision_energy:
+            ce_shift = 1
 
         # Embedder
         self.graphormer_embedder = gf_model.GFv2Embedder(
@@ -83,7 +89,7 @@ class MassFormer(pl.LightningModule):
         else:
             assert mf_layer_type == "neims", mf_layer_type
             ff_layer = model_extract.NeimsBlock
-        self.ff_layers.append(nn.Linear(embed_dim + adduct_shift, mf_ff_h_dim))
+        self.ff_layers.append(nn.Linear(embed_dim + adduct_shift + ce_shift, mf_ff_h_dim))
         for i in range(mf_num_ff_num_layers):
             self.ff_layers.append(ff_layer(mf_ff_h_dim, mf_ff_h_dim, self.mf_dropout))
 
@@ -105,6 +111,10 @@ class MassFormer(pl.LightningModule):
         elif loss_fn == "cosine":
             self.loss_fn = self.cos_loss
             self.cos_fn = nn.CosineSimilarity()
+            self.num_outputs = 1
+            self.output_activations = [nn.Sigmoid()]
+        elif loss_fn == 'entropy':
+            self.loss_fn = self.entropy_loss
             self.num_outputs = 1
             self.output_activations = [nn.Sigmoid()]
         else:
@@ -132,16 +142,40 @@ class MassFormer(pl.LightningModule):
         mse = mse.mean()
         return {"loss": mse}
 
-    def predict(self, graphs, full_weight=None, adducts=None) -> dict:
+    def entropy_loss(self, pred, targ):
+        """entropy_loss.
+
+        Args:
+            pred:
+            targ:
+        """
+        pred = pred[:, 0, :]
+
+        def norm_peaks(prob):
+            return prob / (prob.sum(dim=-1, keepdim=True) + 1e-22)
+        def entropy(prob):
+            assert torch.all(torch.abs(prob.sum(dim=-1) - 1) < 1e-3), prob.sum(dim=-1)
+            return -torch.sum(prob * torch.log(prob + 1e-22), dim=-1) / 1.3862943611198906 # norm by log(4)
+
+        pred_norm = norm_peaks(pred)
+        targ_norm = norm_peaks(targ)
+        entropy_pred = entropy(pred_norm)
+        entropy_targ = entropy(targ_norm)
+        entropy_mix = entropy((pred_norm + targ_norm) / 2)
+        loss = 2 * entropy_mix - entropy_pred - entropy_targ
+        loss = loss.mean()
+        return {"loss": loss}
+
+    def predict(self, graphs, full_weight=None, adducts=None, norm_collision_energy=None) -> dict:
         """predict."""
-        out = self.forward(graphs, full_weight, adducts)
+        out = self.forward(graphs, full_weight, adducts, norm_collision_energy)
         if self.loss_fn_name in ["mse", "cosine"]:
             out_dict = {"spec": out[:, 0, :]}
         else:
             raise NotImplementedError()
         return out_dict
 
-    def forward(self, gf_v2_data, full_weight, adducts):
+    def forward(self, gf_v2_data, full_weight, adducts, norm_collision_energy):
         """predict spec"""
         # Graphormer
         embeds = self.graphormer_embedder({"gf_v2_data": gf_v2_data})
@@ -149,6 +183,10 @@ class MassFormer(pl.LightningModule):
         if self.embed_adduct:
             embed_adducts = self.adduct_embedder[adducts.long()]
             new_embeds = torch.cat([embeds, embed_adducts], -1)
+            embeds = new_embeds
+
+        if self.embed_collision_energy:
+            new_embeds = torch.cat([embeds, norm_collision_energy.unsqueeze(-1)], -1)
             embeds = new_embeds
 
         # apply feedforward layers
@@ -193,10 +231,15 @@ class MassFormer(pl.LightningModule):
 
     def _common_step(self, batch, name="train"):
         pred_spec = self.forward(
-            batch["gf_v2_data"], batch["full_weight"], batch["adducts"]
+            batch["gf_v2_data"], batch["full_weight"], batch["adducts"], batch["norm_collision_energies"]
         )
         loss_dict = self.loss_fn(pred_spec, batch["spectra"])
         self.log(f"{name}_loss", loss_dict.get("loss"))
+        if name == 'test':
+            loss_dict.update({
+                'cos_loss': self.cos_loss(pred_spec, batch["spectra"])['loss'],
+                'entr_loss': self.entropy_loss(pred_spec, batch["spectra"])['loss'],
+            })
         for k, v in loss_dict.items():
             if k != "loss":
                 self.log(f"{name}_aux_{k}", v.item())

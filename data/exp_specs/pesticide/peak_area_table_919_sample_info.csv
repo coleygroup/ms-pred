@@ -1,0 +1,43 @@
+Sample,Sample Group,Conditions,Replicate,Time (days),Normalized Peak Area
+datafile:TH_1_0_pos.mzML:area,Thiophanate-methyl,N/A (t=0),1,0,44240
+datafile:TH_3_0_pos.mzML:area,Thiophanate-methyl,N/A (t=0),3,0,55990
+datafile:TH_D1_0p5_pos.mzML:area,Thiophanate-methyl,Dark,1,0,83800
+datafile:TH_D1_15_pos.mzML:area,Thiophanate-methyl,Dark,1,15,218600
+datafile:TH_D1_2_pos.mzML:area,Thiophanate-methyl,Dark,1,2,116600
+datafile:TH_D1_3_pos.mzML:area,Thiophanate-methyl,Dark,1,3,116400
+datafile:TH_D1_36_pos.mzML:area,Thiophanate-methyl,Dark,1,36,417700
+datafile:TH_D1_50_pos.mzML:area,Thiophanate-methyl,Dark,1,50,565200
+datafile:TH_D1_7_pos.mzML:area,Thiophanate-methyl,Dark,1,7,265900
+datafile:TH_D1_70_pos.mzML:area,Thiophanate-methyl,Dark,1,70,542800
+datafile:TH_D2_15_pos.mzML:area,Thiophanate-methyl,Dark,2,15,251600
+datafile:TH_D2_2_pos.mzML:area,Thiophanate-methyl,Dark,2,2,96430
+datafile:TH_D2_3_pos.mzML:area,Thiophanate-methyl,Dark,2,3,126000
+datafile:TH_D2_36_pos.mzML:area,Thiophanate-methyl,Dark,2,36,473400
+datafile:TH_D2_50_pos.mzML:area,Thiophanate-methyl,Dark,2,50,574300
+datafile:TH_D2_7_pos.mzML:area,Thiophanate-methyl,Dark,2,7,253900
+datafile:TH_D2_70_pos.mzML:area,Thiophanate-methyl,Dark,2,70,564500
+datafile:TH_D3_15_pos.mzML:area,Thiophanate-methyl,Dark,3,15,235900
+datafile:TH_D3_2_pos.mzML:area,Thiophanate-methyl,Dark,3,2,195800
+datafile:TH_D3_3_pos.mzML:area,Thiophanate-methyl,Dark,3,3,186900
+datafile:TH_D3_36_pos.mzML:area,Thiophanate-methyl,Dark,3,36,474300
+datafile:TH_D3_50_pos.mzML:area,Thiophanate-methyl,Dark,3,50,597800
+datafile:TH_D3_70_pos.mzML:area,Thiophanate-methyl,Dark,3,70,498900
+datafile:TH_L1_0p5_pos.mzML:area,Thiophanate-methyl,Light,1,0.5,430100
+datafile:TH_L1_1_pos.mzML:area,Thiophanate-methyl,Light,1,1,387500
+datafile:TH_L1_2_pos.mzML:area,Thiophanate-methyl,Light,1,2,214800
+datafile:TH_L1_3_pos.mzML:area,Thiophanate-methyl,Light,1,3,122600
+datafile:TH_L1_7_pos.mzML:area,Thiophanate-methyl,Light,1,7,19810
+datafile:TH_L2_0p5_pos.mzML:area,Thiophanate-methyl,Light,2,0.5,405100
+datafile:TH_L2_1_pos.mzML:area,Thiophanate-methyl,Light,2,1,430400
+datafile:TH_L2_15_pos.mzML:area,Thiophanate-methyl,Light,2,15,123500
+datafile:TH_L2_2_pos.mzML:area,Thiophanate-methyl,Light,2,2,384200
+datafile:TH_L2_3_pos.mzML:area,Thiophanate-methyl,Light,2,3,354400
+datafile:TH_L2_36_pos.mzML:area,Thiophanate-methyl,Light,2,36,25190
+datafile:TH_L2_7_pos.mzML:area,Thiophanate-methyl,Light,2,7,226600
+datafile:TH_L3_0p5_pos.mzML:area,Thiophanate-methyl,Light,3,0.5,380000
+datafile:TH_L3_1_pos.mzML:area,Thiophanate-methyl,Light,3,1,382000
+datafile:TH_L3_15_pos.mzML:area,Thiophanate-methyl,Light,3,15,114400
+datafile:TH_L3_2_pos.mzML:area,Thiophanate-methyl,Light,3,2,347400
+datafile:TH_L3_3_pos.mzML:area,Thiophanate-methyl,Light,3,3,308600
+datafile:TH_L3_36_pos.mzML:area,Thiophanate-methyl,Light,3,36,10240
+datafile:TH_L3_7_pos.mzML:area,Thiophanate-methyl,Light,3,7,180200

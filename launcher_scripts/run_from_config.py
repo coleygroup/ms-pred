@@ -58,10 +58,11 @@ def get_args():
     """parse yaml config"""
     parser = argparse.ArgumentParser()
     parser.add_argument("config_file", help="Name of configuration file")
+    parser.add_argument("--dry", default=False, action="store_true", help="Perform dry run")
     args = parser.parse_args()
     print(f"Loading experiment from: {args.config_file}\n")
     args_new = yaml.safe_load(open(args.config_file, "r"))
-    return args_new, args.config_file
+    return args_new, args.config_file, args.dry
 
 
 def dump_config_file(save_dir: str, config: str):
@@ -193,7 +194,8 @@ def get_launcher_log_name(experiment_folder):
 
 def main(
     config_file: str,
-    launcher_args: list,
+    dry: bool,
+    launcher_args: dict,
     universal_args: dict,
     iterative_args: dict,
     comments: dict = None,
@@ -264,52 +266,32 @@ def main(
         else:
             raise NotImplementedError()
 
-    # Actually launch these
-    if launch_method == "slurm":
+    if dry: # Perform a dry run
         for cmd_str in scripts_to_run:
             print(f"_Command String_\n{cmd_str}")
-            subprocess.call(cmd_str, shell=True)
-            if log is not None:
-                log.write(cmd_str + "\n")
-    elif launch_method == "local":
-        for cmd_str in scripts_to_run:
-            print(f"_Command String_\n{cmd_str}")
-            subprocess.call(cmd_str, shell=True)
-            if log is not None:
-                log.write(cmd_str + "\n")
-    elif launch_method == "local_parallel":
-
-        # Parallelize to several gpus
-        vis_devices = launcher_args.get("visible_devices", None)
-        if vis_devices is None:
-            raise ValueError()
-
-        sh_run_files = set()
-        for str_num, cmd_str in enumerate(scripts_to_run):
-            gpu_num = str_num % len(vis_devices)
-            gpu = vis_devices[gpu_num]
-            cmd_str_new = f"CUDA_VISIBLE_DEVICES={gpu} {cmd_str}"
-            output_name = (
-                f"{launcher_path.parent / launcher_path.stem}_python_{gpu_num}.sh"
-            )
-
-            with open(output_name, "a") as fp:
-                fp.write(f"{cmd_str_new}\n")
-            sh_run_files.add(output_name)
-
-        # Single file to run alll launch scripts
-        launch_all = f"{launcher_path.parent / launcher_path.stem}_launch_all.sh"
-        logdir = Path(launch_all).parent / "logs"
-        logdir.mkdir(exist_ok=True, parents=True)
-        with open(launch_all, "w") as fp:
-            temp_str = [
-                f"sh {i} > {logdir / Path(i).name}.log &" for i in list(sh_run_files)
-            ]
-            fp.write("\n".join(temp_str))
-        print(f"Runnings script: {launch_all}")
-        subprocess.call(f"sh {launch_all}", shell=True)
-    else:
-        raise NotImplementedError()
+    else: # Actually launch these
+        if launch_method == "slurm":
+            for cmd_str in scripts_to_run:
+                print(f"_Command String_\n{cmd_str}")
+                subprocess.call(cmd_str, shell=True)
+                if log is not None:
+                    log.write(cmd_str + "\n")
+        elif launch_method == "local":
+            for cmd_str in scripts_to_run:
+                print(f"_Command String_\n{cmd_str}")
+                subprocess.call(cmd_str, shell=True)
+                if log is not None:
+                    log.write(cmd_str + "\n")
+        elif launch_method == "local_parallel":
+            from ms_pred import common
+            vis_devices = launcher_args.get("visible_devices", None)
+            if vis_devices is None:
+                raise ValueError()
+            else:  # Parallelize to several gpus
+                max_parallel = launcher_args.get("max_parallel_per_gpu", 1)
+                common.subprocess_parallel(scripts_to_run, max_parallel, gpus=vis_devices)
+        else:
+            raise NotImplementedError()
 
     if log is not None:
         log.close()
@@ -317,5 +299,5 @@ def main(
 
 if __name__ == "__main__":
     Path("results").mkdir(exist_ok=True)
-    args, config_file = get_args()
-    main(config_file=config_file, **args)
+    args, config_file, dry = get_args()
+    main(config_file=config_file, dry=dry, **args)

@@ -115,14 +115,20 @@ def predict():
     device = torch.device(device)
     model = model.to(device)
 
-    spec_names_ar, smiles_ar, preds = [], [], []
+    out_file = Path(kwargs["save_dir"]) / "binned_preds.hdf5"
+    h5 = common.HDF5Dataset(out_file, mode='w')
+    h5.attrs['num_bins'] = model.output_dim
+    h5.attrs['upper_limit'] = model.upper_limit
+    h5.attrs['sparse_out'] = kwargs["sparse_out"]
     with torch.no_grad():
         for batch in tqdm(pred_loader):
-            graphs, smiles, weights, adducts = (
+            graphs, smiles, weights, adducts, collision_energies, norm_collision_energies = (
                 batch["gf_v2_data"],
                 batch["names"],
                 batch["full_weight"],
                 batch["adducts"],
+                batch["collision_energies"],
+                batch["norm_collision_energies"]
             )
 
             spec_names = batch["spec_names"]
@@ -130,11 +136,10 @@ def predict():
             graphs = nn_utils.dict_to_device(graphs, device)
             weights = weights.to(device)
             adducts = adducts.to(device)
+            norm_collision_energies = norm_collision_energies.to(device)
 
-            output = model.predict(graphs, weights, adducts)
+            output = model.predict(graphs, weights, adducts, norm_collision_energies)
             output_spec = output["spec"].cpu().detach().numpy()
-            smiles_ar.append(smiles)
-            spec_names_ar.append(spec_names)
 
             # Shrink it to only top k, ordering inds, intens
             if sparse_out:
@@ -142,26 +147,13 @@ def predict():
                 best_intens = np.take_along_axis(output_spec, best_inds, -1)
                 output_spec = np.stack([best_inds, best_intens], -1)
 
-            preds.append(output_spec)
+            for spec_name, smi, collision_energy, out_spec in zip(spec_names, smiles, collision_energies, output_spec):
+                inchikey = common.inchikey_from_smiles(smi)
+                h5_name = f'pred_{spec_name}/ikey {inchikey}/collision {collision_energy}'
+                h5.write_data(h5_name + '/spec', out_spec)
+                h5.update_attr(h5_name, {'smiles': smi, 'ikey': inchikey, 'spec_name': spec_name})
 
-        spec_names_ar = [j for i in spec_names_ar for j in i]
-        smiles_ar = [j for i in smiles_ar for j in i]
-        inchikeys = [common.inchikey_from_smiles(i) for i in smiles_ar]
-        preds = np.vstack(preds)
-
-        output = {
-            "preds": preds,
-            "smiles": smiles_ar,
-            "ikeys": inchikeys,
-            "spec_names": spec_names_ar,
-            "num_bins": model.output_dim,
-            "upper_limit": model.upper_limit,
-            "sparse_out": sparse_out,
-        }
-
-        out_file = Path(kwargs["save_dir"]) / "binned_preds.p"
-        with open(out_file, "wb") as fp:
-            pickle.dump(output, fp)
+    h5.close()
 
 
 if __name__ == "__main__":

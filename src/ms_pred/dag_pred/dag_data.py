@@ -8,10 +8,13 @@ from pathlib import Path
 from typing import List
 import json
 import copy
+import functools
+import random
 
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+from rdkit import Chem
 
 import torch
 import dgl
@@ -35,33 +38,26 @@ class TreeProcessor:
         root_encode: str = "gnn",
         binned_targs: bool = False,
         add_hs: bool = False,
+        embed_elem_group: bool = False,
     ):
         """ """
         self.pe_embed_k = pe_embed_k
         self.root_encode = root_encode
         self.binned_targs = binned_targs
         self.add_hs = add_hs
+        self.embed_elem_group = embed_elem_group
 
         # Hard coded bins (for now)
         self.bins = np.linspace(0, 1500, 15000)
 
-    def featurize_frag(
+    def get_frag_info(
         self,
         frag: int,
         engine: fragmentation.FragmentEngine,
-        add_random_walk: bool = False,
-    ) -> False:
-        """featurize_frag.
-
-        Prev.  dgl_from_frag
-
-        """
-
+    ):
         num_atoms = engine.natoms
-        atom_symbols = engine.atom_symbols
         # Need to find all kept atoms and all kept bonds between
         kept_atom_inds, kept_atom_symbols = engine.get_present_atoms(frag)
-        kept_bond_orders, kept_bonds = engine.get_present_edges(frag)
 
         # H count
         form = engine.formula_from_kept_inds(kept_atom_inds)
@@ -77,6 +73,31 @@ class TreeProcessor:
         # Keep new_to_old for autoregressive predictions
         new_to_old = np.zeros(num_kept, dtype=int)
         new_to_old[new_inds] = old_inds
+
+        return {
+            "new_to_old": new_to_old,
+            "old_to_new": old_to_new,
+            "form": form,
+        }
+
+
+    def featurize_frag(
+        self,
+        frag: int,
+        engine: fragmentation.FragmentEngine,
+        add_random_walk: bool = False,
+    ) -> False:
+        """featurize_frag.
+
+        Prev.  dgl_from_frag
+
+        """
+        kept_atom_inds, kept_atom_symbols = engine.get_present_atoms(frag)
+        atom_symbols = engine.atom_symbols
+        kept_bond_orders, kept_bonds = engine.get_present_edges(frag)
+
+        info = self.get_frag_info(frag, engine)
+        old_to_new = info['old_to_new']
 
         # Remap new bond inds
         new_bond_inds = np.empty((0, 2), dtype=int)
@@ -94,16 +115,17 @@ class TreeProcessor:
             h_adds=h_adds,
             bond_inds=new_bond_inds,
             bond_types=np.array(kept_bond_orders),
+            embed_elem_group=self.embed_elem_group,
         )
 
         if add_random_walk:
             self.add_pe_embed(graph)
-        return {
+
+        frag_feature_dict = {
             "graph": graph,
-            "new_to_old": new_to_old,
-            "old_to_new": old_to_new,
-            "form": form,
         }
+        frag_feature_dict.update(info)
+        return frag_feature_dict
 
     def _convert_to_dgl(
         self,
@@ -119,8 +141,8 @@ class TreeProcessor:
                 the inten model
             last_row:
         """
-        root_inchi = tree["root_inchi"]
-        engine = fragmentation.FragmentEngine(mol_str=root_inchi, mol_str_type="inchi")
+        root_smiles = tree["root_canonical_smiles"]
+        engine = fragmentation.FragmentEngine(mol_str=root_smiles, mol_str_type="smiles", mol_str_canonicalized=True)
         # bottom_depth = engine.max_broken_bonds
         bottom_depth = engine.max_tree_depth
         if self.root_encode == "gnn":
@@ -131,11 +153,17 @@ class TreeProcessor:
             )
             root_repr = root_graph_dict["graph"]
         elif self.root_encode == "fp":
-            root_repr = common.get_morgan_fp_inchi(root_inchi)
+            root_repr = common.get_morgan_fp_smi(root_smiles)
         else:
             raise ValueError()
 
-        root_form = common.form_from_inchi(root_inchi)
+        root_form = common.form_from_smi(root_smiles)
+
+        # Two types of mass shifts: +adduct or +-electron
+        adduct_mass_shift = np.array([
+            common.ion2mass[tree["adduct"]],
+            -common.ELECTRON_MASS if common.is_positive_adduct(tree["adduct"]) else common.ELECTRON_MASS
+        ])
 
         # Need to include mass and inten targets here, maybe not necessary in
         # all cases?
@@ -173,9 +201,9 @@ class TreeProcessor:
             max_remove_hs.append(sub_frag["max_remove_hs"])
             max_add_hs.append(sub_frag["max_add_hs"])
 
-            if include_targets and not self.binned_targs:
-                inten_targs = sub_frag["intens"]
-                inten_targets.append(inten_targs)
+            # if include_targets and not self.binned_targs:
+            #     inten_targs = sub_frag["intens"]
+            #     inten_targets.append(inten_targs)
 
             inten_frag_ids.append(k)
 
@@ -191,10 +219,12 @@ class TreeProcessor:
             masses.append(sub_frag["base_mass"])
             frag_targets.append(torch.from_numpy(targ_vec))
 
-        if include_targets and self.binned_targs:
+        if include_targets:
             inten_targets = np.array(tree["raw_spec"])
 
-        masses = engine.shift_bucket_masses[None, :] + np.array(masses)[:, None]
+        masses = engine.shift_bucket_masses[None, None, :] + \
+                 adduct_mass_shift[None, :, None] + \
+                 np.array(masses)[:, None, None]
         max_remove_hs = np.array(max_remove_hs)
         max_add_hs = np.array(max_add_hs)
         max_broken = np.array(max_broken)
@@ -237,6 +267,8 @@ class TreeProcessor:
         """
         if convert_to_dgl:
             out_dict = self._convert_to_dgl(tree, include_targets, last_row)
+            if "collision_energy" in tree:
+                out_dict["collision_energy"] = tree["collision_energy"]
         else:
             out_dict = tree
 
@@ -252,7 +284,7 @@ class TreeProcessor:
 
         if include_targets and self.binned_targs:
             intens = out_dict["inten_targs"]
-            bin_posts = np.digitize(intens[:, 0], self.bins)
+            bin_posts = np.clip(np.digitize(intens[:, 0], self.bins), 0, len(self.bins) - 1)
             new_out = np.zeros_like(self.bins)
             for bin_post, inten in zip(bin_posts, intens[:, 1]):
                 new_out[bin_post] = max(new_out[bin_post], inten)
@@ -278,6 +310,7 @@ class TreeProcessor:
             "max_broken",
             "form_vecs",
             "root_form_vec",
+            "collision_energy",
         }
         dgl_tree = {i: proc_out[i] for i in keys}
         return {"dgl_tree": dgl_tree, "tree": tree}
@@ -297,6 +330,7 @@ class TreeProcessor:
             "max_broken",
             "form_vecs",
             "root_form_vec",
+            "collision_energy",
         }
         dgl_tree = {i: proc_out[i] for i in keys}
         return {"dgl_tree": dgl_tree, "tree": tree}
@@ -316,6 +350,7 @@ class TreeProcessor:
             "max_broken",
             "form_vecs",
             "root_form_vec",
+            "collision_energy",
         }
         dgl_tree = {i: proc_out[i] for i in keys}
         return {"dgl_tree": dgl_tree, "tree": tree}
@@ -326,6 +361,7 @@ class TreeProcessor:
         h_adds: np.ndarray,
         bond_inds: np.ndarray,
         bond_types: np.ndarray,
+        embed_elem_group: bool,
     ):
         """dgl_featurize.
 
@@ -334,6 +370,7 @@ class TreeProcessor:
             h_adds (np.ndarray): h_adds
             bond_inds (np.ndarray): bond_inds
             bond_types (np.ndarray)
+            embed_elem_group (bool): embed the element group in the periodic table
         """
         node_types = [common.element_to_position[el] for el in atom_symbols]
         node_types = np.vstack(node_types)
@@ -349,6 +386,11 @@ class TreeProcessor:
 
         bond_types_onehot = bond_featurizer[bond_types.long()]
         node_data = torch.from_numpy(node_types)
+
+        if embed_elem_group:
+            node_groups = [common.element_to_group[el] for el in atom_symbols]
+            node_groups = np.vstack(node_groups)
+            node_data = torch.hstack([node_data, torch.from_numpy(node_groups)])
 
         # H data is defined, add that
         if h_adds is None:
@@ -366,7 +408,10 @@ class TreeProcessor:
         return g
 
     def get_node_feats(self):
-        return self.pe_embed_k + common.ELEMENT_DIM + common.MAX_H
+        if self.embed_elem_group:
+            return self.pe_embed_k + common.ELEMENT_DIM + common.MAX_H + common.ELEMENT_GROUP_DIM
+        else:
+            return self.pe_embed_k + common.ELEMENT_DIM + common.MAX_H
 
 
 class DAGDataset(Dataset):
@@ -375,7 +420,7 @@ class DAGDataset(Dataset):
     def __init__(
         self,
         df: pd.DataFrame,
-        data_dir: Path,
+        magma_h5: Path,
         magma_map: dict,
         num_workers=0,
         use_ray: bool = False,
@@ -385,7 +430,6 @@ class DAGDataset(Dataset):
 
         Args:
             df (pd.DataFrame): df
-            data_dir (Path): data_dir
             magma_map (dict): magma_map
             num_workers:
             use_ray (bool): use_ray
@@ -393,55 +437,49 @@ class DAGDataset(Dataset):
         """
         self.df = df
         self.num_workers = num_workers
+        self.magma_h5 = magma_h5
         self.magma_map = magma_map
+        valid_spec_ids = set([common.rm_collision_str(i) for i in self.magma_map])
 
-        valid_specs = [i in self.magma_map for i in self.df["spec"].values]
+        valid_specs = [i in valid_spec_ids for i in self.df["spec"].values]
         self.df_sub = self.df[valid_specs]
         if len(self.df_sub) == 0:
             self.spec_names = []
             self.name_to_dict = {}
         else:
-            self.spec_names = self.df_sub["spec"].values
-            self.name_to_dict = self.df_sub.set_index("spec").to_dict(orient="index")
+            ori_label_map = self.df_sub.set_index("spec").drop("collision_energies", axis=1).to_dict(orient="index") # labels without collision energy
+            self.spec_names = []
+            self.name_to_dict = {}
+            for i in self.magma_map:
+                ori_id = common.rm_collision_str(i)
+                if ori_id in ori_label_map:
+                    self.spec_names.append(i)
+                    self.name_to_dict[i] = copy.deepcopy(ori_label_map[ori_id])
 
         for i in self.name_to_dict:
             self.name_to_dict[i]["magma_file"] = self.magma_map[i]
 
-        logging.info(f"{len(self.df_sub)} of {len(self.df)} spec have trees.")
-        read_fn = lambda x: self.read_tree(self.load_tree(x))
-        self.read_fn = read_fn
+        logging.info(f"{len(self.df_sub)} of {len(self.df)} entries have {len(self.spec_names)} trees.")
 
-        # Read in all trees necessary in parallel
-        # Process trees jointly; sacrifice mmeory for speed
-        if False:
-            if self.num_workers > 0:
-                tree_outs = common.chunked_parallel(
-                    self.spec_names,
-                    read_fn,
-                    max_cpu=self.num_workers,
-                    chunks=min(len(self.spec_names) // 4, 50),
-                    timeout=1200,
-                    use_ray=use_ray,
-                )
-                self.trees = [i["tree"] for i in tree_outs]
-                self.dgl_trees = [i["dgl_tree"] for i in tree_outs]
-
-            else:
-                tree_outs = [read_fn(i) for i in tqdm(self.spec_names)]
-                self.trees = [i["tree"] for i in tree_outs]
-                self.dgl_trees = [i["dgl_tree"] for i in tree_outs]
-            self.spec_name_to_tree = dict(zip(self.spec_names, self.trees))
-
-        self.name_to_adduct = dict(self.df[["spec", "ionization"]].values)
+        adduct_map = dict(self.df[["spec", "ionization"]].values)
+        self.name_to_adduct = {
+            i: adduct_map[common.rm_collision_str(i)] for i in self.spec_names
+        }
         self.name_to_adducts = {
             i: common.ion2onehot_pos[self.name_to_adduct[i]] for i in self.spec_names
         }
-        self.name_to_smiles = dict(self.df[["spec", "smiles"]].values)
+        self.name_to_smiles = {k: v['smiles'] for k, v in self.name_to_dict.items()}
+        self.name_to_precursors = {k: v['precursor'] for k, v in self.name_to_dict.items()}
 
     def load_tree(self, x):
         filename = self.name_to_dict[x]["magma_file"]
-        with open(str(filename), "r") as fp:
-            return json.load(fp)
+        if not type(self.magma_h5) is common.HDF5Dataset:
+            self.magma_h5 = common.HDF5Dataset(self.magma_h5)
+        fp = self.magma_h5.read_str(filename)
+        return json.loads(fp)
+
+    def read_fn(self, x):
+        return self.read_tree(self.load_tree(x))
 
     def __len__(self):
         return len(self.spec_names)
@@ -455,11 +493,12 @@ class DAGDataset(Dataset):
 
         name = self.spec_names[idx]
         adduct = self.name_to_adducts[name]
+        precursor = self.name_to_precursors[name]
 
         dgl_entry = self.read_fn(name)["dgl_tree"]
         # dgl_entry = self.dgl_trees[idx]
 
-        outdict = {"name": name, "adduct": adduct}
+        outdict = {"name": name, "adduct": adduct, "precursor": precursor}
 
         # Convert this into a list of graphs with a list of targets
         outdict.update(dgl_entry)
@@ -476,8 +515,8 @@ class GenDataset(DAGDataset):
     def __init__(
         self,
         df: pd.DataFrame,
-        data_dir: Path,
         tree_processor: TreeProcessor,
+        magma_h5: Path,
         magma_map: dict,
         num_workers=0,
         use_ray: bool = False,
@@ -491,7 +530,7 @@ class GenDataset(DAGDataset):
         self.read_tree = self.tree_processor.process_tree_gen
         super().__init__(
             df=df,
-            data_dir=data_dir,
+            magma_h5=magma_h5,
             magma_map=magma_map,
             num_workers=num_workers,
             use_ray=use_ray,
@@ -534,12 +573,19 @@ class GenDataset(DAGDataset):
 
         max_broken = [torch.LongTensor(i["max_broken"]) for i in input_list]
         max_broken = torch.cat(max_broken)
+
         adducts = [j["adduct"] for j in input_list]
         adducts = torch.FloatTensor(adducts)
 
+        collision_engs = [float(j["collision_energy"]) for j in input_list]
+        collision_engs = torch.FloatTensor(collision_engs)
+
+        precursor_mzs = [j["precursor"] for j in input_list]
+        precursor_mzs = torch.FloatTensor(precursor_mzs)
+
         # Collate forms
-        form_vecs = torch.LongTensor([j for i in input_list for j in i["form_vecs"]])
-        root_vecs = torch.LongTensor([i["root_form_vec"] for i in input_list])
+        form_vecs = torch.LongTensor(np.array([j for i in input_list for j in i["form_vecs"]]))
+        root_vecs = torch.LongTensor(np.array([i["root_form_vec"] for i in input_list]))
         output = {
             "names": names,
             "root_reprs": batched_reprs,
@@ -549,6 +595,8 @@ class GenDataset(DAGDataset):
             "inds": root_inds,
             "broken_bonds": max_broken,
             "adducts": adducts,
+            "collision_engs": collision_engs,
+            "precursor_mzs": precursor_mzs,
             "root_form_vecs": root_vecs,
             "frag_form_vecs": form_vecs,
         }
@@ -561,8 +609,8 @@ class IntenDataset(DAGDataset):
     def __init__(
         self,
         df: pd.DataFrame,
-        data_dir: Path,
         tree_processor: TreeProcessor,
+        magma_h5: Path,
         magma_map: dict,
         num_workers=0,
         use_ray: bool = False,
@@ -576,7 +624,7 @@ class IntenDataset(DAGDataset):
         self.read_tree = self.tree_processor.process_tree_inten
         super().__init__(
             df=df,
-            data_dir=data_dir,
+            magma_h5=magma_h5,
             magma_map=magma_map,
             num_workers=num_workers,
             use_ray=use_ray,
@@ -617,13 +665,7 @@ class IntenDataset(DAGDataset):
 
         targs_padded = None
         if "inten_targs" in input_list[0] and input_list[0]["inten_targs"] is not None:
-
-            if len(input_list[0]["inten_targs"].shape) == 1:
-                targs_padded = torch.FloatTensor(
-                    np.vstack([i["inten_targs"] for i in input_list])
-                )
-            else:
-                targs_padded = _unroll_pad(input_list, "inten_targs")
+            targs_padded = _unroll_pad(input_list, "inten_targs")
 
         masses_padded = _unroll_pad(input_list, "masses")
         max_remove_hs_padded = _unroll_pad(input_list, "max_remove_hs")
@@ -638,6 +680,12 @@ class IntenDataset(DAGDataset):
 
         adducts = [j["adduct"] for j in input_list]
         adducts = torch.FloatTensor(adducts)
+
+        collision_engs = [float(j["collision_energy"]) for j in input_list]
+        collision_engs = torch.FloatTensor(collision_engs)
+
+        precursor_mzs = [j["precursor"] for j in input_list]
+        precursor_mzs = torch.FloatTensor(precursor_mzs)
 
         # Collate fomrs
         form_vecs = _unroll_pad(input_list, "form_vecs")
@@ -657,10 +705,148 @@ class IntenDataset(DAGDataset):
             "max_remove_hs": max_remove_hs_padded,
             "inten_frag_ids": inten_frag_ids,
             "adducts": adducts,
+            "collision_engs": collision_engs,
+            "precursor_mzs": precursor_mzs,
             "root_form_vecs": root_vecs,
             "frag_form_vecs": form_vecs,
         }
         return output
+
+
+class IntenContrDataset(DAGDataset):
+    """Intensity Contrastive Dataset."""
+
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        tree_processor: TreeProcessor,
+        magma_h5: Path,
+        magma_map: dict,
+        num_workers=0,
+        use_ray: bool = False,
+        num_decoys: int = 7,
+        decoy_path_pattern: str = 'results/dag_nist20/split_1_rnd1/preds_train_100/decoy_tree_preds/decoy_tree_preds_chunk_{}.hdf5',
+        **kwargs,
+    ):
+        """__init__.
+
+        Args:
+        """
+        self.tree_processor = tree_processor
+        self.read_tree = self.tree_processor.process_tree_inten
+        super().__init__(
+            df=df,
+            magma_h5=magma_h5,
+            magma_map=magma_map,
+            num_workers=num_workers,
+            use_ray=use_ray,
+        )
+        self.decoy_path_pattern = decoy_path_pattern
+        self.all_h5_paths = list(Path(self.decoy_path_pattern).parent.glob(self.decoy_path_pattern.split('/')[-1].format('*')))
+        self.all_h5_nums = len(self.all_h5_paths)
+        self.num_decoys = num_decoys
+
+    @classmethod
+    def get_collate_fn(cls):
+        return IntenContrDataset.collate_fn
+
+    @staticmethod
+    def collate_fn(
+        input_list,
+    ):
+        """collate_fn.
+
+        Batch a list of graphs and convert.
+
+        Should return dict containing:
+            1. Vector of names.
+            2. Batched root graphs
+            3. Batched fragment graphs
+            5. Number of atoms per frag graph
+            6. Conversion mapping indices between root and children
+            7. Inten targets
+            8. Num broken bonds per atom
+            9. Num frags in each mols dag
+
+        """
+        input_list_flatten = [i for j in input_list for i in j]
+        output = IntenDataset.collate_fn(input_list_flatten)
+        is_decoy = torch.LongTensor([i['decoy'] for j in input_list for i in j])
+        mol_num = torch.LongTensor([len(i) for i in input_list])  # number of true mol + number of decoys
+
+        decoy_output = {
+            "is_decoy": is_decoy,
+            "mol_num": mol_num,
+        }
+        output.update(decoy_output)
+
+        return output
+
+    def __getitem__(self, idx: int):
+        name = self.spec_names[idx]
+        spec_name = '_'.join(name.split('_')[:-1])  # remove collision energy label
+        adduct = self.name_to_adducts[name]
+        precursor = self.name_to_precursors[name]
+        dataset_smi = self.name_to_smiles[name]
+
+        dgl_entry = self.read_fn(name)["dgl_tree"]
+        colli_eng = common.get_collision_energy(name)
+        outdict = {"name": name, "adduct": adduct, "precursor": precursor, 'smiles': dataset_smi, 'decoy': 0}
+
+        # Convert this into a list of graphs with a list of targets
+        outdict.update(dgl_entry)
+
+        outlist = [outdict]
+
+        h5_idx = int(common.str_to_hash(spec_name), base=16) % self.all_h5_nums
+        decoy_path = self.decoy_path_pattern.format(h5_idx)
+        decoy_h5_obj = common.HDF5Dataset(decoy_path)
+        if f'pred_{spec_name}' in decoy_h5_obj:
+            colli_eng_h5obj = decoy_h5_obj[f'pred_{spec_name}']
+            if f'collision {colli_eng}' in colli_eng_h5obj:
+                decoys_h5obj = colli_eng_h5obj[f'collision {colli_eng}']
+                decoy_keys = list(decoys_h5obj.keys())
+                if self.num_decoys < len(decoy_keys):
+                    decoy_keys = random.sample(decoy_keys, self.num_decoys)
+                for decoy_key in decoy_keys:
+                    h5_name = f'pred_{spec_name}/collision {colli_eng}/{decoy_key}'
+                    gen_pred = json.loads(decoy_h5_obj.read_str(h5_name))
+
+                    # Filter out invalid entries
+                    engine = fragmentation.FragmentEngine(
+                        gen_pred['root_canonical_smiles'], mol_str_type="smiles",
+                        mol_str_canonicalized=True)
+                    root_frag_id = engine.get_root_frag()
+                    frag_ids = [frag_entry['frag'] for frag_entry in gen_pred['frags'].values()]
+                    if any([id > root_frag_id for id in frag_ids]):  # entry is invalid
+                        logging.warning('Entry is invalid, skipping')
+                        continue
+
+                    smi = gen_pred['root_canonical_smiles']
+                    trees = self.tree_processor.process_tree_inten_pred(gen_pred)
+                    decoy_entry = trees['dgl_tree']
+                    decoy_entry.update(
+                        {"name": gen_pred['name'], "adduct": adduct, "precursor": precursor, "collision_energy": colli_eng,
+                         "smiles": smi, "decoy": 1})
+                    outlist.append(decoy_entry)
+
+        return outlist
+
+    @staticmethod
+    def sanitize(mol_list: List[Chem.Mol]) -> List[Chem.Mol]:
+        """sanitize.py"""
+        new_mol_list = []
+        smiles_set = set()
+        for mol in mol_list:
+            if mol is not None:
+                try:
+                    smiles = Chem.MolToSmiles(mol)
+                    if smiles is not None and smiles not in smiles_set:
+                        smiles_set.add(smiles)
+                        new_mol_list.append(mol)
+                except ValueError:
+                    logging.warning(f"Bad smiles")
+        return new_mol_list
 
 
 class IntenPredDataset(DAGDataset):
@@ -669,8 +855,8 @@ class IntenPredDataset(DAGDataset):
     def __init__(
         self,
         df: pd.DataFrame,
-        data_dir: Path,
         tree_processor: TreeProcessor,
+        magma_h5: Path,
         magma_map: dict,
         num_workers=0,
         **kwargs,
@@ -679,7 +865,6 @@ class IntenPredDataset(DAGDataset):
 
         Args:
             df (pd.DataFrame): _description_
-            data_dir (Path): _description_
             tree_processor (TreeProcessor): _description_
             magma_map (dict): _description_
             num_workers (int, optional): _description_. Defaults to 0.
@@ -688,7 +873,7 @@ class IntenPredDataset(DAGDataset):
         self.read_tree = self.tree_processor.process_tree_inten_pred
         super().__init__(
             df=df,
-            data_dir=data_dir,
+            magma_h5=magma_h5,
             magma_map=magma_map,
             num_workers=num_workers,
             tree_processor=tree_processor,
@@ -701,7 +886,9 @@ class IntenPredDataset(DAGDataset):
 
 def _unroll_pad(input_list, key):
     if input_list[0][key] is not None:
-        out = [torch.FloatTensor(i[key]) for i in input_list]
+        out = [torch.FloatTensor(i[key]) if i[key] is not None
+               else torch.FloatTensor(input_list[0][key] * float('nan'))
+               for i in input_list]
         out_padded = torch.nn.utils.rnn.pad_sequence(out, batch_first=True)
         return out_padded
     return None

@@ -9,8 +9,6 @@ from datetime import datetime
 import yaml
 import argparse
 import pickle
-import copy
-import json
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -106,29 +104,33 @@ def predict():
     pe_embed_k = model.pe_embed_k
     root_encode = model.root_encode
     add_hs = model.add_hs
+    embed_elem_group = model.embed_elem_group
     magma_dag_folder = Path(kwargs["magma_dag_folder"])
+    magma_tree_h5 = common.HDF5Dataset(magma_dag_folder)
+    name_to_json = {Path(i).stem.replace("pred_", ""): i for i in magma_tree_h5.get_all_names()}
     num_workers = kwargs.get("num_workers", 0)
-    all_json_pths = [Path(i) for i in magma_dag_folder.glob("*.json")]
-    name_to_json = {i.stem.replace("pred_", ""): i for i in all_json_pths}
 
     tree_processor = dag_data.TreeProcessor(
-        pe_embed_k=pe_embed_k, root_encode=root_encode, add_hs=add_hs
+        pe_embed_k=pe_embed_k, root_encode=root_encode, add_hs=add_hs, embed_elem_group=embed_elem_group,
     )
     pred_dataset = dag_data.IntenPredDataset(
         df,
         tree_processor=tree_processor,
         num_workers=num_workers,
         data_dir=data_dir,
+        magma_h5=magma_dag_folder,
         magma_map=name_to_json,
     )
     # Define dataloaders
     collate_fn = pred_dataset.get_collate_fn()
+    mp_contex = 'spawn' if num_workers > 0 else None
     pred_loader = DataLoader(
         pred_dataset,
-        num_workers=kwargs["num_workers"],
+        num_workers=num_workers,
         collate_fn=collate_fn,
         shuffle=False,
         batch_size=kwargs["batch_size"],
+        multiprocessing_context=mp_contex,
     )
 
     model.eval()
@@ -154,6 +156,8 @@ def predict():
             inten_frag_ids = batch["inten_frag_ids"]
             masses = batch["masses"].to(device)
             adducts = batch["adducts"].to(device)
+            precursor_mzs = batch["precursor_mzs"].to(device)
+            collision_energies = batch["collision_engs"].to(device)
 
             root_forms = batch["root_form_vecs"].to(device)
             frag_forms = batch["frag_form_vecs"].to(device)
@@ -165,6 +169,8 @@ def predict():
                 num_frags=num_frags,
                 max_breaks=broken_bonds,
                 adducts=adducts,
+                precursor_mzs=precursor_mzs,
+                collision_engs=collision_energies,
                 max_add_hs=max_add_hs,
                 max_remove_hs=max_remove_hs,
                 masses=masses,
@@ -174,35 +180,51 @@ def predict():
             )
 
             outputs = outputs["spec"]
-            for spec, inten_frag_id, output_spec in zip(
-                spec_names, inten_frag_ids, outputs
+            for spec, inten_frag_id, collision_energy, output_spec in zip(
+                spec_names, inten_frag_ids, collision_energies, outputs
             ):
                 output_obj = {
                     "spec_name": spec,
                     "frag_ids": inten_frag_id,
                     "output_spec": output_spec,
                     "smiles": pred_dataset.name_to_smiles[spec],
+                    "collision_energy": collision_energy,
                 }
                 pred_list.append(output_obj)
 
     # Export pred objects
     if binned_out:
-        spec_names_ar = [str(i["spec_name"]) for i in pred_list]
-        smiles_ar = [str(i["smiles"]) for i in pred_list]
-        inchikeys = [common.inchikey_from_smiles(i) for i in smiles_ar]
-        preds = np.vstack([i["output_spec"] for i in pred_list])
-        output = {
-            "preds": preds,
-            "smiles": smiles_ar,
-            "ikeys": inchikeys,
-            "spec_names": spec_names_ar,
-            "num_bins": model.inten_buckets.shape[-1],
-            "upper_limit": 1500,
-            "sparse_out": False,
-        }
-        out_file = Path(kwargs["save_dir"]) / "binned_preds.p"
-        with open(out_file, "wb") as fp:
-            pickle.dump(output, fp)
+        h5 = common.HDF5Dataset(Path(kwargs["save_dir"]) / "binned_preds.hdf5", mode='w')
+        h5.attrs['num_bins'] = model.inten_buckets.shape[-1]
+        h5.attrs['upper_limit'] = 1500
+        h5.attrs['sparse_out'] = False
+        for output_obj in pred_list:
+            spec_name = output_obj["spec_name"]
+            smi = output_obj["smiles"]
+            inchikey = common.inchikey_from_smiles(smi)
+            collision_energy = output_obj["collision_energy"]
+            output_spec = output_obj["output_spec"]
+            h5_name = f'pred_{spec_name}/ikey {inchikey}/collision {collision_energy}'
+            h5.write_data(h5_name + '/spec', output_spec)
+            h5.update_attr(h5_name, {'smiles': smi, 'ikey': inchikey, 'spec_name': spec_name})
+        h5.close()
+
+        # spec_names_ar = [str(i["spec_name"]) for i in pred_list]
+        # smiles_ar = [str(i["smiles"]) for i in pred_list]
+        # inchikeys = [common.inchikey_from_smiles(i) for i in smiles_ar]
+        # preds = np.vstack([i["output_spec"] for i in pred_list])
+        # output = {
+        #     "preds": preds,
+        #     "smiles": smiles_ar,
+        #     "ikeys": inchikeys,
+        #     "spec_names": spec_names_ar,
+        #     "num_bins": model.inten_buckets.shape[-1],
+        #     "upper_limit": 1500,
+        #     "sparse_out": False,
+        # }
+        # out_file = Path(kwargs["save_dir"]) / "binned_preds.p"
+        # with open(out_file, "wb") as fp:
+        #     pickle.dump(output, fp)
     else:
         raise NotImplementedError()
         # Process each spec

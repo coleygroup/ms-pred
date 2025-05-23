@@ -6,18 +6,18 @@ import argparse
 num_workers = 32
 python_file = "src/ms_pred/graff_ms/predict.py"
 test_entries = [
-    {"test_dataset": "nist20", "dataset": "nist20", "split": "split_1", "folder": "split_1_rnd1"},
-    {"test_dataset": "nist20" , "dataset": "nist20", "split": "split_1", "folder": "split_1_rnd2"},
-    {"test_dataset": "nist20" , "dataset": "nist20", "split": "split_1", "folder": "split_1_rnd3"},
-
-    {"test_dataset": "nist20", "dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1"},
-    {"test_dataset": "canopus_train_public", "dataset": "canopus_train_public", "split": "split_1", "folder": "split_1_rnd1"},
-    {"test_dataset": "canopus_train_public", "dataset": "canopus_train_public", "split": "split_1", "folder": "split_1_rnd2"},
-    {"test_dataset": "canopus_train_public", "dataset": "canopus_train_public", "split": "split_1", "folder": "split_1_rnd3"},
-    #{"test_dataset": "casmi22", "dataset": "canopus_train_public", "split": "all_split", "folder": "split_1_rnd1"},
+    {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd1"},
+    {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd2"},
+    {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd3"},
+    {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd1"},
+    {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd2"},
+    {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd3"},
+    # {"dataset": "canopus_train_public", "split": "split_1", "folder": "split_1_rnd1"},
+    # {"dataset": "canopus_train_public", "split": "split_1", "folder": "split_1_rnd2"},
+    # {"dataset": "canopus_train_public", "split": "split_1", "folder": "split_1_rnd3"},
 ]
 
-devices = ",".join(["2"])
+devices = ",".join(["0"])
 
 for test_entry in test_entries:
     split = test_entry['split']
@@ -48,13 +48,13 @@ for test_entry in test_entries:
     print(cmd + "\n")
     subprocess.run(cmd, shell=True)
 
-    out_binned = save_dir / "binned_preds.p"
+    out_binned = save_dir / "binned_preds.hdf5"
     eval_cmd = f"""python analysis/spec_pred_eval.py \\
     --binned-pred-file {out_binned} \\
     --max-peaks 100 \\
     --min-inten 0 \\
-    --formula-dir-name no_subform \\
-    --dataset {test_dataset_name}  \\
+    --formula-dir-name no_subform.hdf5 \\
+    --dataset {dataset_name}  \\
     """
     print(eval_cmd)
     subprocess.run(eval_cmd, shell=True)

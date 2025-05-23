@@ -6,6 +6,8 @@ import pytorch_lightning as pl
 import torch.nn as nn
 import torch_scatter as ts
 import dgl.nn as dgl_nn
+import pygmtools as pygm
+import functools
 
 
 import ms_pred.common as common
@@ -36,10 +38,16 @@ class IntenGNN(pl.LightningModule):
         root_encode: str = "gnn",
         inject_early: bool = False,
         warmup: int = 1000,
-        embed_adduct=False,
+        embed_adduct: bool = False,
+        embed_collision: bool = False,
+        embed_elem_group: bool = False,
+        include_unshifted_mz: bool = False,
         binned_targs: bool = True,
         encode_forms: bool = False,
         add_hs: bool = False,
+        sk_tau: float = 0.01,
+        contr_weight: float = 1.,
+        ppm_tol: float = 20,
         **kwargs,
     ):
         super().__init__()
@@ -50,12 +58,17 @@ class IntenGNN(pl.LightningModule):
         self.pool_op = pool_op
         self.inject_early = inject_early
         self.embed_adduct = embed_adduct
+        self.embed_collision = embed_collision
+        self.embed_elem_group = embed_elem_group
+        self.include_unshifted_mz = include_unshifted_mz
         self.binned_targs = binned_targs
         self.encode_forms = encode_forms
         self.add_hs = add_hs
+        self.sk_tau = sk_tau
+        self.contr_weight = contr_weight
 
         self.tree_processor = dag_data.TreeProcessor(
-            root_encode=root_encode, pe_embed_k=pe_embed_k, add_hs=add_hs
+            root_encode=root_encode, pe_embed_k=pe_embed_k, add_hs=add_hs, embed_elem_group=self.embed_elem_group,
         )
 
         self.formula_in_dim = 0
@@ -95,11 +108,44 @@ class IntenGNN(pl.LightningModule):
 
         adduct_shift = 0
         if self.embed_adduct:
-            adduct_types = len(common.ion2onehot_pos)
-            onehot = torch.eye(adduct_types)
-            self.adduct_embedder = nn.Parameter(onehot.float())
-            self.adduct_embedder.requires_grad = False
-            adduct_shift = adduct_types
+            adduct_types = len(set(common.ion2onehot_pos.values()))
+            onehot_types = torch.eye(adduct_types)
+            if self.embed_elem_group:
+                adduct_modes = len(set([j for i in common.ion_pos2extra_multihot.values() for j in i]))
+                multihot_modes = torch.zeros((adduct_types, adduct_modes))
+                for i in range(adduct_types):
+                    for j in common.ion_pos2extra_multihot[i]:
+                        multihot_modes[i, j] = 1
+                adduct_embedder = torch.cat((onehot_types, multihot_modes), dim=-1)
+                self.adduct_embedder = nn.Parameter(adduct_embedder.float())
+                self.adduct_embedder.requires_grad = False
+                adduct_shift = adduct_types + adduct_modes
+            else:
+                self.adduct_embedder = nn.Parameter(onehot_types.float())
+                self.adduct_embedder.requires_grad = False
+                adduct_shift = adduct_types
+
+        collision_shift = 0
+        if self.embed_collision:
+            pe_dim = common.COLLISION_PE_DIM
+            pe_scalar = common.COLLISION_PE_SCALAR
+            pe_power =  2 * torch.arange(pe_dim // 2) / pe_dim
+            self.collision_embedder_denominators = nn.Parameter(torch.pow(pe_scalar, pe_power))
+            self.collision_embedder_denominators.requires_grad = False
+            collision_shift = pe_dim
+
+            # Not used: Compute the merged collision embedding as the mean of all energies 0 - 100 eV
+            # collision_eng_steps = torch.arange(0, 100, 0.01)
+            # self.collision_embed_merged = nn.Parameter(torch.cat(
+            #     (torch.sin(collision_eng_steps.unsqueeze(1) / self.collision_embedder_denominators.unsqueeze(0)),
+            #      torch.cos(collision_eng_steps.unsqueeze(1) / self.collision_embedder_denominators.unsqueeze(0))),
+            #     dim=1
+            # ).mean(dim=0))
+            # self.collision_embed_merged.requires_grad = False
+
+            # All-zero for collision == nan
+            self.collision_embed_merged = nn.Parameter(torch.zeros(pe_dim))
+            self.collision_embed_merged.requires_grad = False
 
         # Define network
         self.gnn = nn_utils.MoleculeGNN(
@@ -107,7 +153,7 @@ class IntenGNN(pl.LightningModule):
             num_step_message_passing=self.gnn_layers,
             set_transform_layers=self.set_layers,
             mpnn_type=self.mpnn_type,
-            gnn_node_feats=node_feats + adduct_shift,
+            gnn_node_feats=node_feats + adduct_shift + collision_shift,
             gnn_edge_feats=edge_feats,
             dropout=self.dropout,
         )
@@ -159,21 +205,33 @@ class IntenGNN(pl.LightningModule):
         )
         self.trans_layers = nn_utils.get_clones(trans_layer, self.frag_set_layers)
 
+        self.ppm_tol = ppm_tol
+        self.mass_tol = self.ppm_tol * 1e-6
         self.loss_fn_name = loss_fn
-        if loss_fn == "mse":
-            raise NotImplementedError()
-        elif loss_fn == "cosine":
+        self.cos_fn = nn.CosineSimilarity()
+        if loss_fn == "cosine":
             self.loss_fn = self.cos_loss
-            self.cos_fn = nn.CosineSimilarity()
+            self.output_activations = [nn.Sigmoid()]
+        elif loss_fn == "entropy":
+            self.loss_fn = self.entropy_loss
+            self.output_activations = [nn.Sigmoid()]
+        elif loss_fn == "weighted_entropy":
+            self.loss_fn = functools.partial(self.entropy_loss, weighted=True)
             self.output_activations = [nn.Sigmoid()]
         else:
             raise NotImplementedError()
 
         self.num_outputs = len(self.output_activations)
         self.output_size = run_magma.FRAGMENT_ENGINE_PARAMS["max_broken_bonds"] * 2 + 1
-        self.output_map = nn.Linear(
-            self.hidden_size, self.num_outputs * self.output_size
-        )
+        if self.include_unshifted_mz:
+            self.output_map = nn.Linear(
+                self.hidden_size, self.num_outputs * self.output_size * 2
+                # output_size dim for adduct mass shift & output_size dim for no mass shift
+            )
+        else:
+            self.output_map = nn.Linear(
+                self.hidden_size, self.num_outputs * self.output_size
+            )
 
         # Define map from output layer to attn
         self.isomer_attn_out = copy.deepcopy(self.output_map)
@@ -192,7 +250,7 @@ class IntenGNN(pl.LightningModule):
 
         self.sigmoid = nn.Sigmoid()
 
-    def cos_loss(self, pred, targ):
+    def cos_loss(self, pred, targ, parent_mass=None, use_hun=False):
         """cos_loss.
 
         Args:
@@ -200,9 +258,82 @@ class IntenGNN(pl.LightningModule):
             targ:
         """
         if not self.binned_targs:
-            raise ValueError()
-        loss = 1 - self.cos_fn(pred, targ)
-        loss = loss.mean()
+            tol = parent_mass * self.mass_tol
+            mask = torch.logical_and(
+                torch.abs(pred[:, :, None, 0] - targ[:, None, :, 0]) < tol[:, None, None],
+                targ[:, None, :, 0] > 0
+            )
+            pred_norm = pred[:, :, 1].norm(dim=-1)
+            targ_norm = targ[:, :, 1].norm(dim=-1)
+            score = pred[:, :, None, 1] * targ[:, None, :, 1] / (pred_norm[:, None, None] * targ_norm[:, None, None])
+            score = torch.where(mask, score, torch.zeros_like(score))
+            target_nums = torch.sum(targ[:, :, 1] != 0, dim=-1)
+            if use_hun:
+                assign = pygm.hungarian(score, n2=target_nums, backend='pytorch')
+            else:
+                _score = torch.where(mask, score, torch.full_like(score, -1e3))
+                assign = pygm.sinkhorn(_score, n2=target_nums, tau=self.sk_tau, dummy_row=True, max_iter=20, backend='pytorch')
+            loss = 1 - torch.sum(assign * score, dim=(1, 2))
+        else:
+            loss = 1 - self.cos_fn(pred, targ)
+        return {"loss": loss}
+
+    def entropy_loss(self, pred, targ, parent_mass=None, use_hun=False, weighted=False):
+        """entropy_loss.
+
+        Args:
+            pred:
+            targ:
+        """
+        def norm_peaks(prob):
+            return prob / (prob.sum(dim=-1, keepdim=True) + 1e-22)
+        def entropy(prob):
+            assert torch.all(torch.abs(prob.sum(dim=-1) - 1) < 1e-3), prob.sum(dim=-1)
+            return -torch.sum(prob * torch.log(prob + 1e-22), dim=-1) / 1.3862943611198906 # norm by log(4)
+
+        if not self.binned_targs:
+            if weighted:
+                raise NotImplementedError
+            tol = parent_mass * self.mass_tol
+            mask = torch.logical_and(
+                torch.abs(pred[:, :, None, 0] - targ[:, None, :, 0]) < tol[:, None, None],
+                targ[:, None, :, 0] > 0
+            )
+            score = pred[:, :, None, 1] * targ[:, None, :, 1]
+            score = torch.where(mask, score, torch.zeros_like(score))
+            target_nums = torch.sum(targ[:, :, 1] != 0, dim=-1)
+            if use_hun:
+                assign = pygm.hungarian(score, n2=target_nums, backend='pytorch')
+            else:
+                _score = torch.where(mask, score, torch.full_like(score, -1e3))
+                assign = pygm.sinkhorn(_score, n2=target_nums, tau=self.sk_tau, dummy_row=True, max_iter=20, backend='pytorch')
+            pred_norm = norm_peaks(pred[:, :, 1])
+            targ_norm = norm_peaks(targ[:, :, 1])
+            merged_peaks = torch.cat((
+                torch.bmm(assign, targ_norm.unsueeze(-1)).squeeze(-1) + pred_norm, # usually n_pred > n_targ
+                (1 - assign.sum(dim=1)) * targ_norm,
+            ), dim=1)
+            entropy_mix = entropy(merged_peaks)
+            entropy_pred = entropy(pred_norm)
+            entropy_targ = entropy(targ_norm)
+            loss = 2 * entropy_mix - entropy_pred - entropy_targ
+
+        else:
+            pred_norm = norm_peaks(pred)
+            targ_norm = norm_peaks(targ)
+            if weighted:
+                def reweight_spec(norm_spec):
+                    entropy_spec = entropy(norm_spec)
+                    weight = torch.where(entropy_spec < 3, 0.25 + 0.25 * entropy_spec, torch.ones_like(entropy_spec))
+                    weighted_spec = norm_spec ** weight.unsqueeze(-1)
+                    weighted_spec = norm_peaks(weighted_spec)
+                    return weighted_spec
+                pred_norm = reweight_spec(pred_norm)
+                targ_norm = reweight_spec(targ_norm)
+            entropy_pred = entropy(pred_norm)
+            entropy_targ = entropy(targ_norm)
+            entropy_mix = entropy((pred_norm + targ_norm) / 2)
+            loss = 2 * entropy_mix - entropy_pred - entropy_targ
         return {"loss": loss}
 
     def predict(
@@ -213,6 +344,8 @@ class IntenGNN(pl.LightningModule):
         num_frags,
         max_breaks,
         adducts,
+        collision_engs,
+        precursor_mzs,
         max_add_hs=None,
         max_remove_hs=None,
         masses=None,
@@ -229,6 +362,8 @@ class IntenGNN(pl.LightningModule):
             num_frags (_type_): _description_
             max_breaks (_type_): _description_
             adducts (_type_): _description_
+            collision_engs (_type_): _description_
+            precursor_mzs (_type_): _description_
             max_add_hs (_type_, optional): _description_. Defaults to None.
             max_remove_hs (_type_, optional): _description_. Defaults to None.
             masses (_type_, optional): _description_. Defaults to None.
@@ -249,6 +384,8 @@ class IntenGNN(pl.LightningModule):
             ind_maps,
             num_frags,
             adducts=adducts,
+            collision_engs=collision_engs,
+            precursor_mzs=precursor_mzs,
             broken=max_breaks,
             max_add_hs=max_add_hs,
             max_remove_hs=max_remove_hs,
@@ -257,7 +394,7 @@ class IntenGNN(pl.LightningModule):
             frag_forms=frag_forms,
         )
 
-        if self.loss_fn_name not in ["mse", "cosine"]:
+        if self.loss_fn_name not in ["cosine", "entropy", "weighted_entropy"]:
             raise NotImplementedError()
 
         output = out["output"][
@@ -289,6 +426,8 @@ class IntenGNN(pl.LightningModule):
         ind_maps,
         num_frags,
         broken,
+        collision_engs,
+        precursor_mzs,
         adducts,
         max_add_hs=None,
         max_remove_hs=None,
@@ -305,6 +444,8 @@ class IntenGNN(pl.LightningModule):
             num_frags (_type_): _description_
             broken (_type_): _description_
             adducts (_type_): _description_
+            collision_engs (_type_): _description_
+            precursor_mzs (_type_): _description_
             max_add_hs (_type_, optional): _description_. Defaults to None.
             max_remove_hs (_type_, optional): _description_. Defaults to None.
             masses (_type_, optional): _description_. Defaults to None.
@@ -319,6 +460,9 @@ class IntenGNN(pl.LightningModule):
         """
         device = num_frags.device
 
+        if not self.include_unshifted_mz:
+            masses = masses[:, :, :1, :].contiguous()  # only keep m/z with adduct shift
+
         # if root fingerprints:
         embed_adducts = self.adduct_embedder[adducts.long()]
         if self.root_encode == "fp":
@@ -332,6 +476,21 @@ class IntenGNN(pl.LightningModule):
                     )
                     ndata = root_repr.ndata["h"]
                     ndata = torch.cat([ndata, embed_adducts_expand], -1)
+                    root_repr.ndata["h"] = ndata
+                if self.embed_collision:
+                    embed_collision = torch.cat(
+                        (torch.sin(collision_engs.unsqueeze(1) / self.collision_embedder_denominators.unsqueeze(0)),
+                         torch.cos(collision_engs.unsqueeze(1) / self.collision_embedder_denominators.unsqueeze(0))),
+                        dim=1
+                    )
+                    embed_collision = torch.where(  # handle entries without collision energy (== nan)
+                        torch.isnan(embed_collision), self.collision_embed_merged.unsqueeze(0), embed_collision
+                    )
+                    embed_collision_expand = embed_collision.repeat_interleave(
+                        root_repr.batch_num_nodes(), 0
+                    )
+                    ndata = root_repr.ndata["h"]
+                    ndata = torch.cat([ndata, embed_collision_expand], -1)
                     root_repr.ndata["h"] = ndata
                 root_embeddings = self.root_module(root_repr)
                 root_embeddings = self.pool(root_repr, root_embeddings)
@@ -356,6 +515,13 @@ class IntenGNN(pl.LightningModule):
                 adducts_mapped, graphs.batch_num_nodes(), dim=0
             )
             concat_list.append(adducts_exp)
+
+        if self.embed_collision:
+            collision_mapped = embed_collision[ind_maps]
+            collision_exp = torch.repeat_interleave(
+                collision_mapped, graphs.batch_num_nodes(), dim=0
+            )
+            concat_list.append(collision_exp)
 
         with graphs.local_scope():
             graphs.ndata["h"] = torch.cat(concat_list, -1).float()
@@ -416,43 +582,48 @@ class IntenGNN(pl.LightningModule):
 
         # B x Length x Mass shifts
         valid_pos = torch.logical_and(ub_mask, lb_mask)
+        valid_pos = torch.logical_and(valid_pos, ~attn_mask[:, :, None])
 
-        # B x Length x outputs x Mass shift
-        valid_pos = valid_pos[:, :, None, :].expand(
-            batch_size, max_frags, self.num_outputs, self.output_size
+        if self.include_unshifted_mz:
+            mz_groups = 2
+        else:
+            mz_groups = 1
+
+        # B x Length x outputs x 2 x Mass shift
+        valid_pos = valid_pos[:, :, None, None, :].expand(
+            batch_size, max_frags, self.num_outputs, mz_groups, self.output_size
         )
         # B x L x Output
         output = self.output_map(hidden)
         attn_weights = self.isomer_attn_out(hidden)
 
-        # B x L x Out x Mass shifts
-        output = output.reshape(batch_size, max_frags, self.num_outputs, -1)
-        attn_weights = attn_weights.reshape(batch_size, max_frags, self.num_outputs, -1)
+        # B x L x Out x 2 x Mass shifts
+        output = output.reshape(batch_size, max_frags, self.num_outputs, mz_groups, -1)
+        attn_weights = attn_weights.reshape(batch_size, max_frags, self.num_outputs, mz_groups, -1)
 
         # Mask attn weights
-        # attn_weights.masked_fill_(~valid_pos, -float("inf"))
         attn_weights.masked_fill_(~valid_pos, -99999)  # -float("inf"))
 
-        # B x Out x L x Mass shifts
+        # B x Out x L x 2 x Mass shifts
         output = output.transpose(1, 2)
         attn_weights = attn_weights.transpose(1, 2)
         valid_pos_binned = valid_pos.transpose(1, 2)
 
-        # Calc inverse indices => B x Out x L x shift
-        inverse_indices = torch.bucketize(masses, self.inten_buckets, right=False)
+        # Calc inverse indices => B x Out x L x 2 x shift
+        inverse_indices = torch.clamp(torch.bucketize(masses, self.inten_buckets, right=False), max=len(self.inten_buckets) - 1)
         inverse_indices = inverse_indices[:, None, :, :].expand(attn_weights.shape)
 
-        # B x Out x (L * Mass shifts)
+        # B x Out x (L * 2 * Mass shifts)
         attn_weights = attn_weights.reshape(batch_size, self.num_outputs, -1)
         output = output.reshape(batch_size, self.num_outputs, -1)
         inverse_indices = inverse_indices.reshape(batch_size, self.num_outputs, -1)
         valid_pos_binned = valid_pos.reshape(batch_size, self.num_outputs, -1)
 
-        # B x Outs x ( L * mass shifts )
+        # B x Outs x ( L * 2 * mass shifts )
         pool_weights = ts.scatter_softmax(attn_weights, index=inverse_indices, dim=-1)
         weighted_out = pool_weights * output
 
-        # B x Outs x (UNIQUE(L * mass shifts))
+        # B x Outs x (UNIQUE(L * 2 * mass shifts))
         output_binned = ts.scatter_add(
             weighted_out,
             index=inverse_indices,
@@ -460,13 +631,13 @@ class IntenGNN(pl.LightningModule):
             dim_size=self.inten_buckets.shape[-1],
         )
 
-        output = output.reshape(batch_size, max_frags, self.num_outputs, -1)
+        # B x L x Outs x (2 * mass shifts)
         pool_weights_reshaped = pool_weights.reshape(
-            batch_size, max_frags, self.num_outputs, -1
-        )
+            batch_size, self.num_outputs, max_frags, -1
+        ).transpose(1, 2)
         inverse_indices_reshaped = inverse_indices.reshape(
-            batch_size, max_frags, self.num_outputs, -1
-        )
+            batch_size, self.num_outputs, max_frags, -1
+        ).transpose(1, 2)
 
         # B x Outs x binned
         valid_pos_binned = ts.scatter_max(
@@ -488,7 +659,7 @@ class IntenGNN(pl.LightningModule):
 
         # Index into output binned using inverse_indices_reshaped
         # Revert the binned output back to frags for attribution
-        # B x Out x L x Mass shifts
+        # B x Out x (L * 2 * Mass shifts)
         inverse_indices_reshaped_temp = inverse_indices_reshaped.transpose(
             1, 2
         ).reshape(batch_size, self.num_outputs, -1)
@@ -510,17 +681,60 @@ class IntenGNN(pl.LightningModule):
             batch["num_frags"],
             broken=batch["broken_bonds"],
             adducts=batch["adducts"],
+            collision_engs=batch["collision_engs"],
+            precursor_mzs=batch["precursor_mzs"],
             max_remove_hs=batch["max_remove_hs"],
             max_add_hs=batch["max_add_hs"],
             masses=batch["masses"],
             root_forms=batch["root_form_vecs"],
             frag_forms=batch["frag_form_vecs"],
         )
-        pred_inten = pred_obj["output_binned"]
-        pred_inten = pred_inten[:, 0, :]
+        if self.binned_targs:
+            pred_inten = pred_obj["output_binned"]
+            pred_inten = pred_inten[:, 0, :]
+        else:
+            pred_inten = pred_obj["output"]
+            pred_inten = pred_inten[:, :, 0, :]
+            pred_inten = torch.stack((batch["masses"], pred_inten), dim=-1)
+            pred_inten = pred_inten.reshape(pred_inten.shape[0], -1, 2)  # B x (Out * Mass shifts) x 2
         batch_size = len(batch["names"])
 
-        loss = self.loss_fn(pred_inten, batch["inten_targs"])
+        if name == 'train':
+            loss_fn = self.loss_fn
+        else:
+            loss_fn = functools.partial(self.loss_fn, use_hun=True)  # use hungarian in val and test
+
+        if 'is_decoy' in batch and 'mol_num' in batch:  # data with decoys
+            true_data_inds = batch["is_decoy"] == 0
+            num_true_data = torch.sum(true_data_inds)
+
+            # the real spectrum loss (cosine or entropy)
+            spec_loss = loss_fn(pred_inten[true_data_inds], batch["inten_targs"][true_data_inds],
+                               parent_mass=batch["precursor_mzs"][true_data_inds]
+            )['loss']
+
+            # contrastive ranking loss cosine loss to decoys
+            decoy_spec_loss = loss_fn(pred_inten,
+                                      batch["inten_targs"][true_data_inds].repeat_interleave(batch['mol_num'], dim=0),
+                                      parent_mass=batch["precursor_mzs"]
+                                      )['loss']
+            split_end = torch.cumsum(batch['mol_num'], dim=0)
+            split_start = split_end - batch['mol_num']
+            decoy_spec_loss = [decoy_spec_loss[s:e] for s, e in zip(split_start, split_end)]
+            decoy_spec_loss = torch.nn.utils.rnn.pad_sequence(decoy_spec_loss, batch_first=True, padding_value=1) # cos_loss <=1 by definition
+            decoy_spec_loss_sorted = torch.sort(decoy_spec_loss, dim=-1).values.detach()
+            ranking_dist = torch.abs(decoy_spec_loss[:, :, None] - decoy_spec_loss_sorted[:, None, :])
+            top1_prob = pygm.sinkhorn(-ranking_dist, n1=batch["mol_num"], n2=batch["mol_num"], tau=self.sk_tau, backend='pytorch')[:, 0, 0]
+            contr_loss = torch.relu(-torch.log(top1_prob + 0.5))  # shift & cut ce loss for probs > 0.5
+
+            loss = {
+                "spec_loss": spec_loss,
+                "contr_loss": contr_loss,
+                "loss": spec_loss + contr_loss * self.contr_weight,
+            }
+        else:
+            loss = loss_fn(pred_inten, batch["inten_targs"], parent_mass=batch["precursor_mzs"])
+        loss = {k: v.mean() for k, v in loss.items()}
         self.log(
             f"{name}_loss", loss["loss"].item(), batch_size=batch_size, on_epoch=True
         )

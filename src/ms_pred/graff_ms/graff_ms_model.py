@@ -41,6 +41,7 @@ class GraffGNN(pl.LightningModule):
         num_atom_feats: int = 86,
         num_bond_feats: int = 5,
         embed_adduct: bool = False,
+        embed_collision_energy: bool = False,
         warmup: int = 1000,
         num_fixed_forms: int = 10000,
         **kwargs,
@@ -66,6 +67,7 @@ class GraffGNN(pl.LightningModule):
             num_atom_feats (int, optional): _description_. Defaults to 86.
             num_bond_feats (int, optional): _description_. Defaults to 5.
             embed_adduct (bool, optional): _description_. Defaults to False.
+            embed_collision_energy (bool, optional): _description_. Defaults to False.
             warmup (int, optional): _description_. Defaults to 1000.
             num_fixed_forms (int, optional): _description_. Defaults to 10000.
 
@@ -94,6 +96,8 @@ class GraffGNN(pl.LightningModule):
         self.upper_limit = upper_limit
         self.weight_decay = weight_decay
         self.embed_adduct = embed_adduct
+        self.embed_collision_energy = embed_collision_energy
+
         adduct_shift = 0
         if self.embed_adduct:
             adduct_types = len(common.ion2onehot_pos)
@@ -101,6 +105,10 @@ class GraffGNN(pl.LightningModule):
             self.adduct_embedder = nn.Parameter(onehot.float())
             self.adduct_embedder.requires_grad = False
             adduct_shift = adduct_types
+
+        ce_shift = 0
+        if self.embed_collision_energy:
+            ce_shift = 1
 
         # Get bin masses
         buckets = torch.DoubleTensor(np.linspace(0, 1500, 15000))
@@ -130,7 +138,7 @@ class GraffGNN(pl.LightningModule):
             num_step_message_passing=self.layers,
             set_transform_layers=self.set_layers,
             mpnn_type=self.mpnn_type,
-            gnn_node_feats=num_atom_feats + adduct_shift,
+            gnn_node_feats=num_atom_feats + adduct_shift + ce_shift,
             gnn_edge_feats=num_bond_feats,
             dropout=dropout,
         )
@@ -149,6 +157,10 @@ class GraffGNN(pl.LightningModule):
         elif loss_fn == "cosine":
             self.loss_fn = self.cos_loss
             self.cos_fn = nn.CosineSimilarity()
+            self.num_outputs = 1
+            self.output_activations = [nn.Sigmoid()]
+        elif loss_fn == 'entropy':
+            self.loss_fn = self.entropy_loss
             self.num_outputs = 1
             self.output_activations = [nn.Sigmoid()]
         else:
@@ -187,16 +199,40 @@ class GraffGNN(pl.LightningModule):
         mse = mse.mean()
         return {"loss": mse}
 
-    def predict(self, graphs, full_forms, adducts=None) -> dict:
+    def entropy_loss(self, pred, targ):
+        """entropy_loss.
+
+        Args:
+            pred:
+            targ:
+        """
+        pred = pred[:, 0, :]
+
+        def norm_peaks(prob):
+            return prob / (prob.sum(dim=-1, keepdim=True) + 1e-22)
+        def entropy(prob):
+            assert torch.all(torch.abs(prob.sum(dim=-1) - 1) < 1e-3), prob.sum(dim=-1)
+            return -torch.sum(prob * torch.log(prob + 1e-22), dim=-1) / 1.3862943611198906 # norm by log(4)
+
+        pred_norm = norm_peaks(pred)
+        targ_norm = norm_peaks(targ)
+        entropy_pred = entropy(pred_norm)
+        entropy_targ = entropy(targ_norm)
+        entropy_mix = entropy((pred_norm + targ_norm) / 2)
+        loss = 2 * entropy_mix - entropy_pred - entropy_targ
+        loss = loss.mean()
+        return {"loss": loss}
+
+    def predict(self, graphs, full_forms, adducts=None, nce=None) -> dict:
         """predict."""
-        out = self.forward(graphs, full_forms, adducts)
+        out = self.forward(graphs, full_forms, adducts, nce)
         if self.loss_fn_name in ["mse", "cosine"]:
             out_dict = {"spec": out[:, 0, :]}
         else:
             raise NotImplementedError()
         return out_dict
 
-    def forward(self, graphs, full_forms, adducts):
+    def forward(self, graphs, full_forms, adducts, nces):
         """predict spec"""
 
         if self.embed_adduct:
@@ -206,6 +242,11 @@ class GraffGNN(pl.LightningModule):
                 graphs.batch_num_nodes(), 0
             )
             ndata = torch.cat([ndata, embed_adducts_expand], -1)
+            graphs.ndata["h"] = ndata
+
+        if self.embed_collision_energy:
+            ndata = graphs.ndata["h"]
+            ndata = torch.cat([ndata, nces.repeat_interleave(graphs.batch_num_nodes(), 0).unsqueeze(-1)], -1)
             graphs.ndata["h"] = ndata
 
         output = self.gnn(graphs)
@@ -266,9 +307,14 @@ class GraffGNN(pl.LightningModule):
         return output
 
     def _common_step(self, batch, name="train"):
-        pred_spec = self.forward(batch["graphs"], batch["full_forms"], batch["adducts"])
+        pred_spec = self.forward(batch["graphs"], batch["full_forms"], batch["adducts"], batch["nces"])
         loss_dict = self.loss_fn(pred_spec, batch["spectra"])
         self.log(f"{name}_loss", loss_dict.get("loss"))
+        if name == 'test':
+            loss_dict.update({
+                'cos_loss': self.cos_loss(pred_spec, batch["spectra"])['loss'],
+                'entr_loss': self.entropy_loss(pred_spec, batch["spectra"])['loss'],
+            })
         for k, v in loss_dict.items():
             if k != "loss":
                 self.log(f"{name}_aux_{k}", v.item())

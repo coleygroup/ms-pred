@@ -43,8 +43,9 @@ universal_args:
 
   weight-decay: [1e-7]
 
-  form-dir-name: ['no_subform']
+  form-dir-name: ['no_subform.hdf5']
   embed-adduct: [true]
+  embed-collision-energy: [false]
 
 iterative_args:
   -  split-name: [split_1.tsv]

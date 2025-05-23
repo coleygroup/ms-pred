@@ -4,13 +4,25 @@ import re
 import numpy as np
 import pandas as pd
 from functools import reduce
+from typing import List
+import logging
 
 import torch
 from rdkit import Chem
 from rdkit.Chem import Atom
 from rdkit.Chem.rdMolDescriptors import CalcMolFormula
 from rdkit.Chem.Descriptors import ExactMolWt
-from rdkit.Chem.MolStandardize import rdMolStandardize
+try:
+    from rdkit.Chem.MolStandardize.tautomer import TautomerCanonicalizer, TautomerTransform
+    _RD_TAUTOMER_CANONICALIZER = 'v1'
+    _TAUTOMER_TRANSFORMS = (
+        TautomerTransform('1,3 heteroatom H shift',
+                          '[#7,S,O,Se,Te;!H0]-[#7X2,#6,#15]=[#7,#16,#8,Se,Te]'),
+        TautomerTransform('1,3 (thio)keto/enol r', '[O,S,Se,Te;X2!H0]-[C]=[C]'),
+    )
+except ModuleNotFoundError:
+    from rdkit.Chem.MolStandardize.rdMolStandardize import TautomerEnumerator  # newer rdkit
+    _RD_TAUTOMER_CANONICALIZER = 'v2'
 
 P_TBL = Chem.GetPeriodicTable()
 
@@ -40,6 +52,28 @@ VALID_ELEMENTS = [
     "K",
 ]
 
+ELEMENT_TO_GROUP = {
+    "C": 4,  # group 5
+    "N": 3,  # group 4
+    "P": 3,
+    "O": 5,  # group 6
+    "S": 5,
+    "Si": 4,
+    "I": 6,  # group 7 / halogens
+    "H": 0,
+    "Cl": 6,
+    "F": 6,
+    "Br": 6,
+    "B": 2,  # group 3
+    "Se": 5,
+    "Fe": 7,  # transition metals
+    "Co": 7,
+    "As": 3,
+    "Na": 1,  # alkali metals
+    "K": 1,
+}
+ELEMENT_GROUP_DIM = len(set(ELEMENT_TO_GROUP.values()))
+ELEMENT_GROUP_VECTORS = np.eye(ELEMENT_GROUP_DIM)
 
 # Set the exact molecular weight?
 # Use this to define an element priority queue
@@ -66,6 +100,9 @@ ELEMENT_TO_MASS = dict(zip(VALID_ELEMENTS, CHEM_MASSES.squeeze()))
 ELEMENT_DIM_MASS = len(ELEMENT_VECTORS_MASS[0])
 ELEMENT_DIM = len(ELEMENT_VECTORS[0])
 
+COLLISION_PE_DIM = 64
+COLLISION_PE_SCALAR = 10000
+
 # Reasonable normalization vector for elements
 # Estimated by max counts (+ 1 when zero)
 NORM_VEC_MASS = np.array(
@@ -88,9 +125,11 @@ MAX_H = 6
 element_to_ind = dict(zip(VALID_ELEMENTS, np.arange(len(VALID_ELEMENTS))))
 element_to_position = dict(zip(VALID_ELEMENTS, ELEMENT_VECTORS))
 element_to_position_mass = dict(zip(VALID_ELEMENTS, ELEMENT_VECTORS_MASS))
+element_to_group = {k: ELEMENT_GROUP_VECTORS[v] for k, v in ELEMENT_TO_GROUP.items()}
 
 # Map ion to adduct mass, don't use electron
 ion2mass = {
+    # positive mode
     "[M+H]+": ELEMENT_TO_MASS["H"] - ELECTRON_MASS,
     "[M+Na]+": ELEMENT_TO_MASS["Na"] - ELECTRON_MASS,
     "[M+K]+": ELEMENT_TO_MASS["K"] - ELECTRON_MASS,
@@ -101,7 +140,26 @@ ion2mass = {
     "[M]+": 0 - ELECTRON_MASS,
     "[M-H4O2+H]+": -ELEMENT_TO_MASS["O"] * 2 - ELEMENT_TO_MASS["H"] * 3 - ELECTRON_MASS,
     "[M+H-2H2O]+": -ELEMENT_TO_MASS["O"] * 2 - ELEMENT_TO_MASS["H"] * 3 - ELECTRON_MASS,
+    # negative mode
+    "[M-H]-": -ELEMENT_TO_MASS["H"] + ELECTRON_MASS,
+    "[M+Cl]-": ELEMENT_TO_MASS["Cl"] + ELECTRON_MASS,
+    "[M-H2O-H]-": -ELEMENT_TO_MASS["O"] - ELEMENT_TO_MASS["H"] * 3 + ELECTRON_MASS,
+    "[M-H-H2O]-": -ELEMENT_TO_MASS["O"] - ELEMENT_TO_MASS["H"] * 3 + ELECTRON_MASS,
+    "[M-H-CO2]-": -ELEMENT_TO_MASS["C"] - ELEMENT_TO_MASS["O"] * 2 - ELEMENT_TO_MASS["H"] + ELECTRON_MASS,
 }
+    # More high probability adducts:
+    #    '[M+H-NH3]+', '[M-H+2Na]+', '[M+CHO2]-', '[M+HCOOH-H]-', '[M+CH3COOH-H]-', '[M+CH3OH-H]-'
+    #    '[M-H+2i]-', '[M+H-CH2O2]+', '[M+H-C2H4O2]+', '[M+H-C4H8]+',
+    #    '[M-2H]2-', '[M+H-3H2O]+', '[M+H-CH4O]+', '[M+H-C2H4]+',
+    #    '[M+2Na-H]+', '[M+H-H2O+2i]+', '[M+H-C2H2O]+', '[M-H-CH3]-',
+    #    '[M+H-CO]+', '[M+H-C3H6]+', '[M+H-C2H6O]+', '[M+H-CH3]+',
+    #    '[M+H-HF]+', '[Cat]+', '[2M-H+2i]-', '[M+H-C6H10O5]+',
+    #    '[M+H-CH5N]+', '[M-H-C6H10O5]-', '[M+H+K]2+', '[M+OH]-',
+    #    '[M+H-Br]+', '[M+H-C2H7N]+', '[M+H-CO2]+', '[M+H+Na]2+',
+    #    '[2M+H+2i]+', '[M+H-HCl]+', '[M+H+4i]+', '[2M-H+4i]-', '[M+2Na]2+',
+    #    '[M+H-CH4O3]+', '[M+H-C6H10]+', '[M+H-HCN]+', '[M-H-CO2+2i]-',
+    #    '[M+K]+', '[M+H-CHNO]+', '[3M+H]+', '[M+H-C2H5N]+', '[M+Na+2i]+',
+    #    '[M+3Na-2H]+'
 
 # Valid adducts
 ion2onehot_pos = {
@@ -115,7 +173,73 @@ ion2onehot_pos = {
     "[M]+": 5,
     "[M-H4O2+H]+": 6,
     "[M+H-2H2O]+": 6,
+    "[M-H]-": 7,
+    "[M+Cl]-": 8,
+    "[M-H2O-H]-": 9,
+    "[M-H-H2O]-": 9,
+    "[M-H-CO2]-": 10,
 }
+
+ion_pos2extra_multihot = {v: set() for v in ion2onehot_pos.values()}
+for k, v in ion2onehot_pos.items():
+    _ion_mode = k[-1]  # '+' or '-'
+    k = k.strip(_ion_mode).strip('[M').strip(']')
+
+    # split string into a list formula differences
+    _ions = []
+    for _, i in enumerate(k.split('+')):
+        if i:
+            if _ != 0:
+                i = '+' + i
+            for __, j in enumerate(i.split('-')):
+                if j:
+                    if __ == 0:
+                        _ions.append(j)
+                    else:
+                        _ions.append('-' + j)
+
+    if _ion_mode == '+':
+        ion_pos2extra_multihot[v].add(0)  # positive mode
+    else:
+        ion_pos2extra_multihot[v].add(1)  # negative mode
+    if '+Na' in _ions or '+K' in _ions:
+        ion_pos2extra_multihot[v].add(2)  # alkali metal
+    if '+H' in _ions:
+        ion_pos2extra_multihot[v].add(3)  # add proton
+    if '-H' in _ions:
+        ion_pos2extra_multihot[v].add(4)  # lose proton
+    if '+Cl' in _ions:
+        ion_pos2extra_multihot[v].add(5)  # halogen
+    if '-H2O' in _ions or '-H4O2' in _ions or '-2H2O' in _ions:
+        ion_pos2extra_multihot[v].add(6)  # lose water
+    if '-CO2' in _ions:
+        ion_pos2extra_multihot[v].add(7)  # lose CO2
+    if '+NH3' in _ions:
+        ion_pos2extra_multihot[v].add(8)  # get NH3
+
+# add equivalent keys: [M]1+ == [M]+, [NH3] == [H3N]
+_ori_ions = list(ion2mass.keys())
+for ion in _ori_ions:
+    adduct, charge = ion.split(']')
+    if not charge[0].isnumeric():
+        eq_ion = adduct + ']1' + charge
+        ion2mass[eq_ion] = ion2mass[ion]
+        if ion in ion2onehot_pos:
+            ion2onehot_pos[eq_ion] = ion2onehot_pos[ion]
+
+_ori_ions = list(ion2mass.keys())
+for ion in _ori_ions:
+    adduct, charge = ion.split(']')
+    if 'H3N' in adduct:
+        eq_ion = ion.replace('H3N', 'NH3')
+        ion2mass[eq_ion] = ion2mass[ion]
+        if ion in ion2onehot_pos:
+            ion2onehot_pos[eq_ion] = ion2onehot_pos[ion]
+
+
+def is_positive_adduct(adduct_str: str) -> bool:
+    """Check the adduct string is positive or negative (return True if positive)"""
+    return adduct_str[-1] == '+'
 
 
 ION_LST = list(ion2onehot_pos.keys())
@@ -292,9 +416,12 @@ def formula_difference(formula_1, formula_2):
     }
 
     for k, v in form_2.items():
-        form_1[k] = form_1[k] - form_2[k]
+        if k in form_1:
+            form_1[k] = form_1[k] - form_2[k]
+        else:
+            form_1[k] = -form_2[k]
 
-    out_formula = "".join([f"{k}{v}" for k, v in form_1.items() if v > 0])
+    out_formula = "".join([f"{k}{v}" for k, v in form_1.items() if v != 0])
     return out_formula
 
 
@@ -304,7 +431,7 @@ def standardize_form(i):
 
 def get_mol_from_structure_string(structure_string, structure_type):
     if structure_type == "InChI":
-        mol = Chem.MolFromInchi(structure_string)
+        mol = canonical_mol_from_inchi(structure_string)
     else:
         mol = Chem.MolFromSmiles(structure_string)
     return mol
@@ -357,6 +484,21 @@ def uncharged_formula(mol, mol_type="mol") -> str:
     return re.findall(r"^([^\+,^\-]*)", chem_formula)[0]
 
 
+def canonical_mol_from_inchi(inchi):
+    """Canonicalize mol after Chem.MolFromInchi
+    Note that this function may be 50 times slower than Chem.MolFromInchi"""
+    mol = Chem.MolFromInchi(inchi)
+    if mol is None:
+        return None
+    if _RD_TAUTOMER_CANONICALIZER == 'v1':
+        _molvs_t = TautomerCanonicalizer(transforms=_TAUTOMER_TRANSFORMS)
+        mol = _molvs_t.canonicalize(mol)
+    else:
+        _te = TautomerEnumerator()
+        mol = _te.Canonicalize(mol)
+    return mol
+
+
 def form_from_smi(smi: str) -> str:
     """form_from_smi.
 
@@ -380,6 +522,32 @@ def form_from_inchi(inchi: str) -> str:
     """
     return uncharged_formula(inchi, mol_type="inchi")
 
+
+def _mol_from_types(mol, mol_type):
+    if mol_type == 'smi':
+        mol = Chem.MolFromSmiles(mol)
+    elif mol_type == 'inchi':
+        mol = canonical_mol_from_inchi(mol)
+    elif mol_type == 'mol':
+        mol = mol
+    else:
+        raise ValueError(f"Unknown mol_type={mol_type}")
+    return mol
+
+def rm_stereo(mol: str, mol_type='smi') -> str:
+    mol = _mol_from_types(mol, mol_type)
+
+    if mol is None:
+        return
+    else:
+        Chem.RemoveStereochemistry(mol)
+
+    if mol_type == 'smi':
+        return Chem.MolToSmiles(mol)
+    elif mol_type == 'inchi':
+        return Chem.MolToInchi(mol)
+    else:
+        return mol
 
 def inchikey_from_smiles(smi: str) -> str:
     """inchikey_from_smiles.
@@ -430,7 +598,7 @@ def smi_inchi_round_mol(smi: str) -> Chem.Mol:
     if inchi is None:
         return None
 
-    mol = Chem.MolFromInchi(inchi)
+    mol = canonical_mol_from_inchi(inchi)
     return mol
 
 
@@ -443,7 +611,7 @@ def smiles_from_inchi(inchi: str) -> str:
     Returns:
         str:
     """
-    mol = Chem.MolFromInchi(inchi)
+    mol = canonical_mol_from_inchi(inchi)
     if mol is None:
         return ""
     else:
@@ -500,3 +668,91 @@ def npclassifier_query(smiles):
     out.raise_for_status()
     out_json = out.json()
     return {ikey: out_json}
+
+
+def get_collision_energy(filename):
+    colli_eng = re.findall('collision +([0-9]+\.?[0-9]*|nan).*', filename)
+    if len(colli_eng) > 1:
+        raise ValueError(f'Multiple collision energies found in {filename}')
+    if len(colli_eng) == 1:
+        colli_eng = colli_eng[0].split()[-1]
+    else:
+        colli_eng = 'nan'
+    return colli_eng
+
+
+def is_charged(mol, mol_type='smi') -> bool:
+    """check if the entire molecule has imbalanced charge"""
+    mol = _mol_from_types(mol, mol_type)
+    return sum(atom.GetFormalCharge() for atom in mol.GetAtoms()) != 0
+
+
+def has_separate_components(mol, mol_type='smi') -> bool:
+    """is salt"""
+    mol = _mol_from_types(mol, mol_type)
+    return len(Chem.GetMolFrags(mol)) > 1
+
+
+def has_isotopes(mol, mol_type='smi') -> bool:
+    mol = _mol_from_types(mol, mol_type)
+    return any(atom.GetIsotope() != 0 for atom in mol.GetAtoms())
+
+
+def has_unsupported_elems(mol, mol_type='smi') -> bool:
+    mol = _mol_from_types(mol, mol_type)
+    return not all(atom.GetSymbol() in VALID_ELEMENTS for atom in mol.GetAtoms())
+
+
+def collision_energy_to_float(colli_eng):
+    if isinstance(colli_eng, str):
+        return float(colli_eng.split()[0])
+    else:
+        return float(colli_eng)
+
+
+def sanitize(mol_list: List[Chem.Mol], mol_type='mol', return_indices=False) -> List[Chem.Mol]:
+    """sanitize a list of mols"""
+    new_mol_list = []
+    new_idx_list = []
+    for idx, mol in enumerate(mol_list):
+        if mol is None:
+            continue
+
+        if mol_type == 'mol':
+            pass
+        elif mol_type == 'smi':
+            mol = Chem.MolFromSmiles(mol)
+        elif mol_type == 'inchi':
+            mol = Chem.MolFromInchi(mol)
+        else:
+            raise ValueError(f'Unknown mol_type: {mol}')
+
+        if mol is None:
+            continue
+
+        try:
+            inchi = Chem.MolToInchi(mol)
+            mol = Chem.MolFromInchi(inchi)
+            if mol is None:
+                continue
+            smiles = Chem.MolToSmiles(mol)
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                continue
+            inchi = Chem.MolToInchi(mol)
+            mol = canonical_mol_from_inchi(inchi)
+            if mol is not None:
+                new_mol_list.append(mol)
+                new_idx_list.append(idx)
+        except ValueError:
+            logging.warning(f"Bad smiles")
+
+    if mol_type == 'smi':
+        new_mol_list = [Chem.MolToSmiles(mol) for mol in new_mol_list]
+    elif mol_type == 'inchi':
+        new_mol_list = [Chem.MolToInchi(mol) for mol in new_mol_list]
+
+    if return_indices:
+        return new_mol_list, new_idx_list
+    else:
+        return new_mol_list

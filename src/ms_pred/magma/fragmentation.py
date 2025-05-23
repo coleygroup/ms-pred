@@ -33,6 +33,7 @@ class FragmentEngine(object):
         max_tree_depth: int = 3,
         max_broken_bonds: int = 6,
         mol_str_type: str = "smiles",
+        mol_str_canonicalized: bool = False,
     ):
         """__init__.
 
@@ -50,16 +51,23 @@ class FragmentEngine(object):
             if self.mol is None:
                 return
             self.inchi = Chem.MolToInchi(self.mol)
-            self.mol = Chem.MolFromInchi(self.inchi)
+            if not mol_str_canonicalized:
+                self.mol = common.canonical_mol_from_inchi(self.inchi)
+                self.smiles = Chem.MolToSmiles(self.mol)  # canonical smiles
+                self.mol = Chem.MolFromSmiles(self.smiles)  # always use canonical smiles for mols
 
         elif mol_str_type == "inchi":
             self.inchi = mol_str
-            self.mol = Chem.MolFromInchi(self.inchi)
+            self.mol = common.canonical_mol_from_inchi(self.inchi)  # inchi must be canonicalized
             if self.mol is None:
                 return
             self.smiles = Chem.MolToSmiles(self.mol)
+            self.mol = Chem.MolFromSmiles(self.smiles)  # always use canonical smiles for mols
         else:
             raise NotImplementedError()
+
+        if self.mol is None:
+            raise RuntimeError(f"Invalid molecule encountered. SMILES: {self.smiles}, InChI: {self.inchi}")
 
         self.natoms = self.mol.GetNumAtoms()
 
@@ -74,7 +82,9 @@ class FragmentEngine(object):
         )
         self.total_hs = self.atom_hs.sum()
         self.atom_weights = np.array(
-            [common.ELEMENT_TO_MASS[i] for i in self.atom_symbols]
+            [common.ELEMENT_TO_MASS[sym] if i.GetIsotope() == 0 else
+             common.P_TBL.GetMassForIsotope(i.GetSymbol(), i.GetIsotope())
+             for sym, i in zip(self.atom_symbols, self.mol.GetAtoms())]
         )
         self.atom_weights_h = (
             self.atom_hs * common.ELEMENT_TO_MASS["H"] + self.atom_weights

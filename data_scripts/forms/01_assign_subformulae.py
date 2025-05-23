@@ -75,6 +75,13 @@ def get_args():
         type=int,
         help="Max number of peaks to keep",
     )
+    parser.add_argument(
+        "--num-workers",
+        action="store",
+        default=32,
+        type=int,
+        help="Number of parallel workers",
+    )
     return parser.parse_args()
 
 
@@ -115,19 +122,23 @@ def get_output_dict(
     """
     # This is the case for some erroneous MS2 files for which proc_spec_file return None
     # All the MS2 subpeaks in these erroneous MS2 files has mz larger than parentmass
+    empty_output_dict = {
+        "cand_form": form,
+        "spec_name": spec_name,
+        "cand_ion": adduct_type,
+        "output_tbl": None,
+    }
+    if adduct_type not in common.ion2mass:
+        return empty_output_dict
     if spec is None:
-        output_dict = {
-            "cand_form": form,
-            "spec_name": spec_name,
-            "cand_ion": adduct_type,
-            "output_tbl": None,
-        }
-        return output_dict
+        return empty_output_dict
 
     # Filter down
     spec = common.max_inten_spec(spec, max_formulae, inten_thresh=inten_thresh)
     spec_masses, spec_intens = spec[:, 0], spec[:, 1]
-    adduct_masses = common.ion2mass[adduct_type]
+    adduct_masses = common.ion2mass[adduct_type]  # shift by adduct mass
+    e_adduct_masses = -common.ELECTRON_MASS if common.is_positive_adduct(adduct_type) \
+        else common.ELECTRON_MASS  # shift by an electron
 
     if use_all:
         output_tbl = {
@@ -171,8 +182,12 @@ def get_output_dict(
     else:
         cross_prod, masses = common.get_all_subsets(form)
     masses_with_adduct = masses + adduct_masses
+    masses_with_e_adduct = masses + e_adduct_masses
     adduct_types = np.array([adduct_type] * len(masses_with_adduct))
-    mass_diffs = np.abs(spec_masses[:, None] - masses_with_adduct[None, :])
+    mass_diffs = np.minimum(
+        np.abs(spec_masses[:, None] - masses_with_adduct[None, :]),
+        np.abs(spec_masses[:, None] - masses_with_e_adduct[None, :])
+    )
 
     formula_inds = mass_diffs.argmin(-1)
     min_mass_diff = mass_diffs[np.arange(len(mass_diffs)), formula_inds]
@@ -255,16 +270,15 @@ def get_output_dict(
     return output_dict
 
 
-def process_spec_file(spec_name: str, data_dir: str):
-    """process_spec_file.
-    Args:
-        spec_name (str): spec_name
-        data_dir (str): data_dir
-    """
-    spec_file = data_dir / "spec_files" / f"{spec_name}.ms"
-    meta, tuples = common.parse_spectra(spec_file)
-    spec = common.process_spec_file(meta, tuples)
-    return spec_name, spec
+def process_spec_file(spec_name: str, data_dir: Path):
+    """process_spec_file."""
+    ms_h5 = common.HDF5Dataset(data_dir / "spec_files.hdf5")
+    spec_lines = ms_h5.read_str(f"{spec_name}.ms").split('\n')
+    meta, tuples = common.parse_spectra(spec_lines)
+    specs = common.process_spec_file(meta, tuples, merge_specs=False)
+    # if 'nan' not in specs:  # include a merged spec
+    #     specs['collision nan'] = common.process_spec_file(meta, tuples, merge_specs=True)
+    return spec_name, specs
 
 
 def main():
@@ -283,64 +297,69 @@ def main():
     debug = args.debug
     use_magma = args.use_magma
 
+    num_workers = args.num_workers
+
     # Read in labels
     labels_df = pd.read_csv(label_path, sep="\t")
     if debug:
-        labels_df = labels_df[:50]
+        labels_df = labels_df[:5000]
 
-    # Define ooutput directory name
+    # Define output directory name
     subform_dir = data_dir / "subformulae"
     subform_dir.mkdir(exist_ok=True)
     output_dir_name = args.output_dir_name
     if output_dir_name is None:
-        output_dir_name = f"subform_{max_form}"
+        output_dir_name = f"subform_{max_form}.hdf5"
     output_dir = subform_dir / output_dir_name
-    output_dir.mkdir(exist_ok=True)
 
     spec_fn_lst = labels_df["spec"].to_list()
+
+    print(f"Processing ms raw data")
     proc_spec_full = partial(process_spec_file, data_dir=data_dir)
-    # input_specs = [proc_spec_full(i) for i in tqdm(spec_fn_lst)]
-    input_specs = common.chunked_parallel(spec_fn_lst, proc_spec_full, chunks=100)
+    if debug:
+        input_specs = [proc_spec_full(i) for i in tqdm(spec_fn_lst)]
+    else:
+        input_specs = common.chunked_parallel(spec_fn_lst, proc_spec_full, chunks=1000, max_cpu=num_workers)
 
     # input_specs contains a list of tuples (spec, subpeak tuple array)
     input_specs_dict = {tup[0]: tup[1] for tup in input_specs}
 
     export_dicts = []
     for _, row in labels_df.iterrows():
-        spec = row["spec"]
-        new_entry = {
-            "spec": input_specs_dict[spec],
-            "form": row["formula"],
-            "mass_diff_type": mass_diff_type,
-            "spec_name": spec,
-            "mass_diff_thresh": mass_diff_thresh,
-            "inten_thresh": inten_thresh,
-            "max_formulae": max_formulae,
-            "adduct_type": row["ionization"],
-            "use_all": use_all,
-            "smiles": row["smiles"],
-            "use_magma": use_magma,
-        }
-        export_dicts.append(new_entry)
+        spec_name = row["spec"]
+        for colli_eng, spec in input_specs_dict[spec_name].items():
+            new_entry = {
+                "spec_name": f'{spec_name}_{colli_eng}',
+                "spec": spec,
+                "form": row["formula"],
+                "mass_diff_type": mass_diff_type,
+                "mass_diff_thresh": mass_diff_thresh,
+                "inten_thresh": inten_thresh,
+                "max_formulae": max_formulae,
+                "adduct_type": row["ionization"],
+                "use_all": use_all,
+                "smiles": row["smiles"],
+                "use_magma": use_magma,
+            }
+            export_dicts.append(new_entry)
 
     # Build dicts
     print(f"There are {len(export_dicts)} spec-cand pairs this spec files")
     export_wrapper = lambda x: get_output_dict(**x)
 
     if debug:
-        output_dict_lst = [export_wrapper(i) for i in export_dicts[:10]]
+        output_dict_lst = [export_wrapper(i) for i in export_dicts]
     else:
-
         output_dict_lst = common.chunked_parallel(
-            export_dicts, export_wrapper, chunks=100
+            export_dicts, export_wrapper, chunks=1000, max_cpu=num_workers
         )
     assert len(export_dicts) == len(output_dict_lst)
 
-    # Write all output jsons to files
+    # Write all output jsons to a HDF5 file
+    h5 = common.HDF5Dataset(output_dir, mode='w')
     for output_dict in tqdm(output_dict_lst):
-        with open(output_dir / f'{output_dict["spec_name"]}.json', "w") as f:
-            json.dump(output_dict, f, indent=4)
-            f.close()
+        h5.write_str(f'{output_dict["spec_name"]}.json', json.dumps(output_dict, indent=4))
+    h5.close()
 
 
 if __name__ == "__main__":

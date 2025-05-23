@@ -8,4 +8,8 @@ ray[air]
 CairoSVG
 ipdb
 omegaconf
-torch_geometric
+pubchempy
+pygmtools
+h5py
+msbuddy
+lightgbm

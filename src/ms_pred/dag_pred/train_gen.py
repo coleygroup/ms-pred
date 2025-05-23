@@ -12,6 +12,9 @@ import pandas as pd
 import numpy as np
 
 from torch.utils.data import DataLoader
+import resource
+rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
+resource.setrlimit(resource.RLIMIT_NOFILE, (4096, rlimit[1]))
 
 import pytorch_lightning as pl
 from pytorch_lightning import loggers as pl_loggers
@@ -45,6 +48,7 @@ def add_frag_train_args(parser):
     parser.add_argument("--learning-rate", default=7e-4, action="store", type=float)
     parser.add_argument("--lr-decay-rate", default=1.0, action="store", type=float)
     parser.add_argument("--weight-decay", default=0, action="store", type=float)
+    parser.add_argument("--test-checkpoint", default="", action="store", type=str)
 
     # Fix model params
     parser.add_argument("--layers", default=3, action="store", type=int)
@@ -65,6 +69,8 @@ def add_frag_train_args(parser):
     )
     parser.add_argument("--inject-early", default=False, action="store_true")
     parser.add_argument("--embed-adduct", default=False, action="store_true")
+    parser.add_argument("--embed-collision", default=False, action="store_true")
+    parser.add_argument("--embed-elem-group", default=False, action="store_true")
     parser.add_argument("--encode-forms", default=False, action="store_true")
     parser.add_argument("--add-hs", default=False, action="store_true")
 
@@ -83,7 +89,7 @@ def train_model():
 
     save_dir = kwargs["save_dir"]
     common.setup_logger(save_dir, log_name="dag_gen_train.log", debug=kwargs["debug"])
-    pl.utilities.seed.seed_everything(kwargs.get("seed"))
+    pl.seed_everything(kwargs.get("seed"))
 
     # Dump args
     yaml_args = yaml.dump(kwargs)
@@ -127,26 +133,26 @@ def train_model():
 
     magma_folder = kwargs["magma_folder"]
     num_workers = kwargs.get("num_workers", 0)
-    magma_tree_folder = data_dir / f"{magma_folder}/magma_tree"
-    all_json_pths = [Path(i) for i in magma_tree_folder.glob("*.json")]
-    name_to_json = {i.stem: i for i in all_json_pths}
+    magma_tree_h5 = common.HDF5Dataset(data_dir / f"{magma_folder}/magma_tree.hdf5")
+    name_to_json = {Path(i).stem: i for i in magma_tree_h5.get_all_names()}
 
     pe_embed_k = kwargs["pe_embed_k"]
     root_encode = kwargs["root_encode"]
+    embed_elem_group = kwargs["embed_elem_group"]
     tree_processor = dag_data.TreeProcessor(
-        pe_embed_k=pe_embed_k, root_encode=root_encode, add_hs=add_hs
+        pe_embed_k=pe_embed_k, root_encode=root_encode, add_hs=add_hs, embed_elem_group=embed_elem_group,
     )
     # Build out frag datasets
     train_dataset = dag_data.GenDataset(
         train_df,
-        data_dir=data_dir,
-        tree_processor=tree_processor,
+        magma_h5=data_dir / f"{magma_folder}/magma_tree.hdf5",
         magma_map=name_to_json,
         num_workers=num_workers,
+        tree_processor=tree_processor,
     )
     val_dataset = dag_data.GenDataset(
         val_df,
-        data_dir=data_dir,
+        magma_h5=data_dir / f"{magma_folder}/magma_tree.hdf5",
         magma_map=name_to_json,
         num_workers=num_workers,
         tree_processor=tree_processor,
@@ -154,20 +160,24 @@ def train_model():
 
     test_dataset = dag_data.GenDataset(
         test_df,
-        data_dir=data_dir,
+        magma_h5=data_dir / f"{magma_folder}/magma_tree.hdf5",
         magma_map=name_to_json,
-        tree_processor=tree_processor,
         num_workers=num_workers,
+        tree_processor=tree_processor,
     )
 
     # Define dataloaders
     collate_fn = train_dataset.get_collate_fn()
+    persistent_workers = kwargs["num_workers"] > 0
+    mp_contex = 'spawn' if num_workers > 0 else None
     train_loader = DataLoader(
         train_dataset,
         num_workers=kwargs["num_workers"],
         collate_fn=collate_fn,
         shuffle=True,
         batch_size=kwargs["batch_size"],
+        persistent_workers=persistent_workers,
+        multiprocessing_context=mp_contex,
     )
     val_loader = DataLoader(
         val_dataset,
@@ -175,6 +185,8 @@ def train_model():
         collate_fn=collate_fn,
         shuffle=False,
         batch_size=kwargs["batch_size"],
+        persistent_workers=persistent_workers,
+        multiprocessing_context=mp_contex,
     )
     test_loader = DataLoader(
         test_dataset,
@@ -182,6 +194,8 @@ def train_model():
         collate_fn=collate_fn,
         shuffle=False,
         batch_size=kwargs["batch_size"],
+        persistent_workers=persistent_workers,
+        multiprocessing_context=mp_contex,
     )
 
     # Define model
@@ -200,6 +214,8 @@ def train_model():
         root_encode=kwargs["root_encode"],
         inject_early=kwargs["inject_early"],
         embed_adduct=kwargs["embed_adduct"],
+        embed_collision=kwargs["embed_collision"],
+        embed_elem_group=kwargs["embed_elem_group"],
         encode_forms=kwargs["encode_forms"],
         add_hs=add_hs,
     )
@@ -229,37 +245,42 @@ def train_model():
         filename="best",  # "{epoch}-{val_loss:.2f}",
         save_weights_only=False,
     )
-    earlystop_callback = EarlyStopping(monitor=monitor, patience=20)
+    earlystop_callback = EarlyStopping(monitor=monitor, patience=5)
     callbacks = [earlystop_callback, checkpoint_callback]
 
     trainer = pl.Trainer(
         logger=[tb_logger, console_logger],
         accelerator="gpu" if kwargs["gpu"] else "cpu",
-        gpus=1 if kwargs["gpu"] else 0,
+        devices=1 if kwargs["gpu"] else 0,
         callbacks=callbacks,
         gradient_clip_val=5,
         min_epochs=kwargs["min_epochs"],
         max_epochs=kwargs["max_epochs"],
         gradient_clip_algorithm="value",
+        num_sanity_val_steps=2 if kwargs["debug"] else 0,
     )
 
-    if kwargs["debug_overfit"]:
-        trainer.fit(model, train_loader)
-    else:
-        trainer.fit(model, train_loader, val_loader)
+    if not kwargs["test_checkpoint"]:
+        if kwargs["debug_overfit"]:
+            trainer.fit(model, train_loader)
+        else:
+            trainer.fit(model, train_loader, val_loader)
 
-    checkpoint_callback = trainer.checkpoint_callback
-    best_checkpoint = checkpoint_callback.best_model_path
-    best_checkpoint_score = checkpoint_callback.best_model_score.item()
+        checkpoint_callback = trainer.checkpoint_callback
+        test_checkpoint = checkpoint_callback.best_model_path
+        test_checkpoint_score = checkpoint_callback.best_model_score.item()
+    else:
+        test_checkpoint = kwargs["test_checkpoint"]
+        test_checkpoint_score = "[unknown]"
 
     # Load from checkpoint
-    model = gen_model.FragGNN.load_from_checkpoint(best_checkpoint)
+    model = gen_model.FragGNN.load_from_checkpoint(test_checkpoint)
     logging.info(
-        f"Loaded model with from {best_checkpoint} with val loss of {best_checkpoint_score}"
+        f"Loaded model with from {test_checkpoint} with val loss of {test_checkpoint_score}"
     )
 
     model.eval()
-    trainer.test(dataloaders=test_loader)
+    trainer.test(model=model, dataloaders=test_loader)
 
 
 if __name__ == "__main__":

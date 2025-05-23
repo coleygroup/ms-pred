@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import numpy as np
 import copy
+import itertools
 import pandas as pd
 from tqdm import tqdm
 from collections import defaultdict
@@ -131,37 +132,36 @@ def greedy_prune(
 
 
 def magma_augmentation(
-    spec_file: Path,
-    output_dir: Path,
+    spec_name: str,
+    spec_dir: Path,
     spec_to_smiles: dict,
     spec_to_adduct: dict,
     max_peaks: int,
     ppm_diff: float = 10,
+    merge_specs: bool = True,
     debug: bool = False,
 ):
     """magma_augmentation.
 
     Args:
-        spec_file (Path): spec_file
-        output_dir (Path): output_dir
+        spec_name (str): spec_name
+        spec_dir (Path): spec_dir
         spec_to_smiles (dict): spec_to_smiles
         spec_to_adduct (dict): Spec to adduct
         max_peaks (int): max_peaks
         ppm_diff (float): Max diff ppm
         debug (bool)
     """
-    spectra_name = spec_file.stem
-    tsv_dir = output_dir / "magma_tsv"
-    tree_dir = output_dir / "magma_tree"
-    tsv_dir.mkdir(exist_ok=True)
-    tree_dir.mkdir(exist_ok=True)
-    tsv_filename = tsv_dir / f"{spectra_name}.magma"
-    tree_filename = tree_dir / f"{spectra_name}.json"
+    tsv_return = {}
+    tree_return = {}
 
-    meta, spectras = common.parse_spectra(spec_file)
+    spec_h5 = common.HDF5Dataset(spec_dir)
+    spec_readlines = spec_h5.read_str(spec_name).split('\n')
+    meta, spectras = common.parse_spectra(spec_readlines)
 
-    spectra_smiles = spec_to_smiles.get(spectra_name, None)
-    spectra_adduct = spec_to_adduct.get(spectra_name, None)
+    spec_name_clean = Path(spec_name).stem  # remove '.json'
+    spectra_smiles = spec_to_smiles.get(spec_name_clean, None)
+    spectra_adduct = spec_to_adduct.get(spec_name_clean, None)
 
     # Step 1 - Generate fragmentations inside fragmentation engine
     fe = fragmentation.FragmentEngine(mol_str=spectra_smiles, **FRAGMENT_ENGINE_PARAMS)
@@ -173,237 +173,249 @@ def magma_augmentation(
         try:
             fe.generate_fragments()
         except:
-            print(f"Error with generating fragments for spec {spectra_name}")
+            print(f"Error with generating fragments for spec {spec_name_clean}")
             return
 
     # Step 2: Process spec and get comparison points
     # Read in file and filter it down
-    spectra = common.process_spec_file(meta, spectras)
+    spectra = common.process_spec_file(meta, spectras, merge_specs=merge_specs)
     if spectra is None:
-        print(f"Error with generating fragments for spec {spectra_name}")
+        print(f"Error with generating fragments for spec {spec_name_clean}")
         return
 
-    spectra = common.max_inten_spec(
-        spectra, max_num_inten=max_peaks, inten_thresh=0.001
-    )
-    s_m, s_i = spectra[:, 0], spectra[:, 1]
+    if merge_specs:
+        spectra = {'collision nan': spectra}
+    for colli_eng, spectrum in spectra.items():
+        tsv_filename = f"{spec_name_clean}_{colli_eng}.magma"
+        tree_filename = f"{spec_name_clean}_{colli_eng}.json"
 
-    # Correct for s_m by subtracting it
-    adjusted_m = s_m - common.ion2mass[spectra_adduct]
+        spectrum = common.max_inten_spec(
+            spectrum, max_num_inten=max_peaks, inten_thresh=0.001
+        )
+        s_m, s_i = spectrum[:, 0], spectrum[:, 1]
 
-    # Step 3: Make all assignments
-    frag_hashes, frag_inds, shift_inds, masses, scores = fe.get_frag_masses()
+        # Correct for s_m to its [M]+ or [M]- mass
+        adjusted_m = s_m - common.ion2mass[spectra_adduct]  # charge on adduct
+        adjusted_e_m = s_m + common.ELECTRON_MASS if common.is_positive_adduct(spectra_adduct) \
+            else s_m - common.ELECTRON_MASS  # charge transferred
 
-    # Argsort by bond breaking scores
-    # Lower bond scores are better
-    new_order = np.argsort(scores)
-    frag_hashes, frag_inds, shift_inds, masses, scores = (
-        frag_hashes[new_order],
-        frag_inds[new_order],
-        shift_inds[new_order],
-        masses[new_order],
-        scores[new_order],
-    )
-    ppm_diffs = (
-        np.abs(masses[None, :] - adjusted_m[:, None]) / adjusted_m[:, None] * 1e6
-    )
+        # Step 3: Make all assignments
+        frag_hashes, frag_inds, shift_inds, masses, scores = fe.get_frag_masses()
 
-    # Need to catch _all_ equivalent fragments
-    # How do I remove the symmetry problem at each step and avoid branching
-    # trees for the same examples??
-    min_ppms = ppm_diffs.min(-1)
-    is_min = min_ppms[:, None] == ppm_diffs
-    peak_mask = min_ppms < ppm_diff
+        # Argsort by bond breaking scores
+        # Lower bond scores are better
+        new_order = np.argsort(scores)
+        frag_hashes, frag_inds, shift_inds, masses, scores = (
+            frag_hashes[new_order],
+            frag_inds[new_order],
+            shift_inds[new_order],
+            masses[new_order],
+            scores[new_order],
+        )
+        ppm_diffs = np.minimum(
+            np.abs(masses[None, :] - adjusted_m[:, None]) / masses[None, :] * 1e6,
+            np.abs(masses[None, :] - adjusted_e_m[:, None]) / masses[None, :] * 1e6
+        )  # num of peaks x num of frags
 
-    # Step 4: Make exports
-    # Now collect all inds and results
-    # Also record a map from hash, hshift to the peak_info
-    tsv_export_list = []
-    hash_to_peaks = defaultdict(lambda: [])
-    max_labeled_inten = 0
-    for ind, was_assigned in enumerate(peak_mask):
-        new_entry = {
-            "mz_observed": s_m[ind],
-            "mz_corrected": adjusted_m[ind],
-            "inten": s_i[ind],
-            "ppm_diff": "",
-            "frag_inds": "",
-            "frag_mass": "",
-            "frag_h_shift": "",
-            "frag_base_form": "",
-            "frag_hashes": "",
-        }
-        if was_assigned:
-            # Find all the fragments that have min ppm tolerance
-            matched_peaks = is_min[ind]
-            min_inds = np.argwhere(matched_peaks).flatten()
+        # Need to catch _all_ equivalent fragments
+        # How do I remove the symmetry problem at each step and avoid branching
+        # trees for the same examples??
+        min_ppms = ppm_diffs.min(-1)
+        is_min = min_ppms[:, None] == ppm_diffs
+        peak_mask = min_ppms < ppm_diff  # num of peaks
 
-            # Get min score for this assignment
-            min_score = np.min(scores[min_inds])
-
-            # Filter even further down to inds that have min score and min ppm
-            min_score_ppm = min_inds[
-                np.argwhere(scores[min_inds] == min_score).flatten()
-            ]
-
-            frag_inds_temp = [frag_inds[temp_ind] for temp_ind in min_score_ppm]
-            frag_masses_temp = [masses[temp_ind] for temp_ind in min_score_ppm]
-            frag_hashes_temp = [frag_hashes[temp_ind] for temp_ind in min_score_ppm]
-            shift_inds_temp = [shift_inds[temp_ind] for temp_ind in min_score_ppm]
-            frag_entries_temp = [
-                fe.frag_to_entry[frag_hash] for frag_hash in frag_hashes_temp
-            ]
-            frag_forms_temp = [frag_entry["form"] for frag_entry in frag_entries_temp]
-
-            str_join = lambda x: ",".join([str(xx) for xx in x])
-            new_entry["ppm_diff"] = min_ppms[ind]
-            new_entry["frag_inds"] = str_join(frag_inds_temp)
-            new_entry["frag_hashes"] = ",".join(frag_hashes_temp)
-            new_entry["frag_mass"] = str_join(frag_masses_temp)
-            new_entry["frag_h_shift"] = str_join(shift_inds_temp)
-            new_entry["frag_base_form"] = ",".join(frag_forms_temp)
-            peak_info_base = {
+        # Step 4: Make exports
+        # Now collect all inds and results
+        # Also record a map from hash, hshift to the peak_info
+        tsv_export_list = []
+        hash_to_peaks = defaultdict(lambda: [])
+        max_labeled_inten = 0
+        for ind, was_assigned in enumerate(peak_mask):
+            new_entry = {
                 "mz_observed": s_m[ind],
-                "mz_corrected": adjusted_m[ind],
+                # "mz_corrected": adjusted_m[ind],
                 "inten": s_i[ind],
-                "ppm_diff": min_ppms[0],
-                "frag_mass": frag_masses_temp[0],
+                "ppm_diff": "",
+                "frag_inds": "",
+                "frag_mass": "",
+                "frag_h_shift": "",
+                "frag_base_form": "",
+                "frag_hashes": "",
             }
-            max_labeled_inten = max(max_labeled_inten, s_i[ind])
-            for h, s, f in zip(frag_hashes_temp, shift_inds_temp, frag_forms_temp):
-                peak_info_ex = copy.deepcopy(peak_info_base)
-                peak_info_ex["frag_hash"] = h
-                peak_info_ex["frag_h_shift"] = s
-                peak_info_ex["frag_base_form"] = f
-                hash_to_peaks[h].append(peak_info_ex)
+            if was_assigned:
+                # Find all the fragments that have min ppm tolerance
+                matched_peaks = is_min[ind]
+                min_inds = np.argwhere(matched_peaks).flatten()
 
-        tsv_export_list.append(new_entry)
+                # Get min score for this assignment
+                min_score = np.min(scores[min_inds])
 
-    df = pd.DataFrame(tsv_export_list)
-    df.sort_values(by="mz_observed", inplace=True)
-    df.to_csv(tsv_filename, sep="\t", index=None)
+                # Filter even further down to inds that have min score and min ppm
+                min_score_ppm = min_inds[
+                    np.argwhere(scores[min_inds] == min_score).flatten()
+                ]
 
-    # Build trees
-    tree_nodes = [
-        j for i in tsv_export_list for j in i["frag_hashes"].split(",") if len(j) > 0
-    ]
-    tree_nodes = list(set(tree_nodes))
+                frag_inds_temp = [frag_inds[temp_ind] for temp_ind in min_score_ppm]
+                frag_masses_temp = [masses[temp_ind] for temp_ind in min_score_ppm]
+                frag_hashes_temp = [frag_hashes[temp_ind] for temp_ind in min_score_ppm]
+                shift_inds_temp = [shift_inds[temp_ind] for temp_ind in min_score_ppm]
+                frag_entries_temp = [
+                    fe.frag_to_entry[frag_hash] for frag_hash in frag_hashes_temp
+                ]
+                frag_forms_temp = [frag_entry["form"] for frag_entry in frag_entries_temp]
 
-    # Now do a breadth first search back on the tree via its parents
-    explore_queue = copy.deepcopy(tree_nodes)
-    explored = set()
-    while len(explore_queue) > 0:
-        new_explore = explore_queue.pop()
-        explored.add(new_explore)
+                str_join = lambda x: ",".join([str(xx) for xx in x])
+                new_entry["ppm_diff"] = min_ppms[ind]
+                new_entry["frag_inds"] = str_join(frag_inds_temp)
+                new_entry["frag_hashes"] = ",".join(frag_hashes_temp)
+                new_entry["frag_mass"] = str_join(frag_masses_temp)
+                new_entry["frag_h_shift"] = str_join(shift_inds_temp)
+                new_entry["frag_base_form"] = ",".join(frag_forms_temp)
+                peak_info_base = {
+                    "mz_observed": s_m[ind],
+                    # "mz_corrected": adjusted_m[ind],
+                    "inten": s_i[ind],
+                    "ppm_diff": min_ppms[0],
+                    "frag_mass": frag_masses_temp[0],
+                }
+                max_labeled_inten = max(max_labeled_inten, s_i[ind])
+                for h, s, f in zip(frag_hashes_temp, shift_inds_temp, frag_forms_temp):
+                    peak_info_ex = copy.deepcopy(peak_info_base)
+                    peak_info_ex["frag_hash"] = h
+                    peak_info_ex["frag_h_shift"] = s
+                    peak_info_ex["frag_base_form"] = f
+                    hash_to_peaks[h].append(peak_info_ex)
 
-        # Get parents for current node and add all of them
-        entry = fe.frag_to_entry[new_explore]
-        parent_hashes = entry["parent_hashes"]
+            tsv_export_list.append(new_entry)
 
-        # Note: Parents are singular, but each parent has multiple potential
-        explore_queue.extend(set([i for i in parent_hashes if i not in explored]))
+        df = pd.DataFrame(tsv_export_list)
+        df.sort_values(by="mz_observed", inplace=True)
+        tsv_return[tsv_filename] = df.to_csv(sep="\t", index=None)
 
-    included_nodes = list(explored)
-    pruned_nodes = greedy_prune(fe, included_nodes, tree_nodes)
+        # Build trees
+        tree_nodes = [
+            j for i in tsv_export_list for j in i["frag_hashes"].split(",") if len(j) > 0
+        ]
+        tree_nodes = list(set(tree_nodes))
 
-    # Export and use to construct tree viz or others
-    out_frags = {}
-    pruned_node_set = set(pruned_nodes)
-    node_to_pulled = defaultdict(lambda: set())
-    node_pulled_sib = defaultdict(lambda: set())
-    node_to_parents = defaultdict(lambda: set())
-    for frag in pruned_nodes:
-        entry = fe.frag_to_entry[frag]
+        # Now do a breadth first search back on the tree via its parents
+        explore_queue = copy.deepcopy(tree_nodes)
+        explored = set()
+        while len(explore_queue) > 0:
+            new_explore = explore_queue.pop()
+            explored.add(new_explore)
 
-        peak_intens = hash_to_peaks[frag]
-        inten_vec = np.zeros(fe.shift_bucket_inds.shape[0])
-        for i in peak_intens:
-            # Do not renormalize!
-            inten_vec[i["frag_h_shift"]] = i["inten"]  # / max_labeled_inten
+            # Get parents for current node and add all of them
+            entry = fe.frag_to_entry[new_explore]
+            parent_hashes = entry["parent_hashes"]
 
-        new_entry = {
-            "frag_hash": frag,
-            "frag": entry["frag"],
-            "is_observed": frag in tree_nodes,
-            "atoms_pulled": [],
-            "parents": [],
-            "base_mass": entry["base_mass"],
-            "intens": inten_vec.tolist(),
-            "id": entry["id"],
-            "sib": False,
-            "max_broken": entry["max_broken"],
-            "tree_depth": entry["tree_depth"],
-            "max_remove_hs": entry["max_remove_hs"],
-            "max_add_hs": entry["max_add_hs"],
+            # Note: Parents are singular, but each parent has multiple potential
+            explore_queue.extend(set([i for i in parent_hashes if i not in explored]))
+
+        included_nodes = list(explored)
+        pruned_nodes = greedy_prune(fe, included_nodes, tree_nodes)
+
+        # Export and use to construct tree viz or others
+        out_frags = {}
+        pruned_node_set = set(pruned_nodes)
+        node_to_pulled = defaultdict(lambda: set())
+        node_pulled_sib = defaultdict(lambda: set())
+        node_to_parents = defaultdict(lambda: set())
+        for frag in pruned_nodes:
+            entry = fe.frag_to_entry[frag]
+
+            peak_intens = hash_to_peaks[frag]
+            inten_vec = np.zeros(fe.shift_bucket_inds.shape[0])
+            for i in peak_intens:
+                # Do not renormalize!
+                inten_vec[i["frag_h_shift"]] = i["inten"]  # / max_labeled_inten
+
+            new_entry = {
+                "frag_hash": frag,
+                "frag": entry["frag"],
+                "is_observed": frag in tree_nodes,
+                "atoms_pulled": [],
+                "parents": [],
+                "base_mass": entry["base_mass"],
+                "intens": inten_vec.tolist(),
+                "id": entry["id"],
+                "sib": False,
+                "max_broken": entry["max_broken"],
+                "tree_depth": entry["tree_depth"],
+                "max_remove_hs": entry["max_remove_hs"],
+                "max_add_hs": entry["max_add_hs"],
+            }
+            out_frags[frag] = new_entry
+            for parent, pulled_atom, sibling_hash in zip(
+                entry["parent_hashes"], entry["parent_ind_removed"], entry["sibling_hashes"]
+            ):
+                if parent in pruned_node_set:
+                    node_to_parents[frag].add(parent)
+                    node_to_pulled[parent].add(pulled_atom)
+                    node_pulled_sib[(parent, pulled_atom)] = sibling_hash
+
+        # Build up a list of (node, pulled) tuples and have a dict of pulled to
+        # sibling
+        out_frags_keys = list(out_frags.keys())
+        for k in out_frags_keys:
+            out_frags[k]["atoms_pulled"] = node_to_pulled[k]
+            out_frags[k]["parents"] = node_to_parents[k]
+
+            # Add in siblings for all pulled nodes!
+            for a in out_frags[k]["atoms_pulled"]:
+                sib_entries = node_pulled_sib[(k, a)]
+                for sib_node in sib_entries:
+                    fe_entry = fe.frag_to_entry[sib_node]
+
+                    cur_entry = out_frags.get(sib_node)
+                    # Make a new sib entry
+                    if cur_entry is None:
+                        inten_vec = np.zeros(fe.shift_bucket_inds.shape[0])
+                        new_entry = {
+                            "frag_hash": sib_node,
+                            "frag": fe_entry["frag"],
+                            "is_observed": False,
+                            "atoms_pulled": [],
+                            "parents": [k],
+                            "base_mass": fe_entry["base_mass"],
+                            "intens": inten_vec.tolist(),
+                            "id": fe_entry["id"],
+                            "sib": True,
+                            "max_broken": fe_entry["max_broken"],
+                            "tree_depth": fe_entry["tree_depth"],
+                            "max_remove_hs": fe_entry["max_remove_hs"],
+                            "max_add_hs": fe_entry["max_add_hs"],
+                        }
+                        out_frags[sib_node] = new_entry
+
+                    # If we already have a non sib entry, continue
+                    else:
+                        if k not in cur_entry["parents"]:
+                            cur_entry["parents"].append(k)
+
+            out_frags[k]["atoms_pulled"] = list(out_frags[k]["atoms_pulled"])
+            out_frags[k]["parents"] = list(out_frags[k]["parents"])
+
+        export_tree = {
+            "root_canonical_smiles": fe.smiles,
+            "frags": out_frags,
+            "collision_energy": float(colli_eng.split()[1]),
+            "adduct": spectra_adduct,
         }
-        out_frags[frag] = new_entry
-        for parent, pulled_atom, sibling_hash in zip(
-            entry["parent_hashes"], entry["parent_ind_removed"], entry["sibling_hashes"]
-        ):
-            if parent in pruned_node_set:
-                node_to_parents[frag].add(parent)
-                node_to_pulled[parent].add(pulled_atom)
-                node_pulled_sib[(parent, pulled_atom)] = sibling_hash
+        # Export files when needed
+        if len(export_tree["frags"]) > 0:
+            tree_return[tree_filename] = json.dumps(export_tree, indent=2)
 
-    # Build up a list of (node, pulled) tuples and have a dict of pulled to
-    # sibling
-    out_frags_keys = list(out_frags.keys())
-    for k in out_frags_keys:
-        out_frags[k]["atoms_pulled"] = node_to_pulled[k]
-        out_frags[k]["parents"] = node_to_parents[k]
-
-        # Add in siblings for all pulled nodes!
-        for a in out_frags[k]["atoms_pulled"]:
-            sib_entries = node_pulled_sib[(k, a)]
-            for sib_node in sib_entries:
-                fe_entry = fe.frag_to_entry[sib_node]
-
-                cur_entry = out_frags.get(sib_node)
-                # Make a new sib entry
-                if cur_entry is None:
-                    inten_vec = np.zeros(fe.shift_bucket_inds.shape[0])
-                    new_entry = {
-                        "frag_hash": sib_node,
-                        "frag": fe_entry["frag"],
-                        "is_observed": False,
-                        "atoms_pulled": [],
-                        "parents": [k],
-                        "base_mass": fe_entry["base_mass"],
-                        "intens": inten_vec.tolist(),
-                        "id": fe_entry["id"],
-                        "sib": True,
-                        "max_broken": fe_entry["max_broken"],
-                        "tree_depth": fe_entry["tree_depth"],
-                        "max_remove_hs": fe_entry["max_remove_hs"],
-                        "max_add_hs": fe_entry["max_add_hs"],
-                    }
-                    out_frags[sib_node] = new_entry
-
-                # If we already have a non sib entry, continue
-                else:
-                    if k not in cur_entry["parents"]:
-                        cur_entry["parents"].append(k)
-
-        out_frags[k]["atoms_pulled"] = list(out_frags[k]["atoms_pulled"])
-        out_frags[k]["parents"] = list(out_frags[k]["parents"])
-
-    export_tree = {
-        "root_inchi": fe.inchi,
-        "frags": out_frags,
-    }
-    # Export files when needed
-    if len(export_tree["frags"]) > 0:
-        with open(tree_filename, "w") as fp:
-            json.dump(export_tree, fp, indent=2)
-
+    return tsv_return, tree_return
 
 def run_magma_augmentation(
     spectra_dir: str,
     output_dir: str,
     spec_labels: str,
     max_peaks: int,
+    workers: int,
     debug: bool = False,
-    ppm_diff: int  = 20,
+    ppm_diff: int = 20,
 ):
     """run_magma_augmentation.
 
@@ -419,7 +431,9 @@ def run_magma_augmentation(
     logging.info("Create magma spectra files")
     output_dir = Path(output_dir)
     output_dir.mkdir(exist_ok=True)
-    ms_files = list(Path(spectra_dir).glob("*.ms"))
+    spectra_dir = Path(spectra_dir)
+    spec_h5 = common.HDF5Dataset(spectra_dir)
+    ms_files = spec_h5.get_all_names()
 
     # Read in spec to smiles
     df = pd.read_csv(spec_labels, sep="\t")
@@ -427,19 +441,35 @@ def run_magma_augmentation(
     spec_to_adduct = dict(df[["spec", "ionization"]].values)
 
     # Run this over all files
-    partial_aug_safe = lambda spec_file: magma_augmentation(
-        spec_file,
-        output_dir,
+    partial_aug_safe = lambda param: magma_augmentation(
+        param['spec_file'],
+        spectra_dir,
         spec_to_smiles,
         spec_to_adduct,
         max_peaks=max_peaks,
         debug=debug,
         ppm_diff=ppm_diff,
+        merge_specs=param['merge_specs'],
     )
+    # always include merged & unmerged specs in the dataset
+    # params = [{'spec_file': f, 'merge_specs': m} for f, m in itertools.product(ms_files, [True, False])]
+    # OR: only unmerged specs in the dataset
+    params = [{'spec_file': f, 'merge_specs': m} for f, m in itertools.product(ms_files, [False])]
+
     if debug:
-        [partial_aug_safe(i) for i in tqdm(ms_files)]
+        write_objs = [partial_aug_safe(i) for i in tqdm(params[:10])]
     else:
-        common.chunked_parallel(ms_files, partial_aug_safe, max_cpu=60)
+        write_objs = common.chunked_parallel(params, partial_aug_safe, max_cpu=workers, chunks=1000)
+
+    spec_h5.close()
+    logging.info('Write to hdf5 file output')
+    tsv_h5 = common.HDF5Dataset(output_dir / "magma_tsv.hdf5", mode='w')
+    tree_h5 = common.HDF5Dataset(output_dir / "magma_tree.hdf5", mode='w')
+    for obj in tqdm(write_objs):
+        tsv_h5.write_dict(obj[0])
+        tree_h5.write_dict(obj[1])
+    tsv_h5.close()
+    tree_h5.close()
 
 
 def get_args():
@@ -470,6 +500,12 @@ def get_args():
         "--ppm-diff",
         default=20,
         help="PPM threshold difference",
+        type=int,
+    )
+    parser.add_argument(
+        "--workers",
+        default=16,
+        help="Number of parallel workers",
         type=int,
     )
     parser.add_argument("--debug", default=False, action="store_true")

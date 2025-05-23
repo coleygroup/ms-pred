@@ -25,7 +25,7 @@ def get_args():
     )
     parser.add_argument("--num-bins", default=15000, type=int)
     parser.add_argument("--tree-pred-folder",)
-    parser.add_argument("--outfile", default=None)
+    # parser.add_argument("--outfile", default=None)
     return parser.parse_args()
 
 
@@ -36,32 +36,28 @@ def main(args):
     data_folder = Path(f"data/spec_datasets/{dataset}/subformulae/{subform_name}")
 
     tree_pred_folder = Path(args.tree_pred_folder)
-    outfile = args.outfile
-    if outfile is None:
-        outfile = tree_pred_folder.parent / "pred_eval.yaml"
-        outfile_grouped = tree_pred_folder.parent / "pred_eval_grouped.tsv"
+    outfile = tree_pred_folder.parent / "pred_eval.yaml"
+    outfile_grouped = tree_pred_folder.parent / "pred_eval_grouped.tsv"
 
-    pred_trees = tree_pred_folder.glob("*.json")
+    tree_pred_h5 = common.HDF5Dataset(tree_pred_folder)
+    pred_trees = tree_pred_h5.get_all_names()
     running_lists = defaultdict(lambda: [])
     output_entries = []
 
     bins = np.linspace(0, 1500, args.num_bins)
 
-    def eval_item(pred_tree, data_folder):
-        """eval_item.
-
-        Args:
-            pred_tree:
-            data_folder:
-        """
-        spec_name = pred_tree.stem.replace("pred_", "")
-        true_file = data_folder / f"{spec_name}.json"
-        if not true_file.exists():
-            print(f"Skipping file {true_file} as no tree was found")
+    def eval_item(pred_tree, tree_pred_folder, data_folder):
+        """eval_item."""
+        tree_pred_h5 = common.HDF5Dataset(tree_pred_folder)
+        true_h5 = common.HDF5Dataset(data_folder)
+        spec_name = Path(pred_tree).stem.replace("pred_", "")
+        true_name = f"{spec_name}.json"
+        if not true_name in true_h5:
+            print(f"Skipping file {true_name} as no tree was found")
             return None
 
-        true_tree = json.load(open(true_file, "r"))
-        pred_tree = json.load(open(pred_tree, "r"))
+        true_tree = json.loads(true_h5.read_str(true_name))
+        pred_tree = json.loads(tree_pred_h5.read_str(pred_tree))
 
         tree_form = true_tree["cand_form"]
         pred_form = pred_tree["cand_form"]
@@ -134,7 +130,8 @@ def main(args):
         return output_entry
 
     eval_entries = [
-        dict(pred_tree=pred_tree, data_folder=data_folder) for pred_tree in pred_trees
+        dict(pred_tree=pred_tree, tree_pred_folder=tree_pred_folder, data_folder=data_folder)
+        for pred_tree in pred_trees
     ]
     eval_fn = lambda x: eval_item(**x)
     # output_entries = [eval_fn(i) for i in eval_entries]
@@ -161,15 +158,16 @@ def main(args):
         final_output[f"std_{k}"] = float(np.std(v))
 
     df = pd.DataFrame(output_entries)
+    df = df.drop(['name', 'smiles'], axis='columns')
     df_grouped = pd.concat(
-        [df.groupby("mass_bin").mean(), df.groupby("mass_bin").size()], 1
+        [df.groupby("mass_bin").mean(), df.groupby("mass_bin").size()], axis=1
     )
     df_grouped = df_grouped.rename({0: "num_examples"}, axis=1)
 
-    all_mean = df.mean()
+    all_mean = df.drop('mass_bin', axis='columns').mean()
     all_mean["num_examples"] = len(df)
     all_mean.name = "avg"
-    df_grouped = df_grouped.append(all_mean)
+    df_grouped = df_grouped._append(all_mean)
     df_grouped.to_csv(outfile_grouped, sep="\t")
 
     with open(outfile, "w") as fp:

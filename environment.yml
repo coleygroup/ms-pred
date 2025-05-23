@@ -4,6 +4,7 @@ channels:
 - dglteam
 - conda-forge
 - pyg
+- bioconda
 dependencies:
 - python=3.8.*
 - cython
@@ -11,21 +12,17 @@ dependencies:
 - rdkit=2021.03.*
 - conda-forge::python-graphviz=0.17
 - conda-forge::pygraphviz=1.7
-- pytorch-lightning=1.4.*
+- pytorch-lightning=1.6.*
 - pip=21.2.*
 - ipykernel=6.0.*
-- pytorch::pytorch=1.9.* 
+- pytorch::pytorch=1.9.1=py3.8_cuda11.1_cudnn8.0.5_0
+- cudatoolkit=11.1
 - einops
 - nb_conda_kernels=2.3.*
 - seaborn=0.11.*
 - ray-tune
 - pytorch-scatter
-
-# CPU:
-- dgl=0.8.*
-# GPU:
-#- cudatoolkit=11.1
-#- dgl-cuda11.1 
-
- # Removed:
-  #- pytorch::torchvision-cpu # Causing erorrs.. 
+- pytorch-sparse
+- pyg
+- dgl-cuda11.1=0.8.2
+- MKL=2024.0.0

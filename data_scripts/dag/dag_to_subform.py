@@ -9,6 +9,7 @@ import argparse
 import pickle
 from functools import partial
 from pathlib import Path
+from tqdm import tqdm
 
 import numpy as np
 import ms_pred.common as common
@@ -29,23 +30,23 @@ def get_args():
     return parser.parse_args()
 
 
-def dag_file_to_form(dag_file: dict, out_dir: Path, all_h_shifts: bool = False):
+def dag_file_to_form(dag_file: str, h5_path: Path, all_h_shifts: bool = False):
     """dag_file_to_form.
 
     Args:
-        dag_file (dict): dag_file
-        out_dir (Path): out_dir
+        dag_file (str): name of dag_file
+        h5_path (Path): path to hdf5 file storing dag files
         all_h_shifts: if true, use all h shifts specified
     """
-    dag = json.load(open(dag_file, "r"))
-    root = dag["root_inchi"]
-    base_form = common.form_from_inchi(root)
-    smiles = common.smiles_from_inchi(root)
+    h5 = common.HDF5Dataset(h5_path)
+    dag = json.loads(h5.read_str(dag_file))
+    smiles = dag["root_canonical_smiles"]
+    base_form = common.form_from_smi(smiles)
     name = Path(dag_file).stem.replace("pred_", "")
-    outfile = Path(out_dir) / f"{name}.json"
+    outname = f"{name}.json"
 
     frags = dag["frags"]
-    engine = fragmentation.FragmentEngine(mol_str=root, mol_str_type="inchi")
+    engine = fragmentation.FragmentEngine(mol_str=smiles, mol_str_type="smiles")
     forms, mz, intens = [], [], []
     for k, v in frags.items():
         base_mass = engine.single_mass(v["frag"])
@@ -84,8 +85,7 @@ def dag_file_to_form(dag_file: dict, out_dir: Path, all_h_shifts: bool = False):
         "output_tbl": tbl,
         "smiles": smiles,
     }
-    with open(outfile, "w") as f:
-        json.dump(output, f, indent=4)
+    return outname, json.dumps(output, indent=4)
 
 
 def main():
@@ -96,24 +96,28 @@ def main():
 
     num_workers = args.num_workers
     dag_folder = Path(args.dag_folder)
-    dag_files = list(dag_folder.glob("*.json"))
+    dag_h5 = common.HDF5Dataset(dag_folder)
+    dag_files = list(dag_h5.get_all_names())
 
     if out is None:
-        out = dag_folder.parent / f"{dag_folder.stem}_subform.p"
+        out = dag_folder.parent / f"{dag_folder.stem}_subform.hdf5"
     out = Path(out)
-    out.mkdir(exist_ok=True)
+    out.parent.mkdir(exist_ok=True)
 
     # Test case
-    dag_file = dag_files[0]
-    apply_fn = partial(dag_file_to_form, out_dir=out, all_h_shifts=all_h_shifts)
+    apply_fn = partial(dag_file_to_form, h5_path=dag_folder, all_h_shifts=all_h_shifts)
     if num_workers > 0:
         outs = common.chunked_parallel(
             dag_files,
             apply_fn,
+            chunks=1000,
             max_cpu=num_workers,
         )
     else:
-        outs = [apply_fn(i) for i in dag_files]
+        outs = [apply_fn(i) for i in tqdm(dag_files)]
+    out_h5 = common.HDF5Dataset(out, 'w')
+    out_h5.write_list_of_tuples(outs)
+    out_h5.close()
 
 
 if __name__ == "__main__":

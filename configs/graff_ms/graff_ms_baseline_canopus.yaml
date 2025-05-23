@@ -33,8 +33,9 @@ universal_args:
   set-layers: [0]
   use-reverse: [false]
 
-  form-dir-name: ['magma_subform_50_with_raw']
+  form-dir-name: ['magma_subform_50_with_raw.hdf5']
   embed-adduct: [true]
+  embed-collision-energy: [true]
   mpnn-type: [GGNN]
   num-fixed-forms: [5000]
 

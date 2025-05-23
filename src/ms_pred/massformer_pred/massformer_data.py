@@ -31,103 +31,72 @@ class BinnedDataset(Dataset):
         self.upper_limit = upper_limit
         self.bins = np.linspace(0, self.upper_limit, self.num_bins)
         self.name_to_adduct = dict(self.df[["spec", "ionization"]].values)
+        self.subform_path = data_dir / "subformulae" / f"{form_dir_name}"
+        self.subform_h5 = None
 
-        # Read in all molecules
-        self.smiles = self.df["smiles"].values
+        # Read in all molecules & specs
         self.graph_featurizer = MassformerGraphFeaturizer()
 
+        def process_df(df_row):
+            smi, spec_name, ces = df_row["smiles"], df_row['spec'], df_row['collision_energies']
+            mol = Chem.MolFromSmiles(smi)
+            mw = common.ExactMolWt(mol)
+            graph = self.graph_featurizer(mol)
+
+            # load spectrum
+            all_spec_output = []
+            for ce in eval(ces):
+                ce = int(ce)  # collision energies are integers in NIST
+                all_spec_output.append((spec_name, smi, mol, mw, graph, ce))
+            return all_spec_output
+
+        dfrows = [i for _, i in self.df.iterrows()]
         if self.num_workers == 0:
-            self.mols = [Chem.MolFromSmiles(i) for i in self.smiles]
-            self.weights = [common.ExactMolWt(i) for i in self.mols]
-            self.mol_graphs = [self.graph_featurizer(el) for el in self.mols]
+            outputs = [process_df(i) for i in dfrows]
         else:
-            mol_from_smi = lambda x: Chem.MolFromSmiles(x)
-            self.mols = common.chunked_parallel(
-                self.smiles,
-                mol_from_smi,
+            outputs = common.chunked_parallel(
+                dfrows,
+                process_df,
                 chunks=100,
                 max_cpu=self.num_workers,
-                timeout=600,
-                max_retries=3,
-                use_ray=use_ray,
             )
-            self.weights = common.chunked_parallel(
-                self.mols,
-                lambda x: common.ExactMolWt(x),
-                chunks=100,
-                max_cpu=self.num_workers,
-                timeout=600,
-                max_retries=3,
-                use_ray=use_ray,
-            )
-            self.mol_graphs = common.chunked_parallel(
-                self.mols,
-                self.graph_featurizer,
-                chunks=100,
-                max_cpu=self.num_workers,
-                timeout=4000,
-                max_retries=3,
-                use_ray=use_ray,
-            )
+        outputs = [j for i in outputs for j in i]  # unroll
 
-        self.weights = np.array(self.weights)
+        self.spec_names, self.smiles, self.mols, self.weights, self.mol_graphs, self.collision_energies = zip(*outputs)
 
-        # Read in all specs
-        self.spec_names = self.df["spec"].values
-        spec_files = [
-            (data_dir / "subformulae" / f"{form_dir_name}" / f"{spec_name}.json")
-            for spec_name in self.spec_names
-        ]
-        process_spec_file = lambda x: common.bin_form_file(
-            x, num_bins=num_bins, upper_limit=upper_limit
-        )
-        if self.num_workers == 0:
-            spec_outputs = [process_spec_file(i) for i in spec_files]
-        else:
-            spec_outputs = common.chunked_parallel(
-                spec_files,
-                process_spec_file,
-                chunks=100,
-                max_cpu=self.num_workers,
-                timeout=4000,
-                max_retries=3,
-                use_ray=use_ray,
-            )
-
-        self.metas, self.spec_ars = zip(*spec_outputs)
-        mask = np.array([i is not None for i in self.spec_ars])
-        logging.info(f"Could not find tables for {np.sum(~mask)} spec")
+        # collision energy statistics
+        self.collision_energy_mean = common.NIST_COLLISION_ENERGY_MEAN
+        self.collision_energy_std = common.NIST_COLLISION_ENERGY_STD
 
         # Self.weights, self. mol_graphs
-        self.metas = np.array(self.metas)[mask].tolist()
-        self.spec_ars = np.array(self.spec_ars, dtype=object)[mask].tolist()
-        self.df = self.df[mask]
-        self.spec_names = np.array(self.spec_names)[mask].tolist()
-        self.weights = np.array(self.weights)[mask].tolist()
-        self.mol_graphs = [
-            el for el, valid in zip(self.mol_graphs, mask.tolist()) if valid
-        ]
-
         self.adducts = [
             common.ion2onehot_pos[self.name_to_adduct[i]] for i in self.spec_names
         ]
 
     def __len__(self):
-        return len(self.df)
+        return len(self.spec_names)
 
     def __getitem__(self, idx: int):
         name = self.spec_names[idx]
-        meta = self.metas[idx]
-        ar = self.spec_ars[idx]
+        collision_energy = self.collision_energies[idx]
         graph = self.mol_graphs[idx]
         full_weight = self.weights[idx]
         adduct = self.adducts[idx]
+
+        if self.subform_h5 is None:
+            self.subform_h5 = common.HDF5Dataset(self.subform_path)
+        json_str = self.subform_h5.read_str(f'{name}_collision {collision_energy}.json')
+        meta, spec_ar = common.bin_from_str(json_str, num_bins=self.num_bins, upper_limit=self.upper_limit)
+
+        norm_collision_energy = (collision_energy - self.collision_energy_mean) / (self.collision_energy_std + 1e-6)  # it's not "NCE" on Thermo instruments!!
         outdict = {
             "name": name,
-            "binned": ar,
+            "binned": spec_ar,
             "full_weight": full_weight,
             "adduct": adduct,
             "gf_v2_data": graph,
+            "collision_energy": collision_energy,
+            "norm_collision_energy": norm_collision_energy,   # it's not "NCE" on Thermo instruments!!
             "_meta": meta,
         }
         return outdict
@@ -146,6 +115,8 @@ class BinnedDataset(Dataset):
         )
         full_weight = [j["full_weight"] for j in input_list]
         adducts = [j["adduct"] for j in input_list]
+        collision_energies = [j["collision_energy"] for j in input_list]
+        norm_collision_energies = [j["norm_collision_energy"] for j in input_list]  # it's not "NCE" on Thermo instruments!!
 
         # Now pad everything else to the max channel dim
         spectra_tensors = torch.stack([torch.tensor(spectra) for spectra in spec_ars])
@@ -155,12 +126,16 @@ class BinnedDataset(Dataset):
         # frag_batch.set_e_initializer(dgl.init.zero_initializer)
 
         adducts = torch.FloatTensor(adducts)
+        collision_energies = torch.FloatTensor(collision_energies)
+        norm_collision_energies = torch.FloatTensor(norm_collision_energies)
 
         return_dict = {
             "spectra": spectra_tensors,
             "gf_v2_data": graphs,
             "names": names,
             "adducts": adducts,
+            "collision_energies": collision_energies,
+            "norm_collision_energies": norm_collision_energies,
             "full_weight": full_weight,
         }
         return return_dict
@@ -176,63 +151,65 @@ class MolDataset(Dataset):
         self.graph_featurizer = MassformerGraphFeaturizer()
         self.name_to_adduct = dict(self.df[["spec", "ionization"]].values)
 
-        # Read in all molecules
-        self.smiles = self.df["smiles"].values
-        self.spec_names = ["" for i in self.smiles]
-        if "spec" in list(self.df.keys()):
-            self.spec_names = self.df["spec"].values
+        # Read in all molecules & specs
+        self.graph_featurizer = MassformerGraphFeaturizer()
 
+        def process_df(df_row):
+            smi, spec_name, ces = df_row["smiles"], df_row['spec'], df_row['collision_energies']
+            mol = Chem.MolFromSmiles(smi)
+            mw = common.ExactMolWt(mol)
+            graph = self.graph_featurizer(mol)
+
+            # load spectrum
+            all_spec_output = []
+            for ce in eval(ces):
+                ce = int(ce)  # collision energies are integers in NIST
+                all_spec_output.append((spec_name, smi, mol, mw, graph, ce))
+            return all_spec_output
+
+        dfrows = [i for _, i in self.df.iterrows()]
         if self.num_workers == 0:
-            self.mols = [Chem.MolFromSmiles(i) for i in self.smiles]
-            self.weights = [common.ExactMolWt(i) for i in self.mols]
-            self.mol_graphs = [self.graph_featurizer(el) for el in self.mols]
+            outputs = [process_df(i) for i in dfrows]
         else:
-            self.mols = common.chunked_parallel(
-                self.smiles,
-                Chem.MolFromSmiles,
+            outputs = common.chunked_parallel(
+                dfrows,
+                process_df,
                 chunks=100,
                 max_cpu=self.num_workers,
-                timeout=4000,
-                max_retries=3,
             )
-            self.weights = common.chunked_parallel(
-                self.mols,
-                common.ExactMolWt,
-                chunks=100,
-                max_cpu=self.num_workers,
-                timeout=4000,
-                max_retries=3,
-            )
-            self.mol_graphs = common.chunked_parallel(
-                self.mols,
-                self.graph_featurizer,
-                chunks=100,
-                max_cpu=self.num_workers,
-                timeout=4000,
-                max_retries=3,
-            )
+        outputs = [j for i in outputs for j in i]  # unroll
+
+        self.spec_names, self.smiles, self.mols, self.weights, self.mol_graphs, self.collision_energies = zip(*outputs)
 
         # Extract
-        self.weights = np.array(self.weights)
         self.adducts = [
             common.ion2onehot_pos[self.name_to_adduct[i]] for i in self.spec_names
         ]
 
+        # collision energy statistics
+        self.collision_energy_mean = common.NIST_COLLISION_ENERGY_MEAN
+        self.collision_energy_std = common.NIST_COLLISION_ENERGY_STD
+
     def __len__(self):
-        return len(self.df)
+        return len(self.spec_names)
 
     def __getitem__(self, idx: int):
         smi = self.smiles[idx]
+        spec_name = self.spec_names[idx]
+        collision_energy = self.collision_energies[idx]
         graph = self.mol_graphs[idx]
         full_weight = self.weights[idx]
-        spec_name = self.spec_names[idx]
         adduct = self.adducts[idx]
+        norm_collision_energy = (collision_energy - self.collision_energy_mean) / (self.collision_energy_std + 1e-6)  # it's not "NCE" on Thermo instruments!!
+
         outdict = {
             "smi": smi,
             "gf_v2_data": graph,
             "adduct": adduct,
             "full_weight": full_weight,
             "spec_name": spec_name,
+            "collision_energy": collision_energy,
+            "norm_collision_energy": norm_collision_energy,  # it's not "NCE" on Thermo instruments!!
         }
         return outdict
 
@@ -250,7 +227,11 @@ class MolDataset(Dataset):
         )
         full_weight = [j["full_weight"] for j in input_list]
         adducts = [j["adduct"] for j in input_list]
+        collision_energies = [j["collision_energy"] for j in input_list]
+        norm_collision_energies = [j["norm_collision_energy"] for j in input_list]  # it's not "NCE" on Thermo instruments!!
         adducts = torch.FloatTensor(adducts)
+        collision_energies = torch.FloatTensor(collision_energies)
+        norm_collision_energies = torch.FloatTensor(norm_collision_energies)
 
         full_weight = torch.FloatTensor(full_weight)
         return_dict = {
@@ -259,5 +240,7 @@ class MolDataset(Dataset):
             "names": names,
             "full_weight": full_weight,
             "adducts": adducts,
+            "collision_energies": collision_energies,
+            "norm_collision_energies": norm_collision_energies,
         }
         return return_dict

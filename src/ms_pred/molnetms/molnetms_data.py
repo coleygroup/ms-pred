@@ -209,7 +209,7 @@ class BinnedDataset(Dataset):
         ]
 
         def process_spec_file(x):
-            return common.bin_form_file(x, num_bins=num_bins, upper_limit=upper_limit)
+            return common.bin_from_file(x, num_bins=num_bins, upper_limit=upper_limit)
 
         if self.num_workers == 0:
             spec_outputs = [process_spec_file(i) for i in spec_files]

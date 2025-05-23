@@ -61,7 +61,7 @@ for dataset in datasets:
         all_files = list(cfm_output_specs.glob("*.log"))
         split_file = f"data/spec_datasets/{dataset}/splits/{split}"
         if not Path(split_file).exists():
-            print("Skipping {split_file} for dataset {dataset}")
+            print(f"Skipping {split_file} for dataset {dataset}")
             continue
 
         save_dir = res_folder / "inten_thresh_sweep"

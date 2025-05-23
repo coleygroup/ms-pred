@@ -67,9 +67,7 @@ class BinnedDataset(Dataset):
             (data_dir / "subformulae" / f"{form_dir_name}" / f"{spec_name}.json")
             for spec_name in self.spec_names
         ]
-        process_spec_file = lambda x: common.bin_form_file(
-            x, num_bins=num_bins, upper_limit=upper_limit
-        )
+        process_spec_file = lambda x: common.bin_from_file(x, num_bins=num_bins, upper_limit=upper_limit)
         if self.num_workers == 0:
             spec_outputs = [process_spec_file(i) for i in spec_files]
         else:
