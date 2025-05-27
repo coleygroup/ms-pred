@@ -47,13 +47,11 @@ test_entries = [
      "max_k": 50},
 
     {"dataset": "canopus_train_public",
-     "test_dataset": "canopus_train_public",
      "train_split": "split_1_rnd2",
      "test_split": "split_1",
      "max_k": 50},
 
     {"dataset": "canopus_train_public",
-     "test_dataset": "canopus_train_public",
      "train_split": "split_1_rnd3",
      "test_split": "split_1",
      "max_k": 50},

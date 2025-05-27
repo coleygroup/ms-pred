@@ -37,7 +37,7 @@ def get_args():
     parser.add_argument("--num-workers", default=0, action="store", type=int)
     parser.add_argument("--batch-size", default=64, action="store", type=int)
     parser.add_argument("--num-decoys", default=0, action="store", type=int)
-    parser.add_argument("--pubchem-map-path", default='/home/runzhong/foam/data/pubchem/pubchem_formulae_inchikey.hdf5')
+    parser.add_argument("--pubchem-map-path", default='data/pubchem/pubchem_formulae_inchikey.hdf5')
     date = datetime.now().strftime("%Y_%m_%d")
     parser.add_argument("--save-dir", default=f"results/{date}_tree_pred/")
 

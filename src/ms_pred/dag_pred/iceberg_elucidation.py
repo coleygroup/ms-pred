@@ -726,8 +726,8 @@ def modi_finder(
         raise ValueError("shape mismatch")
 
     # load experiment spectra
-    real_spec1 = load_real_spec(real_spec1, real_spec_type1, precursor_mass1, nce1, ppm)
-    real_spec2 = load_real_spec(real_spec2, real_spec_type2, precursor_mass2, nce2, ppm)
+    real_spec1 = load_real_spec(real_spec1, real_spec_type1, precursor_mass1, nce1, ppm, denoise_spectrum=False)
+    real_spec2 = load_real_spec(real_spec2, real_spec_type2, precursor_mass2, nce2, ppm, denoise_spectrum=False)
 
     # load predicted spectra and fragments
     smiles, pred_specs, pred_frags = load_pred_spec(load_dir, step_collision_energy)
@@ -795,6 +795,8 @@ def modi_finder(
                         cur_matched_peaks.append((mz, inten - a_inten))
                 else:
                     cur_matched_peaks.append((mz, inten))
+        if len(cur_matched_peaks) == 0:
+            raise ValueError('No peak matching found')
         interested_peaks[ce] = np.array(cur_matched_peaks)
 
     all_figs = []
@@ -829,10 +831,15 @@ def modi_finder(
             else:
                 print(f'Covered peak: {mz:.5f}, {inten:.2f}')
                 # atom_scores[peak_atom_scores > 0] += inten  # no weighting
-                atom_scores += peak_atom_scores / np.max(peak_atom_scores) * inten  # higher weights for structures that ICEBERG thinks more reasonable
+                # *np.sum(peak_atom_scores > 0)
+                atom_scores += peak_atom_scores / np.max(peak_atom_scores) * inten
+                    # higher weights for structures that ICEBERG thinks more reasonable
             counter += 1
             if counter >= topk_peaks:
                 break
+
+        # normalize to 1
+        atom_scores = atom_scores / max(atom_scores.max(), 1e-3)
 
         all_figs.append(plt.gcf())
 

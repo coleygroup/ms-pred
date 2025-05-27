@@ -242,31 +242,6 @@ def is_positive_adduct(adduct_str: str) -> bool:
     return adduct_str[-1] == '+'
 
 
-ION_LST = list(ion2onehot_pos.keys())
-ion_remap = dict(zip(ION_LST, ION_LST))
-ion_remap.update(
-    {
-        "[M+NH4]+": "[M+H3N+H]+",
-        "M+H": "[M+H]+",
-        "M+Na": "[M+Na]+",
-        "M+H-H2O": "[M-H2O+H]+",
-        "M-H2O+H": "[M-H2O+H]+",
-        "M+NH4": "[M+H3N+H]+",
-        "M-2H2O+H": "[M-H4O2+H]+",
-        "[M-2H2O+H]+": "[M-H4O2+H]+",
-    }
-)
-
-
-def standardize_adduct(adduct):
-    """standardize_adduct."""
-    adduct = adduct.replace(" ", "")
-    adduct = ion_remap.get(adduct, adduct)
-    if adduct not in ION_LST:
-        raise ValueError(f"Adduct {adduct} not in ION_LST")
-    return adduct
-
-
 def formula_to_dense(chem_formula: str) -> np.ndarray:
     """formula_to_dense.
 

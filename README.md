@@ -2,7 +2,7 @@
 
 This repository contains implementations for the following spectrum simulator models predicting molecular tandem mass spectra from molecules: 
 
-- 🧊 ICEBERG 🧊️: [Inferring CID by Estimating Breakage Events and Reconstructing their Graphs](http://arxiv.org/abs/2304.13136) (now available to run through [GNPS2](https://gnps2.org/workflowinput?workflowname=3DMolMS_smiles_to_spectra))
+- 🧊 ICEBERG 🧊️: [Inferring CID by Estimating Breakage Events and Reconstructing their Graphs](http://arxiv.org/abs/2304.13136) (now available to run through [GNPS2](https://gnps2.org/))
 - 🏃‍ MARASON 🏃‍: [Neural Graph Matching Improves Retrieval Augmented Generation in Molecular Machine Learning](https://arxiv.org/html/2502.17874) (Code merging WIP)
 - 🧣 SCARF 🧣: [Subformula Classification for Autoregressively Reconstructing Fragmentations](https://arxiv.org/abs/2303.06470)
 
@@ -28,7 +28,8 @@ Contributors: Sam Goldman, Runzhong Wang, Rui-Xi Wang, Mrunali Manjrekar, John B
 3. [Experiments](#experiments)    
 4. [Analysis](#analysis)    
 5. [Structural elucidation](#elucidation)    
-6. [Citation](#citation)    
+6. [Augmentation](#augmentation)    
+7. [Citation](#citation)    
 
 
 ## Install & setup <a name="setup"></a>
@@ -49,8 +50,8 @@ Note: if you are not using GPU, please comment the CUDA-based packages in ``envo
 > You can checkout to the [``iceberg_analychem_2024`` branch](https://github.com/coleygroup/ms-pred/tree/iceberg_analychem_2024)
 > with the legacy code that supports NPLIB1.
 
-``nist20`` is a commercial dataset available for purchase through [several vendors worldwide](https://chemdata.nist.gov/dokuwiki/doku.php?id=chemdata:distributors).
-Given the scale of effort required to purchase samples, run experiments, and collect such a large amount of spectra,
+``nist20`` is a commercial dataset is available for purchase through [several vendors worldwide](https://chemdata.nist.gov/dokuwiki/doku.php?id=chemdata:distributors).
+Given the scale of effort required to purchase samples, run experiments, and collect the amount of spectra,
 and that NIST’20 is the only database where all spectra have collision energy annotations, this dataset is a reasonable investment in mass spectrum-related research in the
 absence of a thorough open-source replacement. 
 
@@ -64,9 +65,6 @@ Once the dataset is processed, move the files to ``ms-pred/data/spec_datasets/ni
     ├── spec_files.hdf5
     └── splits
 ```
-
-
-As part of revisions for our work introducing ICEBERG, we also evaluated our pretrained models on the CASMI22 positive mode spectra test set. We extracted CASMI22 [previously](https://github.com/samgoldman97/mist-cf) and show how to post-process and download this data in the notebook `notebooks/iceberg_casmi22.ipynb`.
 
 
 ### SCARF Processing
@@ -142,8 +140,8 @@ The internal pipeline used to conduct experiments can be followed below:
 > * ``06_run_retrieval.py``
 
 > You need two GPUs with at least 24GB RAM to train ICEBERG (we used NVIDIA A5000 for development). If you are trying to
-> train the model on a smaller GPU, try cutting down the batch size and skipping the contrastive 
-> finetuning step. Note that changing training parameters will affect the model's performance.
+> train the model on a smaller GPU, try cutting down the batch size and skip the contrastive 
+> finetuning step. Note that changing training parameters will affect the model performance.
 
 Instead of running in batched pipeline model, individual gen training, inten
 training, and predict calls can be  made using the following scripts respectively:
@@ -319,6 +317,12 @@ predictios `analysis/form_pred_eval.py` and spectra predictions
 Additional analyses used for figure generation were conducted in `notebooks/`.
 
 ## Structural elucidation <a name="elucidation"></a>
+
+Forward models could be applied for structural elucidation tasks with a set of candidate structures. An example workflow by taking all PubChem structures with the same chemical formula is shown in [``notebooks/iceberg_2025_arxiv/iceberg_demo_pubchem_elucidation.ipynb``](notebooks/iceberg_2025_arxiv/iceberg_demo_pubchem_elucidation.ipynb). In this example, ICEBERG predicts simulated spectra for all candidates, then all candidates are ranked based on their entropy similarities to the experimental spectrum.
+
+## Augmentation <a name="augmentation"></a>
+
+One use case for forward spectrum prediction models is to use the trained model as a surrogate model for augmenting an inverse model (e.g., [MIST](http://github.com/samgoldman97/mist/)). An example workflow for doing this is shown in `run_scripts/iceberg_augmentation`. The target dataset including a labels file, spectrum files, split, and target augmetnation file for prediction should first be coppied into the `data/spec_datasets`. Once this is complete, the runscripts folder can be copied, modified to use the datset of interest, and run. The ideal output will be a single MGF and labels files including the ouptut predictions. 
 
 Forward models could be applied for structural elucidation tasks with a set of candidate structures. An example workflow by taking all PubChem structures with the same chemical formula is shown in [``notebooks/iceberg_2025_arxiv/iceberg_demo_pubchem_elucidation.ipynb``](notebooks/iceberg_2025_arxiv/iceberg_demo_pubchem_elucidation.ipynb). In this example, ICEBERG predicts simulated spectra for all candidates, then all candidates are ranked based on their entropy similarities to the experimental spectrum.
 
