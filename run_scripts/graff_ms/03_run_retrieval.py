@@ -11,7 +11,6 @@ num_workers = 32
 
 test_entries = [
     {"dataset": "nist20",
-     "test_dataset": "nist20",
      "train_split": "split_1_rnd1",
      "test_split": "split_1",
      "max_k": 50},
@@ -60,7 +59,6 @@ test_entries = [
 
 for test_entry in test_entries:
     dataset = test_entry['dataset']
-    test_dataset = test_entry['test_dataset']
     train_split =  test_entry['train_split']
     split = test_entry['test_split']
     maxk = test_entry['max_k']
@@ -71,17 +69,13 @@ for test_entry in test_entries:
         print(f"Could not find model {model}; skipping\n: {json.dumps(test_entry, indent=1)}")
         continue
 
-    save_dir = model.parent.parent
-    if test_dataset != dataset:
-        save_dir = save_dir / "cross_dataset" / test_dataset
- 
-    save_dir = save_dir / f"retrieval_{dataset}_{split}_{maxk}"
-    save_dir.mkdir(exist_ok=True, parents=True)
+    save_dir = model.parent.parent / f"retrieval_{dataset}_{split}_{maxk}"
+    save_dir.mkdir(exist_ok=True)
 
     labels = f"retrieval/cands_df_{split}_{maxk}.tsv"
     cmd = f"""python {pred_file} \\
     --batch-size 32  \\
-    --dataset-name {test_dataset} \\
+    --dataset-name {dataset} \\
     --sparse-out \\
     --sparse-k 100 \\
     --num-workers {num_workers} \\
