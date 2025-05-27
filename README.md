@@ -2,7 +2,7 @@
 
 This repository contains implementations for the following spectrum simulator models predicting molecular tandem mass spectra from molecules: 
 
-- 🧊 ICEBERG 🧊️: [Inferring CID by Estimating Breakage Events and Reconstructing their Graphs](http://arxiv.org/abs/2304.13136) (now available to run through [GNPS2](https://gnps2.org/))
+- 🧊 ICEBERG 🧊️: [Inferring CID by Estimating Breakage Events and Reconstructing their Graphs](http://arxiv.org/abs/2304.13136) (now available to run through [GNPS2](https://gnps2.org/workflowinput?workflowname=3DMolMS_smiles_to_spectra))
 - 🏃‍ MARASON 🏃‍: [Neural Graph Matching Improves Retrieval Augmented Generation in Molecular Machine Learning](https://arxiv.org/html/2502.17874) (Code merging WIP)
 - 🧣 SCARF 🧣: [Subformula Classification for Autoregressively Reconstructing Fragmentations](https://arxiv.org/abs/2303.06470)
 
@@ -28,8 +28,7 @@ Contributors: Sam Goldman, Runzhong Wang, Rui-Xi Wang, Mrunali Manjrekar, John B
 3. [Experiments](#experiments)    
 4. [Analysis](#analysis)    
 5. [Structural elucidation](#elucidation)    
-6. [Augmentation](#augmentation)    
-7. [Citation](#citation)    
+6. [Citation](#citation)    
 
 
 ## Install & setup <a name="setup"></a>
@@ -317,12 +316,6 @@ predictios `analysis/form_pred_eval.py` and spectra predictions
 Additional analyses used for figure generation were conducted in `notebooks/`.
 
 ## Structural elucidation <a name="elucidation"></a>
-
-Forward models could be applied for structural elucidation tasks with a set of candidate structures. An example workflow by taking all PubChem structures with the same chemical formula is shown in [``notebooks/iceberg_2025_arxiv/iceberg_demo_pubchem_elucidation.ipynb``](notebooks/iceberg_2025_arxiv/iceberg_demo_pubchem_elucidation.ipynb). In this example, ICEBERG predicts simulated spectra for all candidates, then all candidates are ranked based on their entropy similarities to the experimental spectrum.
-
-## Augmentation <a name="augmentation"></a>
-
-One use case for forward spectrum prediction models is to use the trained model as a surrogate model for augmenting an inverse model (e.g., [MIST](http://github.com/samgoldman97/mist/)). An example workflow for doing this is shown in `run_scripts/iceberg_augmentation`. The target dataset including a labels file, spectrum files, split, and target augmetnation file for prediction should first be coppied into the `data/spec_datasets`. Once this is complete, the runscripts folder can be copied, modified to use the datset of interest, and run. The ideal output will be a single MGF and labels files including the ouptut predictions. 
 
 Forward models could be applied for structural elucidation tasks with a set of candidate structures. An example workflow by taking all PubChem structures with the same chemical formula is shown in [``notebooks/iceberg_2025_arxiv/iceberg_demo_pubchem_elucidation.ipynb``](notebooks/iceberg_2025_arxiv/iceberg_demo_pubchem_elucidation.ipynb). In this example, ICEBERG predicts simulated spectra for all candidates, then all candidates are ranked based on their entropy similarities to the experimental spectrum.
 
