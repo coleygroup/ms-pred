@@ -49,8 +49,8 @@ Note: if you are not using GPU, please comment the CUDA-based packages in ``envo
 > You can checkout to the [``iceberg_analychem_2024`` branch](https://github.com/coleygroup/ms-pred/tree/iceberg_analychem_2024)
 > with the legacy code that supports NPLIB1.
 
-``nist20`` is a commercial dataset is available for purchase through [several vendors worldwide](https://chemdata.nist.gov/dokuwiki/doku.php?id=chemdata:distributors).
-Given the scale of effort required to purchase samples, run experiments, and collect the amount of spectra,
+``nist20`` is a commercial dataset available for purchase through [several vendors worldwide](https://chemdata.nist.gov/dokuwiki/doku.php?id=chemdata:distributors).
+Given the scale of effort required to purchase samples, run experiments, and collect such a large amount of spectra,
 and that NIST’20 is the only database where all spectra have collision energy annotations, this dataset is a reasonable investment in mass spectrum-related research in the
 absence of a thorough open-source replacement. 
 
@@ -139,8 +139,8 @@ The internal pipeline used to conduct experiments can be followed below:
 > * ``06_run_retrieval.py``
 
 > You need two GPUs with at least 24GB RAM to train ICEBERG (we used NVIDIA A5000 for development). If you are trying to
-> train the model on a smaller GPU, try cutting down the batch size and skip the contrastive 
-> finetuning step. Note that changing training parameters will affect the model performance.
+> train the model on a smaller GPU, try cutting down the batch size and skipping the contrastive 
+> finetuning step. Note that changing training parameters will affect the model's performance.
 
 Instead of running in batched pipeline model, individual gen training, inten
 training, and predict calls can be  made using the following scripts respectively:
