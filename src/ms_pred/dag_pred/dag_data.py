@@ -398,7 +398,7 @@ class TreeProcessor:
             node_data = torch.hstack([node_data, zero_vec])
         else:
             h_featurizer = torch.eye(common.MAX_H)
-            h_adds_vec = torch.from_numpy(h_adds)
+            h_adds_vec = torch.from_numpy(h_adds).long()
             node_data = torch.hstack([node_data, h_featurizer[h_adds_vec]])
 
         g = dgl.graph(data=(src_tens, dest_tens), num_nodes=num_nodes)
