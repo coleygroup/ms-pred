@@ -102,13 +102,10 @@ ELEMENT_DIM = len(ELEMENT_VECTORS[0])
 COLLISION_PE_DIM = 64
 COLLISION_PE_SCALAR = 10000
 
-<<<<<<< HEAD
-=======
 SIM_PE_DIM = 64
 SIM_PE_SCALAR = 10
 
 GRAPHTYPE_LEN = 32
->>>>>>> dev-local/main
 # Reasonable normalization vector for elements
 # Estimated by max counts (+ 1 when zero)
 NORM_VEC_MASS = np.array(
