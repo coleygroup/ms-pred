@@ -701,8 +701,10 @@ class IntenGNN(pl.LightningModule):
 
         if name == 'train':
             loss_fn = self.loss_fn
+            decoy_loss_fn = self.entropy_loss
         else:
             loss_fn = functools.partial(self.loss_fn, use_hun=True)  # use hungarian in val and test
+            decoy_loss_fn = functools.partial(self.entropy_loss, use_hun=True)
 
         if 'is_decoy' in batch and 'mol_num' in batch:  # data with decoys
             true_data_inds = batch["is_decoy"] == 0
@@ -714,10 +716,10 @@ class IntenGNN(pl.LightningModule):
             )['loss']
 
             # contrastive ranking loss cosine loss to decoys
-            decoy_spec_loss = loss_fn(pred_inten,
-                                      batch["inten_targs"][true_data_inds].repeat_interleave(batch['mol_num'], dim=0),
-                                      parent_mass=batch["precursor_mzs"]
-                                      )['loss']
+            decoy_spec_loss = decoy_loss_fn(pred_inten,
+                                            batch["inten_targs"][true_data_inds].repeat_interleave(batch['mol_num'], dim=0),
+                                            parent_mass=batch["precursor_mzs"]
+                                            )['loss']
             split_end = torch.cumsum(batch['mol_num'], dim=0)
             split_start = split_end - batch['mol_num']
             decoy_spec_loss = [decoy_spec_loss[s:e] for s, e in zip(split_start, split_end)]

@@ -257,6 +257,7 @@ def parse_spectra(spectra_file: [str, list]) -> Tuple[dict, List[Tuple[str, np.n
         metadata["_FILE"] = Path(spectra_file).stem
     return metadata, spectras
 
+
 def spec_to_ms_str(
     spec: List[Tuple[str, np.ndarray]], essential_keys: dict, comments: dict = {}
 ) -> str:
@@ -283,6 +284,64 @@ def spec_to_ms_str(
     spec_str = "\n\n".join(spec_strs)
     output = f"{header}\n{comments}\n\n{spec_str}"
     return output
+
+
+def parse_spectra_mgf(
+    mgf_file: str, max_num = None
+) -> List[Tuple[dict, List[Tuple[str, np.ndarray]]]]:
+    """parse_spectr_mgf.
+
+    Parses spectra in the MGF file formate, with
+
+    Args:
+        mgf_file (str) : str
+        max_num (Optional[int]): If set, only parse this many
+    Return:
+        List[Tuple[dict, List[Tuple[str, np.ndarray]]]]: metadata and list of spectra
+            tuples containing name and array
+    """
+
+    key = lambda x: x.strip() == "BEGIN IONS"
+    parsed_spectra = []
+    with open(mgf_file, "r") as fp:
+
+        for (is_header, group) in tqdm(groupby(fp, key)):
+
+            if is_header:
+                continue
+
+            meta = dict()
+            spectra = []
+            # Note: Sometimes we have multiple scans
+            # This mgf has them collapsed
+            cur_spectra_name = "spec"
+            cur_spectra = []
+            group = list(group)
+            for line in group:
+                line = line.strip()
+                if not line:
+                    pass
+                elif line == "END IONS" or line == "BEGIN IONS":
+                    pass
+                elif "=" in line:
+                    k, v = [i.strip() for i in line.split("=", 1)]
+                    meta[k] = v
+                else:
+                    mz, intens = line.split()
+                    cur_spectra.append((float(mz), float(intens)))
+
+            if len(cur_spectra) > 0:
+                cur_spectra = np.vstack(cur_spectra)
+                spectra.append((cur_spectra_name, cur_spectra))
+                parsed_spectra.append((meta, spectra))
+            else:
+                pass
+                # print("no spectra found for group: ", "".join(group))
+
+            if max_num is not None and len(parsed_spectra) > max_num:
+                # print("Breaking")
+                break
+        return parsed_spectra
 
 
 def parse_spectra_mgf(
@@ -517,6 +576,7 @@ def process_spec_file(meta, tuples, precision=4, merge_specs=True, exclude_paren
 
             new_specs[k] = new_spec
         return new_specs
+
 
 def bin_from_file(spec_file, num_bins, upper_limit) -> Tuple[dict, np.ndarray]:
     """bin_from_file.
@@ -778,6 +838,11 @@ def build_mgf_str(
     entries = []
     for meta, spec in tqdm(meta_spec_list):
         str_rows = ["BEGIN IONS"]
+
+        for k in ["TITLE", "SEQ"]:
+            if k in meta:
+                str_rows.append(f"{k}={meta[k]}")
+                meta.pop(k)
 
         # Try to add precusor mass
         for i in parent_mass_keys:

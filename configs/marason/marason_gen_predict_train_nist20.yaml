@@ -1,0 +1,37 @@
+launcher_args: {experiment_name: marason_nist20,
+  script_name: "src/ms_pred/marason/predict_gen.py",
+  slurm_script: launcher_scripts/generic_slurm.sh, 
+  launch_method: local,
+  visible_devices: [0, 1],
+}
+universal_args:
+  _slurm_args:
+  - {_num_gpu: 1, cpus-per-task: 7, job-name: forward_train, mem-per-cpu: 8G, 
+    nodelist: 'node[1236]', time: '1-18:00:00'}
+  debug: [false]
+  gpu: [true]
+
+  batch-size: [8]
+  dataset-name: [nist20]
+  num-workers: [12]
+  threshold: [0.0]
+  max-nodes: [100]
+  num-decoys: [0]
+
+iterative_args:
+
+  -  split-name: [split_1.tsv]
+     checkpoint-pth: [results/marason_nist20/split_1_rnd1/version_0/best.ckpt]
+     save-dir: [split_1_rnd1/preds_train_100]
+
+  # -  split-name: [split_1.tsv]
+  #    checkpoint-pth: [results/marason_nist20/split_1_rnd2/version_0/best.ckpt]
+  #    save-dir: [split_1_rnd2/preds_train_100]
+
+  # -  split-name: [split_1.tsv]
+  #    checkpoint-pth: [results/marason_nist20/split_1_rnd3/version_0/best.ckpt]
+  #    save-dir: [split_1_rnd3/preds_train_100]
+
+  # -  split-name: [scaffold_1.tsv]
+  #    checkpoint-pth: [results/marason_nist20/scaffold_1/version_0/best.ckpt]
+  #    save-dir: [scaffold_1/preds_train_100]

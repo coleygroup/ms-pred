@@ -1,6 +1,6 @@
 >compound M4308
 >parentmass 260.1715
->ionization [M+?]+
+>ionization [M+H]+
 >instrumentation Orbitrap (LCMS)
 >quality UNKNOWN
 >rt 594.0s

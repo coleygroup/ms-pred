@@ -1,0 +1,56 @@
+launcher_args: {experiment_name: marason_nist20,
+  script_name: "src/ms_pred/marason/train_gen.py",
+  slurm_script: launcher_scripts/generic_slurm.sh, 
+  launch_method: local,
+  visible_devices: [0, 1]
+}
+universal_args:
+  _slurm_args:
+  - {_num_gpu: 1, cpus-per-task: 7, job-name: forward_train, mem-per-cpu: 8G,
+    time: '1-18:00:00'}
+  debug: [false]
+  gpu: [true]
+
+  seed: [1]
+  num-workers: [16]
+  batch-size: [32]
+  max-epochs: [200]
+
+  dataset-name: [nist20]
+  split-name: [split_1.tsv]
+
+  learning-rate: [0.000996]
+  lr-decay-rate: [0.7214]
+
+  dropout: [0.2]
+  mpnn-type: [GGNN]
+  pe-embed-k: [14]
+  pool-op: [avg]
+  set-layers: [0]
+  hidden-size: [512]
+  weight-decay: [0.0]
+  layers: [6]
+
+  root-encode: [gnn]
+  inject-early: [False]
+  encode-forms: [True]
+  embed-adduct: [True]
+  embed-collision: [True]
+  embed-elem-group: [True]
+  add-hs: [true]
+
+iterative_args:
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd1]
+     seed: [1]
+
+  # -  split-name: [split_1.tsv]
+  #    save-dir: [split_1_rnd2]
+  #    seed: [2]
+
+  # -  split-name: [split_1.tsv]
+  #    save-dir: [split_1_rnd3]
+  #    seed: [3]
+
+  # -  split-name: [scaffold_1.tsv]
+  #    save-dir: [scaffold_1]

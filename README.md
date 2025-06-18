@@ -142,7 +142,7 @@ python data_scripts/pubchem/04_make_retrieval_lists.py
 ICEBERG is our recommended model with a 40% top-1 retrieval accuracy with [M+H]+, benchmarked on the NIST'20 dataset. 
 ICEBERG is trained in two parts: a learned fragment generator and an intensity predictor. The pipeline for training and evaluating this model can be accessed in `run_scripts/iceberg/`. 
 There is an all-in-one script ``run_scripts/iceberg/run_all.sh`` that trains the up-to-date version of ICEBERG on NIST'20 dataset described in Wang et al. (2025). 
-The archived version released with [Goldman et al. (2024)](http://.org/abs/2304.13136) is at the [``iceberg_analychem_2024`` branch](https://github.com/coleygroup/ms-pred/tree/iceberg_analychem_2024).
+The archived version released with [Goldman et al. (2024)](http://arxiv.org/abs/2304.13136) is at the [``iceberg_analychem_2024`` branch](https://github.com/coleygroup/ms-pred/tree/iceberg_analychem_2024).
 The internal pipeline used to conduct experiments can be followed below:
 
 1. *Train dag model*: `run_scripts/iceberg/01_run_dag_gen_train.sh`   
@@ -157,9 +157,9 @@ The internal pipeline used to conduct experiments can be followed below:
 > If you want to replicate our reported result with random + scaffold splits and 3 random seeds, please uncomment
 > all entries in the following files
 > * ``configs/iceberg/*.yaml``
-> * ``02_sweep_gen_thresh.py``
-> * ``05_predict_dag_inten.py``
-> * ``06_run_retrieval.py``
+> * ``run_scripts/iceberg/02_sweep_gen_thresh.py``
+> * ``run_scripts/iceberg/05_predict_dag_inten.py``
+> * ``run_scripts/iceberg/06_run_retrieval.py``
 
 > You need two GPUs with at least 24GB RAM to train ICEBERG (we used NVIDIA A5000 for development). If you are trying to
 > train the model on a smaller GPU, try cutting down the batch size and skipping the contrastive 
@@ -174,6 +174,46 @@ training, and predict calls can be  made using the following scripts respectivel
 
 An example of how to use ICEBERG for structural elucidation campaigns can be found at ``notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb``.
 
+### MARASON
+
+MARASON is trained in two parts: a learned fragment generator (the same as the one in ICEBERG) and an RAG-based intensity predictor. The pipeline for training and evaluating this model can be accessed in `run_scripts/marason/`. 
+There is an all-in-one script ``run_scripts/marason/run_all.sh`` that trains the up-to-date version of MARASON on NIST'20 and MassSpecGym dataset. 
+The internal pipeline used to conduct experiments can be followed below:
+
+1. *Train dag model*: `run_scripts/marason/01_run_marason_gen_train.sh`   
+2. *Sweep over the number of fragments to generate*: `run_scripts/marason/02_sweep_gen_thresh.py`     
+3. *Use model 1 to predict model 2 training set*: `run_scripts/marason/03_run_marason_gen_predict.sh`   
+4. *Train intensity model*: `run_scripts/marason/04_train_marason_inten.sh`   
+5. *Make and evaluate intensity predictions*: `run_scripts/marason/05_predict_marason_inten.py`  
+6. *Run retrieval*: `run_scripts/marason/06_run_retrieval.sh`
+
+> The above scripts will only run for split_1_rnd1 (random split, seed=1), which is suitable if you want to train your own MARASON for structural elucidation applications.
+> 
+> If you want to replicate our reported result with random + scaffold splits and 3 random seeds, please uncomment
+> all entries in the following files
+> * ``configs/marason/*.yaml``
+> * ``run_scripts/marason/02_sweep_gen_thresh.py``
+> * ``run_scripts/marason/05_predict_dag_inten.py``
+> * ``run_scripts/marason/06_run_retrieval.py``
+
+> Note that since the reference-target pairs can be pre-computed, you can save the computed pairs to a given directory by setting `save-reference` 
+> to true and `reference-dir` to the desired directory in `configs/marason/marason_inten_train_nist.yaml` and 
+> `configs/marason/marason_inten_train_msg_allev_entropy.yaml`. 
+> Once the files are stored, you can load the precomputed pairs by setting `load-reference` to true in the corresponding config files 
+> and skip the retrieval process.
+
+> You need two GPUs with at least 24GB RAM to train MARASON (we used NVIDIA A5000 for development). If you are trying to
+> train the model on a smaller GPU, try cutting down the hidden_size to 256. 
+> Note that changing training parameters will affect the model performance.
+
+Instead of running in batched pipeline model, individual gen training, inten
+training, and predict calls can be made using the following scripts respectively:
+
+1. `python src/ms_pred/marason/train_gen.py`
+2. `python src/ms_pred/marason/train_inten.py`
+3. `python src/ms_pred/marason/predict_smis.py`
+
+You can use `python launcher_scripts/run_from_config.py configs/marason/marason_inten_test_nist.yaml` to generate relevant analysis and visualizations in the MARASON paper. You can draw the matching pattern and the spectra visualization by setting `draw` and `plot-spec` to be true respectively. If you want to do the similarity-grouped analysis described in the paper, set `draw` and `plot-spec` to be false. The bootstrap analysis for MassSpecGym retrieval task can be carried out by running `src/ms_pred/marason/bootstrap.py`.
 
 ### SCARF
 
@@ -371,7 +411,7 @@ We ask any user of this repository to cite the following works based upon the po
   publisher={ACS Publications}
 }
 
-@article{Wang2025.05.28.656653,
+@article{wang2025neuralspec,
 	author={Wang, Runzhong and Manjrekar, Mrunali and Mahjour, Babak and Avila-Pacheco, Julian and Provenzano, Joules and Reynolds, Erin and Lederbauer, Magdalena and Mashin, Eivgeni and Goldman, Samuel L. and Wang, Mingxun and Weng, Jing-Ke and Plata, Desir{\'e}e L. and Clish, Clary B. and Coley, Connor W.},
 	title={Neural Spectral Prediction for Structure Elucidation with Tandem Mass Spectrometry},
 	elocation-id = {2025.05.28.656653},
@@ -384,7 +424,7 @@ We ask any user of this repository to cite the following works based upon the po
 
 🏃‍MARASON model:
 ```
-@article{wang2025neural,
+@article{wang2025neuralgraph,
   title={Neural Graph Matching Improves Retrieval Augmented Generation in Molecular Machine Learning},
   author={Wang, Runzhong and Wang, Rui-Xi and Manjrekar, Mrunali and Coley, Connor W},
   journal={International Conference on Machine Learning},

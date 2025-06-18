@@ -766,6 +766,23 @@ def pad_packed_tensor(input, lengths, value):
     x[cumsum_inds] = input
     return x.view(batch_size, max_len, *old_shape[1:])
 
+def pack_padded_tensor(input, lengths):
+    """pack_padded_tensor"""
+    device = input.device
+    if not isinstance(lengths, torch.Tensor):
+        lengths = lengths.clone().detach().long().to(device)
+    else:
+        lengths = lengths.to(device)
+    max_len = (lengths.max()).item()
+
+    batch_size = len(lengths)
+    packed_tensors = []
+    for i in range(batch_size):
+        packed_tensors.append(input[i, :lengths[i].item(), :])
+    packed_tensors = torch.cat(packed_tensors)
+    return packed_tensors
+    
+
 
 def random_walk_pe(g, k, eweight_name=None):
     """Random Walk Positional Encoding, as introduced in

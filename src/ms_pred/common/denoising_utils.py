@@ -69,7 +69,6 @@ def pack_spectrum(mass, intensity):
     Returns:
         numpy.ndarray: A 2D array with mass and intensity pairs if both input arrays are non-empty, otherwise NaN.
     """
-
     if len(mass) > 0 and len(intensity) > 0:
         return (np.array([mass, intensity]).T)
     else:

@@ -1,6 +1,6 @@
 >compound mxp1672
 >parentmass 538.3867
->ionization [M+?]+
+>ionization [M+H]+
 >instrumentation Orbitrap (LCMS)
 >quality UNKNOWN
 >rt 464.38s

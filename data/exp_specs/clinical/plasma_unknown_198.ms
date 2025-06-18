@@ -1,6 +1,6 @@
 >compound QI7142
 >parentmass 198.1235
->ionization [M+?]+
+>ionization [M+H]+
 >instrumentation Orbitrap (LCMS)
 >quality UNKNOWN
 >rt 619.8s

@@ -1,0 +1,2 @@
+python launcher_scripts/run_from_config.py configs/marason/marason_inten_train_nist.yaml
+

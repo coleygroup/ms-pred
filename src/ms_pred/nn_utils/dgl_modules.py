@@ -13,6 +13,11 @@ import dgl.function as fn
 
 
 from dgl.nn import expand_as_pair
+import dgl.nn as dgl_nn
+import dgl
+
+gcn_msg = fn.copy_u(u="h", out="m")
+gcn_reduce = fn.sum(msg="m", out="h")
 
 
 class GatedGraphConv(nn.Module):
@@ -589,3 +594,82 @@ class GINEConv(nn.Module):
             if self.apply_func is not None:
                 rst = self.apply_func(rst)
             return rst
+
+class GCNLayer(nn.Module):
+    def __init__(self, in_feats, out_feats):
+        super(GCNLayer, self).__init__()
+        self.linear = nn.Linear(in_feats, out_feats)
+
+    def forward(self, g, feature):
+        # Creating a local scope so that all the stored ndata and edata
+        # (such as the `'h'` ndata below) are automatically popped out
+        # when the scope exits.
+        with g.local_scope():
+            g.ndata["h"] = feature
+            g.update_all(gcn_msg, gcn_reduce)
+            h = g.ndata["h"]
+            # return h
+            return self.linear(h)
+
+class MultiEdgeGCNLayer(nn.Module):
+    def __init__(self, in_feats, out_feats, etypes):
+        super().__init__()
+        self.etype_layers = nn.ModuleDict({
+            etype: dgl_nn.GraphConv(in_feats, out_feats, allow_zero_in_degree=True)
+            for etype in etypes
+        })
+
+    def forward(self, g, inputs):
+        # Input: node features (same for all nodes, since there's a single node type)
+        g.ndata['h'] = inputs
+
+        outputs = torch.zeros_like(inputs)
+
+        with g.local_scope():
+            for stype, etype, dtype in g.canonical_etypes:
+                rel_graph = g[stype, etype, dtype]
+                rel_graph.update_all(
+                    dgl.function.copy_u('h', 'm'),
+                    dgl.function.sum('m', 'h_agg'),
+                    etype=etype
+                )
+                outputs += self.etype_layers[etype](rel_graph, rel_graph.ndata['h_agg'])
+        
+        return outputs
+    
+class MultiEdgeGCN(nn.Module):
+    def __init__(self, in_feats, hidden_feats, out_feats, etypes, conv_steps):
+        super().__init__()
+        self.layer1 = MultiEdgeGCNLayer(in_feats, hidden_feats, etypes)
+        self.layer2 = MultiEdgeGCNLayer(hidden_feats, out_feats, etypes)
+        self.conv_steps = conv_steps
+
+    def forward(self, g, inputs):
+        h = inputs
+        for _ in range(self.conv_steps-1):
+            h = self.layer1(g, h)
+            h = F.relu(h)
+        h = self.layer2(g, h)
+        return h
+
+class HyperGNN(nn.Module):
+    def __init__(self, hidden_size, output_size, num_conv, dropout=0):
+        super(HyperGNN, self).__init__()
+        self.layer = GCNLayer(hidden_size, hidden_size)
+        self.layer_out = nn.Linear(hidden_size, output_size)
+        self.activation = nn.ReLU()
+        self.dropout_conv = nn.Dropout(dropout)
+        self.dropout_output = nn.Dropout(dropout)
+
+        self.num_conv = num_conv
+
+    def forward(self, g, features):
+        for _ in range(self.num_conv):
+            features = self.layer(g, features)
+            features = self.activation(features)
+            features = self.dropout_conv(features)
+
+        result=self.layer_out(features)
+        result=self.dropout_output(result)
+
+        return result

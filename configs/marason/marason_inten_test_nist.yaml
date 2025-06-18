@@ -1,0 +1,59 @@
+launcher_args: {experiment_name: marason_inten_nist20,
+  script_name: "src/ms_pred/marason/test_inten.py",
+  slurm_script: launcher_scripts/generic_slurm.sh, 
+  launch_method: local,
+  visible_devices: [0],
+}
+universal_args:
+  _slurm_args:
+  - {_num_gpu: 1, cpus-per-task: 7, job-name: forward_train, mem-per-cpu: 8G, 
+    nodelist: 'node[1236]', time: '1-18:00:00'}
+  debug: [false]
+  debug-overfit: [false]
+  gpu: [true]
+ 
+  num-workers: [32]
+  batch-size: [64]
+
+  dataset-name: [nist20]
+  split-name: [split_1.tsv]
+  max-ref-count: [3]
+  pe-embed-k: [0]
+  embed-elem-group: [true]
+  root-encode: [gnn]
+  inject-early: [false]
+  mol-threshold: [0.1]
+  binned-targs: [true] 
+  add-hs: [true]
+  add-reference: [true]
+  load-reference: [true]
+  reference-dir: ["data/closest_neighbors/infinite"]
+  filter-test: [false]
+  logger: ["marason_inten_test"]
+  test-checkpoint: ["results/marason_inten_nist20/split_1_rnd1/version_0/best.ckpt"]
+  # uncomment the next line if you want to compare the visualization of the outputs of different models
+  # test-checkpoint2: ["results/marason_inten_nist20/split_1_rnd1/version_3/best.ckpt"]
+  draw: [false]
+  # save-path: ["baseline.csv"]
+  save-path: ["marason.csv"]
+  plot-spec: [false]
+
+
+iterative_args:
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd1]
+     magma-dag-folder: [results/marason_nist20/split_1_rnd1/preds_train_100_inten.hdf5]
+
+  # -  split-name: [split_1.tsv]
+  #    save-dir: [split_1_rnd2]
+  #    magma-dag-folder: [results/marason_nist20/split_1_rnd2/preds_train_100_inten.hdf5]
+  #    seed: [2]
+
+  # -  split-name: [split_1.tsv]
+  #    save-dir: [split_1_rnd3]
+  #    magma-dag-folder: [results/marason_nist20/split_1_rnd3/preds_train_100_inten.hdf5]
+  #    seed: [3]
+
+  # -  split-name: [scaffold_1.tsv]
+  #    save-dir: [scaffold_1]
+  #    magma-dag-folder: [results/marason_nist20/scaffold_1/preds_train_100_inten.hdf5]

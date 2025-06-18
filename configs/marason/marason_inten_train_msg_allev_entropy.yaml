@@ -1,0 +1,79 @@
+launcher_args: {experiment_name: marason_inten_msg,
+  script_name: "src/ms_pred/marason/train_inten.py",
+  slurm_script: launcher_scripts/generic_slurm.sh, 
+  launch_method: local,
+  visible_devices: [0, 1]
+}
+universal_args:
+  _slurm_args:
+  - {_num_gpu: 1, cpus-per-task: 7, job-name: forward_train, mem-per-cpu: 8G, 
+    nodelist: 'node[1236]', time: '1-18:00:00'}
+  debug: [false]
+  debug-overfit: [false]
+  gpu: [true]
+
+  seed: [1]
+  num-workers: [16]
+  batch-size: [16]
+  max-epochs: [200]
+
+  dataset-name: [msg]
+  split-name: [split.tsv]
+  dataset-labels: [labels_withev_validinst.tsv]
+
+  learning-rate: [0.0002]
+  lr-decay-rate: [0.825]
+
+  dropout: [0.1]
+  mpnn-type: [GGNN]
+  pe-embed-k: [0]
+  # min-epochs: [50]
+  pool-op: [avg]
+  hidden-size: [512]
+  weight-decay: [1e-7]
+  set-layers: [0]
+  frag-set-layers: [3]
+  mlp-layers: [1]
+  gnn-layers: [4]
+  loss-fn: [entropy]
+  root-encode: [gnn]
+  inject-early: [false]
+
+  include-unshifted-mz: [true]
+  multi-gnn: [true]
+  binned-targs: [true]
+  embed-adduct: [true]
+  embed-collision: [true]
+  embed-instrument: [true]
+  embed-elem-group: [true]
+  grad-accumulate: [1]
+  encode-forms: [true]
+  add-hs: [true]
+  sk-tau: [0.05]
+  softmax-tau: [0.02]
+  add-reference: [true]
+  load-reference: [false]
+  save-reference: [true]
+  reference-dir: ["data/msg/closest_neighbors/infinite"]
+  max-ref-count: [3]
+  matching-method: ["softmax"]
+  logger: ["marason_inten_msg"]
+  single-ref: [false]
+  ppm-tol: [20]
+
+
+iterative_args:
+  -  split-name: [split.tsv]
+     save-dir: [split_rnd1_entropy]
+     magma-dag-folder: [results/marason_msg_allev/split_rnd1/preds_train_100_inten.hdf5]
+     seed: [1]
+
+  # -  split-name: [split.tsv]
+  #    save-dir: [split_rnd2_entropy]
+  #    magma-dag-folder: [results/marason_msg_allev/split_rnd2/preds_train_100_inten.hdf5]
+  #    seed: [2]
+
+  # -  split-name: [split.tsv]
+  #    save-dir: [split_rnd3_entropy]
+  #    magma-dag-folder: [results/marason_msg_allev/split_rnd3/preds_train_100_inten.hdf5]
+  #    seed: [3]

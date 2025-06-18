@@ -29,6 +29,11 @@ def get_args():
         action="store_true",
         default=False,
     )
+    parser.add_argument(
+       "--msg",
+       action="store_true",
+       default=False
+    )
     return parser.parse_args()
 
 
@@ -85,17 +90,29 @@ def main():
     out_dag_folder.parent.mkdir(exist_ok=True)
 
     max_bonds = run_magma.FRAGMENT_ENGINE_PARAMS["max_broken_bonds"]
+    pred_dag_h5 = common.HDF5Dataset(pred_dag_folder)
+    pred_dag_name_set = set(pred_dag_h5.get_all_names())
+    pred_dag_h5.close()
+
 
     num_workers = args.num_workers
     pred_dag_names, true_dag_names, out_dag_names = [], [], []
     true_dag_h5 = common.HDF5Dataset(true_dag_folder)
     for true_dag_n in tqdm(true_dag_h5.get_all_names()):
-        spec_id = 'pred_' + true_dag_n
-        pred_dag_names.append(spec_id)
-        true_dag_names.append(true_dag_n)
-        out_dag_names.append(true_dag_n)
+        if not args.msg:
+            spec_id = 'pred_' + true_dag_n
+            pred_dag_names.append(spec_id)
+            true_dag_names.append(true_dag_n)
+            out_dag_names.append(true_dag_n)
+        else:
+            spec_id =  'pred_' + true_dag_n.split(' eV')[0] + '.json'
+            if spec_id not in pred_dag_name_set:
+                continue
+            #spec_id = 'pred_' + true_dag_n 
+            pred_dag_names.append(spec_id)
+            true_dag_names.append(true_dag_n)
+            out_dag_names.append(true_dag_n)
     true_dag_h5.close()
-
     arg_dicts = [
         {
             "pred_dag_h5": pred_dag_folder,
@@ -115,6 +132,7 @@ def main():
         outs = [wrapper_fn(i) for i in arg_dicts]
     else:
         outs = common.chunked_parallel(arg_dicts, wrapper_fn, max_cpu=num_workers, chunks=1000)
+    print("success before write")
 
     # Write output to HDF5 file
     out_h5 = common.HDF5Dataset(out_dag_folder, mode='w')

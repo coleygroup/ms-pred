@@ -15,6 +15,8 @@ import numpy as np
 
 from rdkit import Chem
 from rdkit.Chem import Draw
+from matplotlib import gridspec
+
 
 legend_params = dict(frameon=False, facecolor="none", fancybox=False)
 method_colors = {
@@ -210,7 +212,66 @@ def plot_compare_ms(spec1, spec2, spec1_name='', spec2_name='', ce_label='', dpi
         ax.spines[spine].set_visible(False)
 
 
-def plot_ms(spec, spec_name='', ce_label='', dpi=300, ax=None, largest_mz=None):
+def plot_compare_ref_ms_with_structures(
+        spec1, spec2, spec3=None, spec4=None,
+        spec1_name='Target', spec2_name='Reference',
+        spec3_name='Predicted', spec4_name='Additional',
+        spec1_smiles=None, spec2_smiles=None,
+        spec3_smiles=None, spec4_smiles=None,
+        spec1_ce_label='', spec2_ce_label='', dpi=300, ppm=20, 
+        ax=None, save_path=None):
+    """
+    Plot up to 4 MS spectra with optional molecule structures in a 2x2 layout.
+    """
+
+    spectra = [spec1, spec2]
+    names = [f'{spec1_name} ({spec1_ce_label} eV)', f'{spec2_name} ({spec2_ce_label} eV)']
+    smiles = [spec1_smiles, spec2_smiles]
+
+    if spec3 is not None:
+        spectra.append(spec3)
+        names.append(spec3_name)
+        smiles.append(spec3_smiles)
+
+    if spec4 is not None:
+        spectra.append(spec4)
+        names.append(spec4_name)
+        smiles.append(spec4_smiles)
+
+    n_specs = len(spectra)
+    n_plots = min(n_specs, 4)  # support up to 4
+
+    fig = plt.figure(figsize=(14, 10), dpi=dpi)
+    gs = gridspec.GridSpec(2, 2, figure=fig, wspace=0.25, hspace=0.35)
+
+    # Compute global largest m/z
+    largest_mz = np.max(np.concatenate([s[:, 0] for s in spectra]))
+
+    for idx in range(n_plots):
+        row, col = divmod(idx, 2)
+        ax_spec = fig.add_subplot(gs[row, col])
+
+        ax_spec.set_title(names[idx], y=0.9, fontsize=16)
+        plot_ms(spectra[idx], ax=ax_spec, linewidth=1.0, largest_mz=largest_mz)
+
+        if idx < n_plots - 2:
+            ax_spec.set_xlabel("")
+            ax_spec.set_xticklabels([])
+
+        if smiles[idx]:
+            mol = Chem.MolFromSmiles(smiles[idx])
+            img = Draw.MolToImage(mol, size=(300, 300))
+            # Use inset axes for structure
+            inset_ax = ax_spec.inset_axes([0.7, 0.55, 0.25, 0.4])
+            inset_ax.imshow(img)
+            inset_ax.axis('off')
+
+    if save_path:
+        plt.savefig(save_path, bbox_inches='tight')
+    else:
+        plt.show()
+
+def plot_ms(spec, spec_name='', ce_label='', dpi=300, ax=None, largest_mz=None, linewidth=0.25):
     """
     spec is a 2d array [(mz1, inten1), (mz2, inten2), ...]
     """
@@ -228,7 +289,7 @@ def plot_ms(spec, spec_name='', ce_label='', dpi=300, ax=None, largest_mz=None):
     intensity_arr = spec[:, 1]
     for mz, inten in zip(spec[:, 0], intensity_arr):
         markerline, stemlines, baseline = plt.stem(mz, inten, '#58595B', markerfmt=" ", basefmt=" ")
-        plt.setp(stemlines, 'linewidth', 0.25)
+        plt.setp(stemlines, 'linewidth', linewidth)
 
     plt.axhline(y=0, color='k', linestyle='-', linewidth=0.4)
     plt.ylabel(spec_name)

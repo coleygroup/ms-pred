@@ -11,9 +11,7 @@ dist = "cos"
 num_workers = 32
 
 test_entries = [
-    {
-     "test_dataset": "nist20",
-     "dataset": "nist20",
+    {"dataset": "nist20",
      "train_split": "split_1_rnd1",
      "test_split": "split_1",
      "max_k": 50},

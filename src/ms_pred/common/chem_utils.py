@@ -6,7 +6,6 @@ import pandas as pd
 from functools import reduce
 from typing import List
 import logging
-
 import torch
 from rdkit import Chem
 from rdkit.Chem import Atom
@@ -103,6 +102,13 @@ ELEMENT_DIM = len(ELEMENT_VECTORS[0])
 COLLISION_PE_DIM = 64
 COLLISION_PE_SCALAR = 10000
 
+<<<<<<< HEAD
+=======
+SIM_PE_DIM = 64
+SIM_PE_SCALAR = 10
+
+GRAPHTYPE_LEN = 32
+>>>>>>> dev-local/main
 # Reasonable normalization vector for elements
 # Estimated by max counts (+ 1 when zero)
 NORM_VEC_MASS = np.array(
@@ -235,6 +241,12 @@ for ion in _ori_ions:
         ion2mass[eq_ion] = ion2mass[ion]
         if ion in ion2onehot_pos:
             ion2onehot_pos[eq_ion] = ion2onehot_pos[ion]
+            
+
+instrument2onehot_pos = {
+    "Orbitrap": 0,
+    "QTOF": 1, # Streamline upstream preprocessing to make QToF count here too 
+}
 
 
 def is_positive_adduct(adduct_str: str) -> bool:
