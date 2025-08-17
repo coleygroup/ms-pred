@@ -56,6 +56,7 @@ def add_frag_train_args(parser):
     parser.add_argument("--train-checkpoint", default="", action="store", type=str)
     parser.add_argument("--num-decoys", default=7, action="store", type=int)
     parser.add_argument("--decoy-path", default="", action="store", type=str)
+    parser.add_argument("--num-decoy-h5s", default=10, action="store", type=int)
 
     # Fix model params
     parser.add_argument("--gnn-layers", default=3, action="store", type=int)
@@ -145,14 +146,19 @@ def train_model():
 
     num_workers = kwargs.get("num_workers", 0)
     magma_dag_folder = Path(kwargs["magma_dag_folder"])
-    magma_tree_h5 = common.HDF5Dataset(magma_dag_folder)
-    name_to_json = {Path(i).stem.replace("pred_", ""): i for i in magma_tree_h5.get_all_names()}
+    magma_tree_h5 = common.PredSpecDB(magma_dag_folder)
+    name_to_keys = {}
+    for name in magma_tree_h5.get_all_names():
+        ces, remarks = magma_tree_h5.get_entries(name)
+        for ce, r in zip(ces, remarks):
+            name_to_keys[f'{name}_collision {ce}'] = (name, ce, r)
 
     pe_embed_k = kwargs["pe_embed_k"]
     root_encode = kwargs["root_encode"]
     binned_targs = kwargs["binned_targs"]
     num_decoys = kwargs["num_decoys"]
     decoy_path = kwargs["decoy_path"]
+    decoy_h5_nums = kwargs["num_decoy_h5s"]
     embed_elem_group = kwargs["embed_elem_group"]
     tree_processor = dag_data.TreeProcessor(
         pe_embed_k=pe_embed_k,
@@ -167,28 +173,31 @@ def train_model():
         train_df,
         tree_processor=tree_processor,
         magma_h5=magma_dag_folder,
-        magma_map=name_to_json,
+        magma_map=name_to_keys,
         num_workers=num_workers,
         num_decoys=num_decoys,
-        decoy_path_pattern=decoy_path,
+        decoy_path=decoy_path,
+        decoy_h5_nums=decoy_h5_nums,
     )
     val_dataset = dag_data.IntenContrDataset(
         val_df,
         tree_processor=tree_processor,
         magma_h5=magma_dag_folder,
-        magma_map=name_to_json,
+        magma_map=name_to_keys,
         num_workers=num_workers,
         num_decoys=num_decoys,
-        decoy_path_pattern=decoy_path,
+        decoy_path=decoy_path,
+        decoy_h5_nums=decoy_h5_nums,
     )
     test_dataset = dag_data.IntenContrDataset(
         test_df,
         tree_processor=tree_processor,
         magma_h5=magma_dag_folder,
-        magma_map=name_to_json,
+        magma_map=name_to_keys,
         num_workers=num_workers,
         num_decoys=num_decoys,
-        decoy_path_pattern=decoy_path,
+        decoy_path=decoy_path,
+        decoy_h5_nums=decoy_h5_nums,
     )
 
     persistent_workers = kwargs["num_workers"] > 0

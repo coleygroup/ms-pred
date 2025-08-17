@@ -23,7 +23,7 @@ import pytorch_lightning as pl
 import ms_pred.common as common
 from ms_pred.dag_pred import inten_model, gen_model, joint_model
 
-
+from rdkit import Chem
 from rdkit import rdBase
 from rdkit import RDLogger
 
@@ -40,7 +40,8 @@ def get_args():
     parser.add_argument("--sparse-k", default=100, action="store", type=int)
     parser.add_argument("--binned-out", default=False, action="store_true")
     parser.add_argument('--adduct-shift',default=False, action="store_true")
-    parser.add_argument("--num-workers", default=0, action="store", type=int)
+    parser.add_argument("--num-gpu-workers", default=0, action="store", type=int)
+    parser.add_argument("--num-cpu-workers", default=32, action="store", type=int)
     parser.add_argument("--batch-size", default=64, action="store", type=int)
     date = datetime.now().strftime("%Y_%m_%d")
     parser.add_argument("--save-dir", default=f"results/{date}_ffn_pred/")
@@ -98,8 +99,10 @@ def predict():
     # Get train, val, test inds
     df = pd.read_csv(labels, sep="\t")
 
-    if kwargs["debug"]:
+    if debug:
         df = df[:10]
+        kwargs["num_cpu_workers"] = 0
+        kwargs["num_gpu_workers"] = 0
 
     if kwargs["subset_datasets"] != "none":
         splits = pd.read_csv(data_dir / "splits" / kwargs["split_name"], sep="\t")
@@ -127,6 +130,7 @@ def predict():
     inten_model_obj = inten_model.IntenGNN.load_from_checkpoint(inten_checkpoint) #, map_location="cuda" if gpu else "cpu")
     gen_model_obj = gen_model.FragGNN.load_from_checkpoint(gen_checkpoint) #, map_location="cuda" if gpu else "cpu")
     avail_gpu_num = torch.cuda.device_count()
+    use_gpu = gpu and avail_gpu_num >= 0
 
     # Build joint model class
 
@@ -150,6 +154,7 @@ def predict():
             precursor_mz = entry["precursor"]
             name = entry["spec"]
             inchikey = common.inchikey_from_smiles(smi)
+            smi = Chem.MolToSmiles(Chem.MolFromSmiles(smi))  # canonicalize
             collision_energies = [i for i in ast.literal_eval(entry["collision_energies"])]
             tup_to_process = []
 
@@ -164,14 +169,14 @@ def predict():
         all_rows = [j for _, j in df.iterrows()]
 
         logging.info('Preparing entries')
-        if kwargs["num_workers"] == 0:
+        if kwargs["num_cpu_workers"] == 0:
             predict_entries = [prepare_entry(i) for i in tqdm(all_rows)]
         else:
             predict_entries = common.chunked_parallel(
                 all_rows,
                 prepare_entry,
                 chunks=1000,
-                max_cpu=kwargs["num_workers"],
+                max_cpu=kwargs["num_cpu_workers"],
             )
         predict_entries = [i for j in predict_entries for i in j]  # unroll
         random.shuffle(predict_entries)  # shuffle to evenly distribute graph size across batches
@@ -184,8 +189,8 @@ def predict():
 
         def producer_func(batch):
             torch.set_num_threads(1)
-            if gpu and avail_gpu_num >= 0:
-                if kwargs["num_workers"] > 0:
+            if use_gpu:
+                if kwargs["num_gpu_workers"] > 0:
                     worker_id = multiprocess.process.current_process()._identity[0]  # get worker id
                     gpu_id = worker_id % avail_gpu_num
                 else:
@@ -207,11 +212,13 @@ def predict():
                 max_nodes=kwargs["max_nodes"],
                 binned_out=binned_out,
                 adduct_shift=kwargs["adduct_shift"],
+                canonical_root_smi=True,
             )
             return_list = []
             if binned_out:
                 for output_spec, spec_name, smi, h5_name in \
                         zip(full_outputs["spec"], spec_names, smis, h5_names):
+                    output_spec = output_spec.cpu().numpy()
                     if kwargs["sparse_out"]:
                         sparse_k = kwargs["sparse_k"]
                         best_inds = np.argsort(output_spec, -1)[::-1][:sparse_k]
@@ -224,6 +231,8 @@ def predict():
                 for output_spec, spec_name, smi, h5_name, pred_frag in \
                         zip(full_outputs["spec"], spec_names, smis, h5_names, full_outputs["frag"]):
                     assert kwargs["sparse_out"], 'sparse_out must be True for non-binned output'
+                    output_spec = output_spec.cpu().numpy()
+                    pred_frag = pred_frag.cpu().numpy()
                     sparse_k = kwargs["sparse_k"]
                     best_inds = np.argsort(output_spec[:, 1], -1)[::-1][:sparse_k]
                     output_spec = output_spec[best_inds, :]
@@ -251,12 +260,20 @@ def predict():
                     h5.update_attr(h5_name, {'smiles': smi, 'ikey': inchikey, 'spec_name': spec_name})
             h5.close()
 
-        if kwargs["num_workers"] == 0:
-            output_entries = [producer_func(batch) for batch in tqdm(all_batched_entries)]
-            write_h5_func(output_entries)
+        if use_gpu:
+            if kwargs["num_gpu_workers"] == 0:
+                output_entries = [producer_func(batch) for batch in tqdm(all_batched_entries)]
+                write_h5_func(output_entries)
+            else:
+                common.chunked_parallel(all_batched_entries, producer_func, output_func=write_h5_func,
+                                        chunks=1000, max_cpu=kwargs["num_gpu_workers"])
         else:
-            common.chunked_parallel(all_batched_entries, producer_func, output_func=write_h5_func,
-                                    chunks=1000, max_cpu=kwargs["num_workers"])
+            if kwargs["num_cpu_workers"] == 0:
+                output_entries = [producer_func(batch) for batch in tqdm(all_batched_entries)]
+                write_h5_func(output_entries)
+            else:
+                common.chunked_parallel(all_batched_entries, producer_func, output_func=write_h5_func,
+                                        chunks=1000, max_cpu=kwargs["num_cpu_workers"])
 
 
 if __name__ == "__main__":

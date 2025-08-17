@@ -24,7 +24,7 @@ def get_args():
         default="magma_outputs",
     )
     parser.add_argument("--num-bins", default=15000, type=int)
-    parser.add_argument("--tree-pred-folder",)
+    parser.add_argument("--tree-pred-obj",)
     # parser.add_argument("--outfile", default=None)
     return parser.parse_args()
 
@@ -33,110 +33,113 @@ def main(args):
     """main."""
     dataset = args.dataset
     subform_name = args.subform_name
-    data_folder = Path(f"data/spec_datasets/{dataset}/subformulae/{subform_name}")
+    data_path = Path(f"data/spec_datasets/{dataset}/subformulae/{subform_name}")
 
-    tree_pred_folder = Path(args.tree_pred_folder)
-    outfile = tree_pred_folder.parent / "pred_eval.yaml"
-    outfile_grouped = tree_pred_folder.parent / "pred_eval_grouped.tsv"
+    tree_pred_path = Path(args.tree_pred_obj)
+    outfile = tree_pred_path.parent / "pred_eval.yaml"
+    outfile_grouped = tree_pred_path.parent / "pred_eval_grouped.tsv"
 
-    tree_pred_h5 = common.HDF5Dataset(tree_pred_folder)
-    pred_trees = tree_pred_h5.get_all_names()
+    pred_names = common.PredSpecDB(tree_pred_path).get_all_names()
     running_lists = defaultdict(lambda: [])
-    output_entries = []
 
     bins = np.linspace(0, 1500, args.num_bins)
 
-    def eval_item(pred_tree, tree_pred_folder, data_folder):
+    def eval_item(pred_name, tree_pred_path, data_path):
         """eval_item."""
-        tree_pred_h5 = common.HDF5Dataset(tree_pred_folder)
-        true_h5 = common.HDF5Dataset(data_folder)
-        spec_name = Path(pred_tree).stem.replace("pred_", "")
-        true_name = f"{spec_name}.json"
-        if not true_name in true_h5:
-            print(f"Skipping file {true_name} as no tree was found")
-            return None
+        tree_pred_h5 = common.PredSpecDB(tree_pred_path)
+        colli_engs, _ = tree_pred_h5.get_entries(pred_name)
+        true_h5 = common.HDF5Dataset(data_path)
+        spec_name = Path(pred_name).stem.replace("pred_", "")
 
-        true_tree = json.loads(true_h5.read_str(true_name))
-        pred_tree = json.loads(tree_pred_h5.read_str(pred_tree))
+        output_entries = []
+        for energy in colli_engs:
+            if energy is not None:
+                true_name = f"{spec_name}_collision {energy}.json"
+            else:
+                true_name = f"{spec_name}.json"
+            if not true_name in true_h5:
+                print(f"Skipping file {true_name} as no tree was found")
+                output_entries.append(None)
+                break
 
-        tree_form = true_tree["cand_form"]
-        pred_form = pred_tree["cand_form"]
-        pred_smi = pred_tree["smiles"]
+            true_tree = json.loads(true_h5.read_str(true_name))
+            pred_tree = tree_pred_h5.read(pred_name, energy)
+            pred_tree.add_hydrogen_shift()  # add hydrogen shift to fragment DAG
 
-        standard_pred_form = common.standardize_form(pred_form)
-        standard_tree_form = common.standardize_form(tree_form)
-        assert standard_pred_form == standard_tree_form
+            tree_form = true_tree["cand_form"]
+            pred_form = pred_tree.root_form
 
-        if true_tree["output_tbl"] is None:
-            return None
+            standard_pred_form = common.standardize_form(pred_form)
+            standard_tree_form = common.standardize_form(tree_form)
+            assert standard_pred_form == standard_tree_form
 
-        true_tbl = true_tree["output_tbl"]
-        pred_tbl = pred_tree["output_tbl"]
+            if true_tree["output_tbl"] is None:
+                output_entries.append(None)
+                break
 
-        # Step 1: Get overlap
-        true_frag_forms = [common.standardize_form(i) for i in true_tbl["formula"]]
-        pred_frag_forms = [common.standardize_form(i) for i in pred_tbl["formula"]]
+            true_tbl = true_tree["output_tbl"]
 
-        true_frag_keys = set(true_frag_forms)
-        pred_frag_keys = set(pred_frag_forms)
+            # Step 1: Get overlap
+            true_frag_forms = [common.standardize_form(i) for i in true_tbl["formula"]]
+            pred_frag_forms = [common.standardize_form(i) for i in pred_tree.frag_form]
 
-        true_masses = true_tbl["formula_mass_no_adduct"]
-        pred_masses = pred_tbl["formula_mass_no_adduct"]
+            true_frag_keys = set(true_frag_forms)
+            pred_frag_keys = set(pred_frag_forms)
 
-        true_intens = true_tbl["rel_inten"]
-        pred_intens = pred_tbl["rel_inten"]
+            true_masses = true_tbl["formula_mass_no_adduct"]
+            pred_masses = pred_tree.masses_no_adduct
 
-        true_form_to_inten = dict(zip(true_frag_forms, true_intens))
-        # pred_form_to_inten = dict(zip(pred_frag_forms, pred_intens))
-        pred_frag_forms_set = set(pred_frag_forms)
+            true_intens = true_tbl["rel_inten"]
 
-        total_true_inten = np.sum(true_intens)
-        overlap_inten = np.sum(
-            [
-                true_form_to_inten[i]
-                for i in true_form_to_inten
-                if i in pred_frag_forms_set
-            ]
-        )
-        inten_covg = float(overlap_inten / (total_true_inten + 1e-22))
+            true_form_to_inten = dict(zip(true_frag_forms, true_intens))
+            pred_frag_forms_set = set(pred_frag_forms)
 
-        true_digitized = set(np.digitize(true_masses, bins=bins).tolist())
-        pred_digitized = set(np.digitize(pred_masses, bins=bins).tolist())
+            total_true_inten = np.sum(true_intens)
+            overlap_inten = np.sum(
+                [
+                    true_form_to_inten[i]
+                    for i in true_form_to_inten
+                    if i in pred_frag_forms_set
+                ]
+            )
+            inten_covg = float(overlap_inten / (total_true_inten + 1e-22))
 
-        digitized_overlap = len(true_digitized.intersection(pred_digitized))
-        digitized_cvg = digitized_overlap / (len(true_digitized) + 1e-22)
+            true_digitized = set(np.digitize(true_masses, bins=bins).tolist())
+            pred_digitized = set(np.digitize(pred_masses, bins=bins).tolist())
 
-        true_num_frags = len(true_frag_keys)
-        pred_num_frags = len(pred_frag_keys)
-        intersect_amt = len(true_frag_keys.intersection(pred_frag_keys))
-        union_amt = len(true_frag_keys.union(pred_frag_keys))
+            digitized_overlap = len(true_digitized.intersection(pred_digitized))
+            digitized_cvg = digitized_overlap / (len(true_digitized) + 1e-22)
 
-        jaccard = intersect_amt / union_amt
-        coverage = intersect_amt / true_num_frags
+            true_num_frags = len(true_frag_keys)
+            pred_num_frags = len(pred_frag_keys)
+            intersect_amt = len(true_frag_keys.intersection(pred_frag_keys))
+            union_amt = len(true_frag_keys.union(pred_frag_keys))
 
-        smiles_mass = common.mass_from_smi(pred_smi)
-        output_entry = {
-            "name": str(spec_name),
-            "smiles": pred_smi,
-            "num_pred": pred_num_frags,
-            "num_true": true_num_frags,
-            "jaccard": jaccard,
-            "coverage": coverage,
-            "compound_mass": smiles_mass,
-            "mass_bin": common.bin_mass_results(smiles_mass),
-            "digitized_coverage": digitized_cvg,
-            "inten_coverage": inten_covg,
-        }
-        return output_entry
+            jaccard = intersect_amt / union_amt
+            coverage = intersect_amt / true_num_frags
+
+            smiles_mass = common.mass_from_smi(pred_tree.root_canonical_smiles)
+            output_entries.append({
+                "name": str(spec_name),
+                "smiles": pred_tree.root_canonical_smiles,
+                "num_pred": pred_num_frags,
+                "num_true": true_num_frags,
+                "jaccard": jaccard,
+                "coverage": coverage,
+                "compound_mass": smiles_mass,
+                "mass_bin": common.bin_mass_results(smiles_mass),
+                "digitized_coverage": digitized_cvg,
+                "inten_coverage": inten_covg,
+            })
+        return output_entries
 
     eval_entries = [
-        dict(pred_tree=pred_tree, tree_pred_folder=tree_pred_folder, data_folder=data_folder)
-        for pred_tree in pred_trees
+        dict(pred_name=pred_name, tree_pred_path=tree_pred_path, data_path=data_path)
+        for pred_name in pred_names
     ]
     eval_fn = lambda x: eval_item(**x)
-    # output_entries = [eval_fn(i) for i in eval_entries]
     output_entries = common.chunked_parallel(eval_entries, eval_fn)
-    output_entries = [i for i in output_entries if i is not None]
+    output_entries = [i for j in output_entries for i in j if i is not None]
 
     for output_entry in output_entries:
         running_lists["jaccard"].append(output_entry["jaccard"])
@@ -148,7 +151,7 @@ def main(args):
 
     final_output = {
         "dataset": dataset,
-        "tree_folder": str(tree_pred_folder),
+        "tree_path": str(tree_pred_path),
         "individuals": sorted(output_entries, key=lambda x: x["jaccard"]),
     }
 

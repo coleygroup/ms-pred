@@ -32,7 +32,7 @@ class IntenGNN(pl.LightningModule):
         pool_op: str = "avg",
         node_feats: int = common.ELEMENT_DIM + common.MAX_H,
         pe_embed_k: int = 0,
-        max_broken: int = run_magma.FRAGMENT_ENGINE_PARAMS["max_broken_bonds"],
+        max_broken: int = fragmentation.FRAGMENT_ENGINE_PARAMS["max_broken_bonds"],
         frag_set_layers: int = 0,
         loss_fn: str = "cosine",
         root_encode: str = "gnn",
@@ -222,7 +222,7 @@ class IntenGNN(pl.LightningModule):
             raise NotImplementedError()
 
         self.num_outputs = len(self.output_activations)
-        self.output_size = run_magma.FRAGMENT_ENGINE_PARAMS["max_broken_bonds"] * 2 + 1
+        self.output_size = fragmentation.FRAGMENT_ENGINE_PARAMS["max_broken_bonds"] * 2 + 1
         if self.include_unshifted_mz:
             self.output_map = nn.Linear(
                 self.hidden_size, self.num_outputs * self.output_size * 2
@@ -402,10 +402,9 @@ class IntenGNN(pl.LightningModule):
             :,
             0,
         ]
-        output_binned = out["output_binned"][:, 0, :]
-        out_preds_binned = [i.cpu().detach().numpy() for i in output_binned]
+        out_preds_binned = out["output_binned"][:, 0, :]
         out_preds = [
-            pred[:num_frag, :].cpu().detach().numpy()
+            pred[:num_frag, :]
             for pred, num_frag in zip(output, num_frags)
         ]
 
@@ -775,3 +774,6 @@ class IntenGNN(pl.LightningModule):
             },
         }
         return ret
+
+    def lr_scheduler_step(self, scheduler, optimizer_idx, metric=None):  # fix lightning API mismatch for torch>=2.0
+        scheduler.step()

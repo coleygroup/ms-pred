@@ -1,7 +1,6 @@
 """DAG Gen model """
 import numpy as np
-from typing import List
-import json
+from typing import Tuple
 import torch
 import pytorch_lightning as pl
 import torch.nn as nn
@@ -12,7 +11,6 @@ import dgl.nn as dgl_nn
 import ms_pred.common as common
 import ms_pred.nn_utils as nn_utils
 import ms_pred.magma.fragmentation as fragmentation
-import ms_pred.magma.run_magma as magma
 import ms_pred.dag_pred.dag_data as dag_data
 
 
@@ -30,7 +28,7 @@ class FragGNN(pl.LightningModule):
         pool_op: str = "avg",
         node_feats: int = common.ELEMENT_DIM + common.MAX_H,
         pe_embed_k: int = 0,
-        max_broken: int = magma.FRAGMENT_ENGINE_PARAMS["max_broken_bonds"],
+        max_broken: int = fragmentation.FRAGMENT_ENGINE_PARAMS["max_broken_bonds"],
         root_encode: str = "gnn",
         inject_early: bool = False,
         warmup: int = 1000,
@@ -55,7 +53,7 @@ class FragGNN(pl.LightningModule):
             pool_op (str, optional): _description_. Defaults to "avg".
             node_feats (int, optional): _description_. Defaults to common.ELEMENT_DIM+common.MAX_H.
             pe_embed_k (int, optional): _description_. Defaults to 0.
-            max_broken (int, optional): _description_. Defaults to magma.FRAGMENT_ENGINE_PARAMS["max_broken_bonds"].
+            max_broken (int, optional): _description_. Defaults to fragmentation.FRAGMENT_ENGINE_PARAMS["max_broken_bonds"].
             root_encode (str, optional): _description_. Defaults to "gnn".
             inject_early (bool, optional): _description_. Defaults to False.
             warmup (int, optional): _description_. Defaults to 1000.
@@ -433,7 +431,7 @@ class FragGNN(pl.LightningModule):
         max_nodes: int = None,
         decode_final_step: bool = True,
         canonical_root_smi: bool = False,
-    ) -> List[dict]:
+    ) -> Tuple[dict, dgl.DGLGraph]:
         """prdict_mol.
 
         Predict a new fragmentation tree from a starting root molecule
@@ -450,9 +448,10 @@ class FragGNN(pl.LightningModule):
             decode_final_step (bool): if False, do not decode the final
               auto-regressive step. Instead, process it later by multi-
               processing workers
+            canonical_root_smi (bool): if the root_smi is canonicalized
 
         Return:
-            Dictionary containing results
+            Dictionary containing results, root graph object
         """
         if type(root_smi) is str:
             batched_input = False
@@ -486,347 +485,195 @@ class FragGNN(pl.LightningModule):
         elif self.root_encode == "fp":
             root_fp = torch.from_numpy(np.array([common.get_morgan_fp_smi(rsmi) for rsmi in root_smi]))
             root_repr = root_fp.float().to(device)
-
-        form_to_min_score = [{} for _ in range(batch_size)]
-        frag_hash_to_entry = [{} for _ in range(batch_size)]
-        frag_to_hash = [{} for _ in range(batch_size)]
-        stack = [[rf] for rf in root_frag]
         depth = 0
-        root_hash = [e.wl_hash(rf) for e, rf in zip(engine, root_frag)]
-        for f2h, rf, rh in zip(frag_to_hash, root_frag, root_hash):
-            f2h[rf] = rh
-        root_score = [e.score_fragment(rf)[1] for e, rf in zip(engine, root_frag)]
-        id_ = [0 for _ in range(batch_size)]
-        # TODO: Compute as in fragment engine
-        root_entry = [{
-            "frag": int(rf),
-            "frag_hash": rh,
-            "parents": [],
-            "atoms_pulled": [],
-            "left_pred": [],
-            "max_broken": 0,
-            "tree_depth": 0,
-            "id": 0,
-            "prob_gen": 1,
-            "score": rs,
-        } for rf, rh, rs in zip(root_frag, root_hash, root_score)]
-        id_ = [i+1 for i in id_]
-        for e, re, rf, rh, f2ms, fh2e in zip(engine, root_entry, root_frag, root_hash, form_to_min_score, frag_hash_to_entry):
-            re.update(e.atom_pass_stats(rf, depth=0))
-            f2ms[re["form"]] = re["score"]
-            fh2e[rh] = re
+
+        mol_batch_ids = torch.tensor([i for i in range(len(root_frag))], device=device, dtype=torch.long)
+        natoms = torch.tensor([i.natoms for i in engine], device=device, dtype=torch.long)
+        max_atoms = max(natoms)
+        frags_bin = torch.zeros((batch_size, max_atoms), device=device, dtype=torch.bool)
+        frags_bin[torch.arange(max_atoms, device=device)[None, :] < natoms[:, None]] = 1
+        broken_nums = torch.zeros(batch_size, device=device, dtype=torch.float)
+        frag_form_vecs = root_form_vec
+        accu_prob = torch.ones_like(broken_nums)
+
+        all_pred_prob = torch.zeros((batch_size, max_nodes), device=device, dtype=torch.float)  # accumulated probability
+        all_pred_broken_bond = torch.zeros((batch_size, max_nodes), device=device, dtype=torch.float)  # broken bond order
+        all_pred_frags = torch.zeros((batch_size, max_nodes, max_atoms), device=device, dtype=torch.bool)  # frag in binary
+        all_pred_frag_mass = torch.zeros((batch_size, max_nodes), device=device, dtype=torch.float)
+        all_pred_frag_form_vecs = torch.zeros((batch_size, max_nodes, root_form_vec.shape[-1]), device=device, dtype=torch.float)
+        all_pred_prob[:, 0] = accu_prob
+        all_pred_frags[:, 0, :] = frags_bin
+        all_pred_frag_mass[:, 0] = nn_utils.form_vec_to_mass(root_form_vec)
+        all_pred_frag_form_vecs[:, 0, :] = root_form_vec
+        graphs = [root_graph_dict[i]["graph"].subgraph(frag[:n]) for i, frag, n in zip(mol_batch_ids, frags_bin, natoms)]
+        frag_batch = dgl.batch(graphs).to(device)
+        all_pred_graph_spectrum_hash = torch.zeros((batch_size, max_nodes, frag_batch.ndata['h'].shape[1]), device=device, dtype=torch.float)  # graph hash
+        all_pred_graph_spectrum_hash[:, 0, :] = nn_utils.msg_passing_frag_graph_hash(frag_batch)
 
         # Step 3: Run the autoregressive gen loop
         with torch.no_grad():
-
             # Note: we don't fragment at the final depth
             while depth < max_depth:
-                # Convert all new frags to graphs (stack is to run next)
-                new_info_dicts = []
-                new_graphs = []
-                new_stack = []
-                reverse_idx = []
-                batched_select = []
-                batched_num_nodes = []
-                batched_old_edge_idx = [0]
-                idx_offset = 0
-                for rev_i, (st, e, rg) in enumerate(zip(stack, engine, root_graph_dict)):
-                    for i in st:
-                        info = self.tree_processor.get_frag_info(i, e)
-                        if len(info['new_to_old']) > 1:
-                            new_info_dicts.append(info)
-                            reverse_idx.append(rev_i)
-                            new_graphs.append(rg['graph'])
-                            new_stack.append(i)
-                            batched_select.append(info['new_to_old'] + idx_offset)
-                            batched_num_nodes.append(len(info['new_to_old']))
-                            idx_offset += rg['graph'].number_of_nodes()
-                            batched_old_edge_idx.append(batched_old_edge_idx[-1] + rg['graph'].number_of_edges())
-                if len(new_info_dicts) == 0:
-                    break
-                stack = new_stack
-                batched_select = torch.from_numpy(np.concatenate(batched_select)).to(device)
-                batched_num_nodes = torch.LongTensor(batched_num_nodes).to(device)
-                batched_old_edge_idx = torch.LongTensor(batched_old_edge_idx[1:]).to(device)
-
-                # Get batched new DGL graph by extracting subgraph
-                frag_batch = dgl.batch(new_graphs).to(device)
-                frag_batch = frag_batch.subgraph(batched_select)
-                batched_num_edges = torch.bincount(torch.bucketize(frag_batch.edata[dgl.EID], batched_old_edge_idx, right=True))
-                frag_batch.set_batch_num_nodes(batched_num_nodes)
-                frag_batch.set_batch_num_edges(batched_num_edges)
-
-                frag_forms = [i["form"] for i in new_info_dicts]
-                frag_form_vecs = [common.formula_to_dense(i) for i in frag_forms]
-                frag_form_vecs = torch.FloatTensor(np.array(frag_form_vecs)).to(device)
-                new_frag_hashes = [engine[ri].wl_hash(i) for i, ri in zip(stack, reverse_idx)]
-
-                for st, nfh, ri in zip(stack, new_frag_hashes, reverse_idx):
-                    frag_to_hash[ri][st] = nfh
-
-                # if DGL graph has >40000 nodes, split the batch to cap GPU memory usage
-
-                # pred_leaving_list = []
-                # for _frag_batch, _new_frag_hashes, _rev_idx, _frag_form_vecs in \
-                #         split_batch(frag_batch, new_frag_hashes, reverse_idx, frag_form_vecs):
-                frag_batch = frag_batch.to(device)
-                self.tree_processor.add_pe_embed(frag_batch)  # add random walk feature. GPU memory intensive!
-                inds = torch.tensor(reverse_idx).long().to(device)
-
-                broken_nums_ar = np.array(
-                    [frag_hash_to_entry[ri][i]["max_broken"] for i, ri in zip(new_frag_hashes, reverse_idx)]
-                )
-                broken_nums_tensor = torch.FloatTensor(broken_nums_ar).to(device)
+                self.tree_processor.add_pe_embed(frag_batch)
 
                 pred_leaving = self.forward(
                     graphs=frag_batch,
                     root_repr=root_repr,
-                    ind_maps=inds,
-                    broken=broken_nums_tensor,  # torch.ones_like(inds) * depth,
+                    ind_maps=mol_batch_ids,
+                    broken=broken_nums,  # torch.ones_like(inds) * depth,
                     collision_engs=collision_engs,
                     precursor_mzs=precursor_mzs,
                     adducts=adducts,
                     root_forms=root_form_vec,
                     frag_forms=frag_form_vecs,
                 )
-                pred_leaving = pred_leaving.cpu()  # switch to cpu device
+
+                cur_max_atoms = pred_leaving.shape[1]
+                accu_prob = accu_prob.unsqueeze(-1) * pred_leaving  # accumulated probs of current prediction
+                graph_batch_sizes = torch.bincount(mol_batch_ids, minlength=batch_size)
+                accu_prob = nn_utils.pad_packed_tensor(accu_prob, graph_batch_sizes, 0).view(batch_size, -1)
+
+                # select top-max_nodes probabilities for graph processing
+                temp_prev_prob = torch.cat((all_pred_prob, accu_prob), dim=1)  # all probs (including prev ones)
+                #prev_kept_indices = torch.argsort(temp_prev_prob, dim=1, descending=True)[:, :max_nodes]
+                prev_kept_indices = torch.argsort(temp_prev_prob, dim=1, descending=True)[:, :max_nodes * 2]
+
+                # indices selected for node removal
+                select_mask = (prev_kept_indices >= max_nodes) & \
+                              (temp_prev_prob[torch.arange(batch_size, device=device).unsqueeze(-1), prev_kept_indices] > threshold)
+                select_batch_idx, pos_idx = select_mask.nonzero(as_tuple=True)
+                sel_idx = (prev_kept_indices[select_batch_idx, pos_idx] - max_nodes)
+                sel_prob = accu_prob[select_batch_idx, sel_idx]
+                frag_batch_idx = (torch.cumsum(graph_batch_sizes, dim=0) - graph_batch_sizes).repeat_interleave(
+                    torch.bincount(select_batch_idx, minlength=batch_size)) + sel_idx // cur_max_atoms
+                broken_nums_per_frag = broken_nums[frag_batch_idx]
+
+                if len(sel_idx) == 0:  # no new fragments generated
+                    break
+
+                # Remove atoms, and find connected components as fragments
+                new_frag_batch, broken_bond_orders, new_info = \
+                    nn_utils.batch_remove_single_atoms(
+                        frag_batch, frag_batch_idx, sel_idx % cur_max_atoms,
+                        {"sel_prob": sel_prob, "mol_batch_id": select_batch_idx, "broken_bonds": broken_nums_per_frag}
+                    )
+                if new_frag_batch is None:  # no new fragments generated
+                    break
+                broken_bond_orders += new_info["broken_bonds"]  # sum num of broken bonds with previous breakages
+
+                count_per_mol_batch = torch.bincount(new_info["mol_batch_id"], minlength=batch_size)
+
+                # Generate frag ids from DGL node labels
+                frag_pos = torch.cat([torch.arange(n, device=device)
+                                      for n in count_per_mol_batch], dim=0)  # (num_frags,)
+                # assign frag id from DGL node n_id by GPU
+                node_ids = new_frag_batch.ndata['n_id']  # (total_nodes,)
+                batch_num_nodes = new_frag_batch.batch_num_nodes()  # list of length num_frags
+                frag_ids = torch.repeat_interleave(
+                    torch.arange(len(batch_num_nodes), device=device),
+                    batch_num_nodes
+                )  # (total_nodes,)
+                mol_per_node = new_info["mol_batch_id"][frag_ids]  # (total_nodes,)
+                pos_per_node = frag_pos[frag_ids]  # (total_nodes,)
+                temp_new_frag_bin = torch.zeros((batch_size, count_per_mol_batch.max(), max_atoms), device=device, dtype=torch.bool)
+                temp_new_frag_bin[mol_per_node, pos_per_node, node_ids] = True
+                temp_new_frag_bin = torch.cat((all_pred_frags, temp_new_frag_bin), dim=1)
+                temp_new_frag_dec = nn_utils.bin2dec(temp_new_frag_bin)
+
+                # concat and calculate the probability again
+                new_accu_prob = nn_utils.pad_packed_tensor(new_info["sel_prob"], count_per_mol_batch, 0)  # B x max(N_frags)
+                temp_new_prob = torch.cat((all_pred_prob, new_accu_prob), dim=1)
+
+                # compute fragment hash
+                if self.root_encode == "gnn":
+                    self.tree_processor.rm_pe_embed(new_frag_batch)
+                new_frag_hash = nn_utils.msg_passing_frag_graph_hash(new_frag_batch)
+                temp_frag_hash = torch.cat((all_pred_graph_spectrum_hash,
+                                            nn_utils.pad_packed_tensor(new_frag_hash, count_per_mol_batch, 0)), dim=1)
+
+                # only keep unique fragments
+                tmp_max_frag = max_nodes + count_per_mol_batch.max()
+                frag_id_batch_idx = torch.arange(batch_size, device=device).unsqueeze(-1).expand(-1, tmp_max_frag)
+                _, uniq_frag_inv_idx = nn_utils.np_like_unique(
+                    torch.cat((frag_id_batch_idx.unsqueeze(-1),
+                               temp_frag_hash), dim=-1).view(-1, temp_frag_hash.shape[-1] + 1), dim=0)
+                uniq_frag_mask = torch.zeros_like(temp_new_prob, dtype=torch.bool)
+                uniq_frag_mask[uniq_frag_inv_idx // tmp_max_frag, uniq_frag_inv_idx % tmp_max_frag] = True
+                temp_new_prob[
+                    ~uniq_frag_mask &
+                    (temp_new_prob > 0) #&
+                    # ~((temp_new_prob == 0) & (torch.arange(tmp_max_frag, device=device).unsqueeze(0) < max_nodes))
+                ] = -1  # for new nodes, only unique frags are considered
+
+                new_kept_indices = torch.argsort(temp_new_prob, dim=1, descending=True)[:, :max_nodes]
+                all_pred_prob = torch.gather(temp_new_prob, 1, new_kept_indices)
+
+                # update all_pred_frags
+                temp_batch_idx = torch.arange(batch_size, device=device)  # (B,)
+                temp_batch_idx = temp_batch_idx.unsqueeze(1).expand(-1, new_kept_indices.shape[1])  # (B, K)
+                all_pred_frags = temp_new_frag_bin[temp_batch_idx, new_kept_indices]
+
+                # Same for broken bond orders
+                new_bb = nn_utils.pad_packed_tensor(broken_bond_orders, count_per_mol_batch, 0)
+                temp_new_bb = torch.cat((all_pred_broken_bond, new_bb), dim=1)
+
+                # take the minimal broken bonds among same fragments
+                # _, uniq_frag_inv_pos = torch.unique(
+                #     torch.stack((frag_id_batch_idx, temp_new_frag_dec), dim=-1).view(-1, 2),
+                #     dim=0, return_inverse=True)
+                # bb_uniq_frag = torch.full((uniq_frag_inv_pos.max() + 1,), self.max_broken, device=device, dtype=torch.float).\
+                #     scatter_reduce_(0, uniq_frag_inv_pos, temp_new_bb.view(-1), 'min')
+                # temp_new_bb = torch.gather(bb_uniq_frag, 0, uniq_frag_inv_pos).reshape(batch_size, -1)
+
+                all_pred_broken_bond = torch.gather(temp_new_bb, 1, new_kept_indices)
+
+                # flatten new_kept_indices
+                temp_mask = (new_kept_indices >= max_nodes) & (all_pred_prob > threshold)
+                temp_idx, pos_idx = temp_mask.nonzero(as_tuple=True)
+                temp_offset = torch.cumsum(count_per_mol_batch, 0) - count_per_mol_batch
+                new_kept_indices_flat = new_kept_indices[temp_idx, pos_idx] - max_nodes + \
+                                        temp_offset.repeat_interleave(torch.bincount(temp_idx, minlength=batch_size))
+
+                if len(new_kept_indices_flat) == 0:  # no new fragments selected
+                    break
+
+                # update frag_batch and mol_batch_ids
+                frag_batch, _, __ = nn_utils.slice_batched_graph(new_frag_batch, new_kept_indices_flat)
+                mol_batch_ids = new_info["mol_batch_id"][new_kept_indices_flat]
+                broken_nums = broken_bond_orders[new_kept_indices_flat]
+                accu_prob = new_info["sel_prob"][new_kept_indices_flat]
+
+                # frag_form_vecs; update frag mass, frag_form_vecs, graph_spectrum_hash
+                frag_form_vecs = nn_utils.frag_to_form_vec(frag_batch, self.add_hs, self.embed_elem_group)
+                temp_rerank_mask = new_kept_indices < max_nodes
+                temp_rerank_idx, rerank_pos_idx = temp_rerank_mask.nonzero(as_tuple=True)
+                all_pred_frag_mass[temp_rerank_mask] = all_pred_frag_mass[temp_rerank_idx, new_kept_indices[temp_rerank_mask]]
+                all_pred_frag_mass[temp_idx, pos_idx] = nn_utils.form_vec_to_mass(frag_form_vecs)
+                all_pred_frag_form_vecs[temp_rerank_mask] = all_pred_frag_form_vecs[temp_rerank_idx, new_kept_indices[temp_rerank_mask]]
+                all_pred_frag_form_vecs[temp_idx, pos_idx] = frag_form_vecs
+                all_pred_graph_spectrum_hash[temp_rerank_mask] = all_pred_graph_spectrum_hash[temp_rerank_idx, new_kept_indices[temp_rerank_mask]]
+                all_pred_graph_spectrum_hash[temp_idx, pos_idx] = new_frag_hash[new_kept_indices_flat]
+
+                # next step
                 depth += 1
 
-                # Rank order all the atom preds and predictions
-                # Continuously add items to the stack as long as they maintain
-                # the max node constraint ranked by prob
+        if self.root_encode == "gnn":
+            self.tree_processor.rm_pe_embed(root_repr)
 
-                # Get all frag probabilities and sort them
-                cur_probs = [sorted(
-                    [i["prob_gen"] for i in fh2e.values()]
-                )[::-1] for fh2e in frag_hash_to_entry]
-                if max_nodes is None:
-                    min_prob = torch.full(batch_size, threshold)  # force on cpu
-                else:
-                    cur_prob_len = torch.LongTensor([len(cp) for cp in cur_probs])
-                    thresh_prob = torch.FloatTensor([cp[:max_nodes][-1] for cp in cur_probs])
-                    min_prob = torch.where(cur_prob_len < max_nodes, torch.full_like(thresh_prob, threshold), thresh_prob)
-
-                new_items = list(
-                    zip(stack,
-                        new_frag_hashes,
-                        pred_leaving,
-                        [d['new_to_old'] for d in new_info_dicts],
-                        reverse_idx)
-                )
-                sorted_order = [[] for _ in range(batch_size)]
-                for item_ind, item in enumerate(new_items):
-                    frag_hash = item[1]
-                    pred_vals_f = item[2]
-                    rev_idx = item[-1]
-                    parent_prob = frag_hash_to_entry[rev_idx][frag_hash]["prob_gen"]
-                    for atom_ind, (atom_pred, prob_gen) in enumerate(
-                        zip(pred_vals_f, parent_prob * pred_vals_f)
-                    ):
-                        sorted_order[rev_idx].append(
-                            dict(
-                                item_ind=item_ind,
-                                atom_ind=atom_ind,
-                                prob_gen=prob_gen.item(),
-                                atom_pred=atom_pred.item(),
-                                orig_entry=new_items[item_ind],
-                            )
-                        )
-
-                sorted_order = [sorted(so, key=lambda x: -x["prob_gen"]) for so in sorted_order]
-                new_stack = [[] for _ in range(batch_size)]
-
-                # Process ordered list continuously
-                batch_to_process = [{
-                    "frag_hash_to_entry": frag_hash_to_entry[rev_idx],
-                    "frag_to_hash": frag_to_hash[rev_idx],
-                    "form_to_min_score": form_to_min_score[rev_idx],
-                    "engine": engine[rev_idx],
-                    "min_prob": min_prob[rev_idx],
-                    "id_": id_[rev_idx],
-                    "sorted_order": sorted_order[rev_idx],
-                    "depth": depth,
-                    "max_nodes": max_nodes,
-                    "threshold": threshold,
-                } for rev_idx in range(batch_size)]
-
-                if depth == max_depth and not decode_final_step: # return an unprocessed list
-                    return batch_to_process
-                else:
-                    new_vals = [decoder_wrapper(b) for b in batch_to_process]
-
-                    # Update the global variables
-                    for rev_idx in range(batch_size):
-                        frag_hash_to_entry[rev_idx] = new_vals[rev_idx]["frag_hash_to_entry"]
-                        frag_to_hash[rev_idx] = new_vals[rev_idx]["frag_to_hash"]
-                        form_to_min_score[rev_idx] = new_vals[rev_idx]["form_to_min_score"]
-                        id_[rev_idx] = new_vals[rev_idx]["id_"]
-                        sorted_order[rev_idx] = new_vals[rev_idx]["sorted_order"]
-                        new_stack[rev_idx] = new_vals[rev_idx]["new_stack"]
-
-                    stack = new_stack
-
-        # Only get min score for ech formula
-        frag_hash_to_entry = [{
-            k: v
-            for k, v in fh2e.items()
-            if f2ms[v["form"]] == v["score"]
-        } for fh2e, f2ms in zip(frag_hash_to_entry, form_to_min_score)]
-
-        if max_nodes is not None:
-            return_entries = []
-            for fh2e in frag_hash_to_entry:
-                sorted_keys = sorted(
-                    list(fh2e.keys()),
-                    key=lambda x: -fh2e[x]["prob_gen"],
-                )
-                fh2e = {
-                    k: fh2e[k] for k in sorted_keys[:max_nodes]
-                }
-                return_entries.append(fh2e)
-            frag_hash_to_entry = return_entries
-        if batched_input:
-            return frag_hash_to_entry
-        else:
-            return frag_hash_to_entry[0]
-
-    @staticmethod
-    def parallel_consumer_decoder(data):
-        param_dic = data["param_dic"]
-        max_nodes = param_dic["max_nodes"]
-
-        # The real processing steps
-        new_val = decoder_wrapper(param_dic)
-        frag_hash_to_entry = new_val["frag_hash_to_entry"]
-        form_to_min_score = new_val["form_to_min_score"]
-
-        frag_hash_to_entry = {
-            k: v
-            for k, v in frag_hash_to_entry.items()
-            if form_to_min_score[v["form"]] == v["score"]
+        return_dict = {
+            "frags": all_pred_frags,
+            "probs": all_pred_prob,
+            "brokens": all_pred_broken_bond,
+            "masses_no_adduct": all_pred_frag_mass,
+            "frag_form_vecs": all_pred_frag_form_vecs,
+            "root_form_vec": root_form_vec,
+            "natoms": natoms,
+            "nfrags": torch.sum(all_pred_prob > threshold, dim=-1)
         }
 
-        if max_nodes is not None:
-            sorted_keys = sorted(
-                list(frag_hash_to_entry.keys()),
-                key=lambda x: -frag_hash_to_entry[x]["prob_gen"],
-            )
-            frag_hash_to_entry = {
-                k: frag_hash_to_entry[k] for k in sorted_keys[:max_nodes]
-            }
+        if not batched_input:
+            return_dict = {k: v[0] for k, v in return_dict.items()}
+        return return_dict, root_repr
 
-        # Formulate the result
-        output = {
-            "root_canonical_smiles": data["root_canonical_smiles"],
-            "name": data["name"],
-            "frags": frag_hash_to_entry,
-            "collision_energy": data["collision_energy"],
-        }
-        output = json.dumps(output, indent=2)
-
-        return data["out_name"], output
-
-
-def decoder_wrapper(param_dic):
-    return auto_regressive_decode(**param_dic)
-
-
-def auto_regressive_decode(sorted_order, frag_hash_to_entry, frag_to_hash, form_to_min_score, engine, min_prob, id_,
-                           depth, max_nodes, threshold):
-    new_stack = []
-    for new_item in sorted_order:
-        prob_gen = new_item["prob_gen"]
-        atom_ind = new_item["atom_ind"]
-        atom_pred = new_item["atom_pred"]
-        item_ind = new_item["item_ind"]
-
-        # Filter out on minimum prob
-        if prob_gen <= min_prob:
-            continue
-
-        # Calc stack ind
-        orig_entry = new_item["orig_entry"]
-        frag_int = orig_entry[0]
-        frag_hash = orig_entry[1]
-        dgl_new_to_old = orig_entry[3]
-
-        # Get atom ind
-        atom = dgl_new_to_old[atom_ind]
-
-        # Calc remove dict
-        out_dicts = engine.remove_atom(frag_int, int(atom))
-
-        # Update atoms_pulled for parent
-        frag_hash_to_entry[frag_hash]["atoms_pulled"].append(int(atom))
-        frag_hash_to_entry[frag_hash]["left_pred"].append(float(atom_pred))
-        parent_broken = frag_hash_to_entry[frag_hash]["max_broken"]
-
-        for out_dict in out_dicts:
-            out_hash = out_dict["new_hash"]
-            out_frag = out_dict["new_frag"]
-            rm_bond_t = out_dict["rm_bond_t"]
-            frag_to_hash[out_frag] = out_hash
-            current_entry = frag_hash_to_entry.get(out_hash)
-
-            max_broken = parent_broken + rm_bond_t
-
-            # Define probability of generating
-            if current_entry is None:
-                score = engine.score_fragment(int(out_frag))[1]
-
-                new_stack.append(out_frag)
-                new_entry = {
-                    "frag": int(out_frag),
-                    "frag_hash": out_hash,
-                    "score": score,
-                    "id": id_,
-                    "parents": [frag_hash],
-                    "atoms_pulled": [],
-                    "left_pred": [],
-                    "max_broken": max_broken,
-                    "tree_depth": depth,
-                    "prob_gen": prob_gen,
-                }
-                id_ += 1
-                new_entry.update(
-                    engine.atom_pass_stats(out_frag, depth=max_broken)
-                )
-
-                # reset to best score
-                temp_form = new_entry["form"]
-                prev_best_score = form_to_min_score.get(
-                    temp_form, float("inf")
-                )
-                form_to_min_score[temp_form] = min(
-                    new_entry["score"], prev_best_score
-                )
-                frag_hash_to_entry[out_hash] = new_entry
-
-            else:
-                current_entry["parents"].append(frag_hash)
-                current_entry["prob_gen"] = max(
-                    current_entry["prob_gen"], prob_gen
-                )
-
-            # Update cur probs for the current batch index
-            # This is inefficient and can be made smarter without
-            # doing another minimum calculation
-            cur_probs = sorted(
-                [i["prob_gen"] for i in frag_hash_to_entry.values()]
-            )[::-1]
-            if max_nodes is None or len(cur_probs) < max_nodes:
-                min_prob = threshold
-            elif max_nodes is not None and len(cur_probs) >= max_nodes:
-                min_prob = cur_probs[max_nodes - 1]
-            else:
-                raise NotImplementedError()
-
-    return {
-        "frag_hash_to_entry": frag_hash_to_entry,
-        "frag_to_hash": frag_to_hash,
-        "form_to_min_score": form_to_min_score,
-        "min_prob": min_prob,
-        "id_": id_,
-        "sorted_order": sorted_order,
-        "new_stack": new_stack,
-    }
+    def lr_scheduler_step(self, scheduler, optimizer_idx, metric=None):  # fix lightning API mismatch for torch>=2.0
+        scheduler.step()

@@ -19,6 +19,7 @@ TYPEW = {
 }
 MAX_BONDS = max(list(TYPEW.values())) + 1
 MAX_ATOM_BONDS = 6
+FRAGMENT_ENGINE_PARAMS = {"max_broken_bonds": 6, "max_tree_depth": 3}
 
 # CC bonds are strongest --> higher score = harder to break
 HETEROW = {False: 2, True: 1}
@@ -30,8 +31,8 @@ class FragmentEngine(object):
     def __init__(
         self,
         mol_str: str,
-        max_tree_depth: int = 3,
-        max_broken_bonds: int = 6,
+        max_tree_depth: int = FRAGMENT_ENGINE_PARAMS['max_tree_depth'],
+        max_broken_bonds: int = FRAGMENT_ENGINE_PARAMS['max_broken_bonds'],
         mol_str_type: str = "smiles",
         mol_str_canonicalized: bool = False,
     ):
@@ -40,7 +41,6 @@ class FragmentEngine(object):
         Args:
             mol_str (str): smiles or inchi
             max_tree_depth (int): Depth of tree
-            max_broken_bonds (int): Max order of broken bonds (i.e,. determinant of h shift)
             mol_str_type (str): Define smiles
         """
 
@@ -49,7 +49,7 @@ class FragmentEngine(object):
             self.smiles = mol_str
             self.mol = Chem.MolFromSmiles(self.smiles)
             if self.mol is None:
-                return
+                raise RuntimeError(f"Invalid molecule encountered. SMILES: {self.smiles}")
             self.inchi = Chem.MolToInchi(self.mol)
             if not mol_str_canonicalized:
                 self.mol = common.canonical_mol_from_inchi(self.inchi)
@@ -60,7 +60,7 @@ class FragmentEngine(object):
             self.inchi = mol_str
             self.mol = common.canonical_mol_from_inchi(self.inchi)  # inchi must be canonicalized
             if self.mol is None:
-                return
+                raise RuntimeError(f"Invalid molecule encountered. InChI: {self.inchi}")
             self.smiles = Chem.MolToSmiles(self.mol)
             self.mol = Chem.MolFromSmiles(self.smiles)  # always use canonical smiles for mols
         else:

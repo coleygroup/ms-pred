@@ -18,12 +18,12 @@ example: # modify example to your hostname
 
 # below are example configurations in Coley group nodes
 molgpu01:
-  python_path: '/home/runzhong/mambaforge/envs/ms-main/bin/python'
+  python_path: '/home/runzhong/mambaforge/envs/ms-gen-torch24/bin/python'
   gen_ckpt: '/home/runzhong/ms-models/iceberg_results_20241111/dag_nist20/split_1_rnd1/version_0/best.ckpt'
   inten_ckpt: '/home/runzhong/ms-models/iceberg_results_20241111/dag_inten_nist20/split_1_rnd1/version_1/best.ckpt'
-  cuda_devices: [2, 3]
-  batch_size: 8
-  num_workers: 12
+  cuda_devices: [1]
+  batch_size: 128
+  num_workers: 2
   sparse_k: 100
   max_nodes: 100
   threshold: 0.0

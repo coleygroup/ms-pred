@@ -30,7 +30,7 @@ class FragGNN(pl.LightningModule):
         pool_op: str = "avg",
         node_feats: int = common.ELEMENT_DIM + common.MAX_H,
         pe_embed_k: int = 0,
-        max_broken: int = magma.FRAGMENT_ENGINE_PARAMS["max_broken_bonds"],
+        max_broken: int = fragmentation.FRAGMENT_ENGINE_PARAMS["max_broken_bonds"],
         root_encode: str = "gnn",
         inject_early: bool = False,
         warmup: int = 1000,
@@ -56,7 +56,7 @@ class FragGNN(pl.LightningModule):
             pool_op (str, optional): _description_. Defaults to "avg".
             node_feats (int, optional): _description_. Defaults to common.ELEMENT_DIM+common.MAX_H.
             pe_embed_k (int, optional): _description_. Defaults to 0.
-            max_broken (int, optional): _description_. Defaults to magma.FRAGMENT_ENGINE_PARAMS["max_broken_bonds"].
+            max_broken (int, optional): _description_. Defaults to fragmentation.FRAGMENT_ENGINE_PARAMS["max_broken_bonds"].
             root_encode (str, optional): _description_. Defaults to "gnn".
             inject_early (bool, optional): _description_. Defaults to False.
             warmup (int, optional): _description_. Defaults to 1000.

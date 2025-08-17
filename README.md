@@ -40,11 +40,13 @@ Install and set up the conda environment using [mamba](https://mamba.readthedocs
 mamba env create -f environment.yml
 mamba activate ms-gen
 pip install -r requirements.txt
-python3 setup.py develop
+pip install -e .
 ```
-Installation will take ~5 minutes.
+Installation will take ~10 minutes.
 
-Note: if you are not using GPU, please comment the CUDA-based packages in ``envorinment.yaml``.
+Note: The ``environment.yml`` has configurations for CUDA 11.8. 
+CUDA versions 12.1 and 12.4 are also supported, please change the CUDA tags in ``environment.yml`` accordingly.
+If you are not using GPU, please comment the CUDA-based packages in ``envorinment.yaml``.
 
 ## Demo <a name="demo"></a>
 A demo of how to use mass spectrum predictors (ICEBERG as an example) for structural elucidation campaigns can be found at [``notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb``](notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb).

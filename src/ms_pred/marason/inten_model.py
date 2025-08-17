@@ -17,11 +17,7 @@ import ms_pred.common as common
 import ms_pred.marason.dag_data as dag_data
 import ms_pred.nn_utils as nn_utils
 import ms_pred.magma.fragmentation as fragmentation
-import ms_pred.magma.run_magma as run_magma
-from rdkit import Chem
-from rdkit.Chem import Draw
 import ms_pred.nn_utils.dgl_modules as dgl_mods
-from ms_pred.nn_utils import GGNN
 import matplotlib.pyplot as plt
 pygm.BACKEND = "pytorch"
 
@@ -43,7 +39,7 @@ class IntenGNN(pl.LightningModule):
         pool_op: str = "avg",
         node_feats: int = common.ELEMENT_DIM + common.MAX_H,
         pe_embed_k: int = 0,
-        max_broken: int = run_magma.FRAGMENT_ENGINE_PARAMS["max_broken_bonds"],
+        max_broken: int = fragmentation.FRAGMENT_ENGINE_PARAMS["max_broken_bonds"],
         frag_set_layers: int = 0,
         loss_fn: str = "cosine",
         root_encode: str = "gnn",
@@ -268,7 +264,7 @@ class IntenGNN(pl.LightningModule):
         else:
             raise NotImplementedError()
         
-        self.output_size = run_magma.FRAGMENT_ENGINE_PARAMS["max_broken_bonds"] * 2 + 1
+        self.output_size = fragmentation.FRAGMENT_ENGINE_PARAMS["max_broken_bonds"] * 2 + 1
         self.num_outputs = len(self.output_activations)
         if self.add_ref:
             mz_groups = 2 if self.include_unshifted_mz else 1

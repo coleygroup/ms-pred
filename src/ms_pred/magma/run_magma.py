@@ -22,9 +22,6 @@ import ms_pred.common as common
 import ms_pred.magma.fragmentation as fragmentation
 
 
-FRAGMENT_ENGINE_PARAMS = {"max_broken_bonds": 6, "max_tree_depth": 3}
-
-
 def greedy_prune(
     fe: fragmentation.FragmentEngine, included_nodes: list, tree_nodes: list
 ):
@@ -164,7 +161,7 @@ def magma_augmentation(
     spectra_adduct = spec_to_adduct.get(spec_name_clean, None)
 
     # Step 1 - Generate fragmentations inside fragmentation engine
-    fe = fragmentation.FragmentEngine(mol_str=spectra_smiles, **FRAGMENT_ENGINE_PARAMS)
+    fe = fragmentation.FragmentEngine(mol_str=spectra_smiles, **fragmentation.FRAGMENT_ENGINE_PARAMS)
 
     # Outside try except loop
     if debug:

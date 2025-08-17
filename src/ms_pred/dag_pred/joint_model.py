@@ -8,7 +8,9 @@ import ms_pred.common as common
 import ms_pred.dag_pred.gen_model as gen_model
 import ms_pred.dag_pred.inten_model as inten_model
 import ms_pred.dag_pred.dag_data as dag_data
-
+from ms_pred import nn_utils
+from ms_pred.magma.fragmentation import FRAGMENT_ENGINE_PARAMS
+MAX_BROKEN_BONDS = FRAGMENT_ENGINE_PARAMS['max_broken_bonds']
 
 class JointModel(pl.LightningModule):
     def __init__(
@@ -82,7 +84,6 @@ class JointModel(pl.LightningModule):
             max_nodes (int): max_nodes
             binned_out
         """
-
         self.eval()
         self.freeze()
 
@@ -101,7 +102,7 @@ class JointModel(pl.LightningModule):
         if not canonical_root_smi:
             root_smi = [common.smiles_from_inchi(common.inchi_from_smiles(_)) for _ in root_smi] # canonical smiles
 
-        frag_tree = self.gen_model_obj.predict_mol(
+        frag_preds, root_reprs = self.gen_model_obj.predict_mol(
             root_smi=root_smi,
             collision_eng=collision_eng,
             precursor_mz=precursor_mz,
@@ -111,49 +112,37 @@ class JointModel(pl.LightningModule):
             max_nodes=max_nodes,
             canonical_root_smi=True,
         )
-        processed_trees = []
-        out_trees = []
-        for r_smi, colli_eng, adct, p_mz, tree in zip(root_smi, collision_eng, adduct, precursor_mz, frag_tree):
-            tree = {
-                "root_canonical_smiles": r_smi,
-                "name": "",
-                "collision_energy": colli_eng,
-                "frags": tree,
-                "adduct": adct
-            }
 
-            processed_tree = self.inten_tp.process_tree_inten_pred(tree)
+        num_frags = frag_preds['nfrags']
+        ind_maps = torch.arange(batch_size, device=device).repeat_interleave(num_frags)
 
-            # Save for output wrangle
-            out_tree = processed_tree["tree"]
-            processed_tree = processed_tree["dgl_tree"]
+        rep_roots, _, __ = nn_utils.slice_batched_graph(root_reprs, ind_maps)
+        frag_mask = nn_utils.pack_padded_tensor(frag_preds['frags'], num_frags)
+        frag_graphs = nn_utils.batched_mask_subgraph(
+            rep_roots,
+            nn_utils.pack_padded_tensor(frag_mask, frag_preds['natoms'].repeat_interleave(num_frags)),
+            frag_mask.sum(dim=-1),
+        )
 
-            processed_tree["adduct"] = common.ion2onehot_pos[adct]
-            processed_tree["name"] = ""
-            processed_tree["precursor"] = p_mz
-            processed_trees.append(processed_tree)
-            out_trees.append(out_tree)
-        batch = self.inten_collate_fn(processed_trees)
-        inten_frag_ids = batch["inten_frag_ids"]
+        broken_bonds = frag_preds['brokens']
+        nhs = frag_preds['frag_form_vecs'][:, :, common.element_to_ind['H']]
+        max_add_hs = broken_bonds
+        max_remove_hs = torch.min(broken_bonds, nhs)
 
-        safe_device = lambda x: x.to(device) if x is not None else x
+        mass_offset = torch.tensor(
+            [(common.ion2mass[add], -common.ELECTRON_MASS) if common.is_positive_adduct(add[-1]) else
+             (common.ion2mass[add],  common.ELECTRON_MASS)
+             for add in adduct], device=device)[:, :, None] + \
+            (torch.arange(MAX_BROKEN_BONDS * 2 + 1, device=device)[None, None, :] - MAX_BROKEN_BONDS) * \
+                      common.CHEM_MASSES[common.element_to_ind['H']].item()
+        masses = frag_preds['masses_no_adduct'][:, :, None, None] + mass_offset[:, None, :, :]
 
-        frag_graphs = safe_device(batch["frag_graphs"])
-        root_reprs = safe_device(batch["root_reprs"])
-        ind_maps = safe_device(batch["inds"])
-        num_frags = safe_device(batch["num_frags"])
-        broken_bonds = safe_device(batch["broken_bonds"])
-        max_remove_hs = safe_device(batch["max_remove_hs"])
-        max_add_hs = safe_device(batch["max_add_hs"])
-        masses = safe_device(batch["masses"])  # b x n x 2 x 13
-
-        assert adduct_shift, 'adduct shift must be enforced'
-
-        adducts = safe_device(batch["adducts"]).to(device)
-        collision_engs = safe_device(batch["collision_engs"]).to(device)
-        precursor_mzs = safe_device(batch["precursor_mzs"]).to(device)
-        root_forms = safe_device(batch["root_form_vecs"])
-        frag_forms = safe_device(batch["frag_form_vecs"])
+        to_tensor = lambda x: torch.tensor(x, device=device, dtype=torch.float) if x is not None else x
+        adducts = to_tensor([common.ion2onehot_pos[a] for a in adduct])
+        collision_engs = to_tensor(collision_eng)
+        precursor_mzs = to_tensor(precursor_mz)
+        root_forms = frag_preds['root_form_vec']
+        frag_forms = frag_preds['frag_form_vecs']
 
         # IDs to use to recapitulate
         inten_preds = self.inten_model_obj.predict(
@@ -181,33 +170,16 @@ class JointModel(pl.LightningModule):
                                                               # (1 + h_shift * 2) * 2 if include_unshifted_mz==True
             if not self.inten_model_obj.include_unshifted_mz:
                 masses = masses[:, :, :1, :].contiguous()  # only keep m/z with adduct shift
-            for inten_pred, mass, inten_frag_id, out_tree, n in \
-                    zip(inten_preds["spec"], masses.cpu().numpy(), inten_frag_ids, out_trees, num_frags.cpu().numpy()):
+
+            for i, (inten_pred, mass, n) in \
+                    enumerate(zip(inten_preds["spec"], masses, num_frags)):
                 out_mass = mass[:n].reshape(-1)
                 out_inten = inten_pred.reshape(-1)
-                out_frag = []
-                for id in inten_frag_id:
-                    out_frag += [out_tree["frags"][id]["frag"]] * num_shifts
-
-                # merge duplicated mass + frag combinations
-                seen_mass = []
-                seen_frag = []
-                seen_inten = []
-                for i in range(len(out_mass)):
-                    same_mass_ids = np.nonzero(np.abs(out_mass[i] - np.array(seen_mass)) < 0.0001)
-                    same_frag_ids = np.nonzero(np.array(seen_frag) == out_frag[i])
-                    same_mass_frag_ids = np.intersect1d(same_mass_ids, same_frag_ids)
-                    if len(same_mass_frag_ids) > 0:  # this mass + frag has been recorded
-                        assert len(same_mass_frag_ids) == 1  # the entry should be unique
-                        seen_inten[same_mass_frag_ids.item()] += out_inten[i]  # merge intensity
-                    else:  # this mass + frag is new
-                        seen_mass.append(out_mass[i])
-                        seen_frag.append(out_frag[i])
-                        seen_inten.append(out_inten[i])
+                out_frag = nn_utils.bin2dec(frag_preds['frags'][i, :n]).repeat_interleave(num_shifts)
 
                 # add to output dict
-                out["spec"].append(np.stack((np.array(seen_mass), np.array(seen_inten)), axis=1))
-                out["frag"].append(seen_frag)
+                out["spec"].append(torch.stack((out_mass, out_inten), dim=1))
+                out["frag"].append(out_frag)
 
         if batched_input:
             return out

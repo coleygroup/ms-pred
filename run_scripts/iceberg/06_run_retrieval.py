@@ -8,9 +8,10 @@ retrieve_file = "src/ms_pred/retrieval/retrieval_benchmark.py"
 subform_name = "no_subform"
 devices = [0, 1]
 vis_devices = ",".join([str(_) for _ in devices])
-num_workers = len(devices) * 6
+num_gpu_workers = len(devices) * 2
+num_cpu_workers = 128
 max_nodes = 100
-batch_size = 8
+batch_size = 64
 dist = "entropy"
 binned_out = True
 
@@ -82,7 +83,8 @@ for test_entry in test_entries:
     --inten-checkpoint {inten_model} \\
     --save-dir {save_dir} \\
     --dataset-labels {labels} \\
-    --num-workers {num_workers} \\
+    --num-cpu-workers {num_cpu_workers} \\
+    --num-gpu-workers {num_gpu_workers} \\
     --gpu \\
     --adduct-shift \\
     """

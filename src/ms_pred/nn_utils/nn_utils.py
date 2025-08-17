@@ -778,7 +778,7 @@ def pack_padded_tensor(input, lengths):
     batch_size = len(lengths)
     packed_tensors = []
     for i in range(batch_size):
-        packed_tensors.append(input[i, :lengths[i].item(), :])
+        packed_tensors.append(input[i, :lengths[i].item()])
     packed_tensors = torch.cat(packed_tensors)
     return packed_tensors
     

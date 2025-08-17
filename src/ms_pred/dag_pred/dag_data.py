@@ -130,20 +130,20 @@ class TreeProcessor:
     def _convert_to_dgl(
         self,
         tree: dict,
-        include_targets: bool = True,
+        include_frag_targets: bool = True,
+        include_inten_targets: bool = True,
         last_row=False,
     ):
         """_convert_to_dgl.
 
         Args:
             tree (dict): tree dictionary
-            include_targets (bool): Try to add inten targets for supervising
+            include_inten_targets (bool): Try to add inten targets for supervising
                 the inten model
             last_row:
         """
         root_smiles = tree["root_canonical_smiles"]
         engine = fragmentation.FragmentEngine(mol_str=root_smiles, mol_str_type="smiles", mol_str_canonicalized=True)
-        # bottom_depth = engine.max_broken_bonds
         bottom_depth = engine.max_tree_depth
         if self.root_encode == "gnn":
             root_frag = engine.get_root_frag()
@@ -165,62 +165,86 @@ class TreeProcessor:
             -common.ELECTRON_MASS if common.is_positive_adduct(tree["adduct"]) else common.ELECTRON_MASS
         ])
 
-        # Need to include mass and inten targets here, maybe not necessary in
-        # all cases?
-        masses, inten_frag_ids, dgl_inputs, inten_targets, frag_targets, max_broken = (
-            [],
-            [],
-            [],
-            [],
-            [],
-            [],
-        )
-        forms = []
-        max_remove_hs, max_add_hs = [], []
-        for k, sub_frag in tree["frags"].items():
-            max_broken_num = sub_frag["max_broken"]
-            tree_depth = sub_frag["tree_depth"]
-
-            # Skip because we never fragment last row
-            if (not last_row) and (tree_depth == bottom_depth):
-                continue
-
-            binary_targs = sub_frag["atoms_pulled"]
-            frag = sub_frag["frag"]
-
-            # Get frag dict and target
-            frag_dict = self.featurize_frag(
-                frag,
-                engine,
+        if isinstance(tree, dict):
+            masses, inten_frag_ids, dgl_inputs, inten_targets, frag_targets, max_broken = (
+                [],
+                [],
+                [],
+                [],
+                [],
+                [],
             )
-            forms.append(frag_dict["form"])
-            old_to_new = frag_dict["old_to_new"]
-            graph = frag_dict["graph"]
-            max_broken.append(max_broken_num)
+            forms = []
+            max_remove_hs, max_add_hs = [], []
+            for k, sub_frag in tree["frags"].items():
+                max_broken_num = sub_frag["max_broken"]
+                tree_depth = sub_frag["tree_depth"]
 
-            max_remove_hs.append(sub_frag["max_remove_hs"])
-            max_add_hs.append(sub_frag["max_add_hs"])
+                # Skip because we never fragment last row
+                if (not last_row) and (tree_depth == bottom_depth):
+                    continue
 
-            # if include_targets and not self.binned_targs:
-            #     inten_targs = sub_frag["intens"]
-            #     inten_targets.append(inten_targs)
+                binary_targs = sub_frag["atoms_pulled"]
+                frag = sub_frag["frag"]
 
-            inten_frag_ids.append(k)
+                # Get frag dict and target
+                frag_dict = self.featurize_frag(
+                    frag,
+                    engine,
+                )
+                forms.append(frag_dict["form"])
+                old_to_new = frag_dict["old_to_new"]
+                graph = frag_dict["graph"]
+                max_broken.append(max_broken_num)
 
-            # For gen model only!!
-            targ_vec = np.zeros(graph.num_nodes())
-            for j in old_to_new[binary_targs]:
-                targ_vec[j] = 1
+                max_remove_hs.append(sub_frag["max_remove_hs"])
+                max_add_hs.append(sub_frag["max_add_hs"])
 
-            graph = frag_dict["graph"]
+                # if include_targets and not self.binned_targs:
+                #     inten_targs = sub_frag["intens"]
+                #     inten_targets.append(inten_targs)
 
-            # Define targ vec
-            dgl_inputs.append(graph)
-            masses.append(sub_frag["base_mass"])
-            frag_targets.append(torch.from_numpy(targ_vec))
+                inten_frag_ids.append(k)
 
-        if include_targets:
-            inten_targets = np.array(tree["raw_spec"])
+                # For gen model only!!
+                targ_vec = np.zeros(graph.num_nodes())
+                for j in old_to_new[binary_targs]:
+                    targ_vec[j] = 1
+
+                graph = frag_dict["graph"]
+
+                # Define targ vec
+                dgl_inputs.append(graph)
+                masses.append(sub_frag["base_mass"])
+                frag_targets.append(torch.from_numpy(targ_vec))
+
+            if include_inten_targets:
+                inten_targets = np.array(tree["raw_spec"])
+        elif isinstance(tree, common.MassSpec):
+            masses = tree.masses_no_adduct
+            inten_frag_ids = np.arange(tree.frags.shape[0])
+            max_broken = tree.brokens
+            max_add_hs = tree.max_add_hs
+            max_remove_hs = tree.max_remove_hs
+            forms = tree.frag_form
+
+            dgl_inputs = []
+            for frag in tree.int_frags:
+                frag_dict = self.featurize_frag(
+                    frag,
+                    engine,
+                )
+                graph = frag_dict["graph"]
+                dgl_inputs.append(graph)
+
+            if include_inten_targets:
+                inten_targets = np.array(tree.info["raw_spec"])
+
+            frag_targets = []  # for gen model only, not implemented
+            assert not include_frag_targets
+
+        else:
+            raise TypeError(f'Unknown type of {tree}')
 
         masses = engine.shift_bucket_masses[None, None, :] + \
                  adduct_mass_shift[None, :, None] + \
@@ -238,12 +262,12 @@ class TreeProcessor:
             "root_repr": root_repr,
             "dgl_frags": dgl_inputs,
             "masses": masses,
-            "inten_targs": np.array(inten_targets) if include_targets else None,
+            "inten_targs": np.array(inten_targets) if include_inten_targets else None,
             "inten_frag_ids": inten_frag_ids,
             "max_remove_hs": max_remove_hs,
             "max_add_hs": max_add_hs,
             "max_broken": max_broken,
-            "targs": frag_targets,
+            "targs": frag_targets if include_frag_targets else None,
             "form_vecs": all_form_vecs,
             "root_form_vec": root_form_vec,
         }
@@ -251,8 +275,9 @@ class TreeProcessor:
 
     def _process_tree(
         self,
-        tree: dict,
-        include_targets: bool = True,
+        tree: dict, # or common.MassSpec
+        include_frag_targets: bool = True,
+        include_inten_targets: bool = True,
         last_row=False,
         convert_to_dgl=True,
     ):
@@ -266,7 +291,7 @@ class TreeProcessor:
             pickle_input: If pickle_input, this
         """
         if convert_to_dgl:
-            out_dict = self._convert_to_dgl(tree, include_targets, last_row)
+            out_dict = self._convert_to_dgl(tree, include_frag_targets, include_inten_targets, last_row)
             if "collision_energy" in tree:
                 out_dict["collision_energy"] = tree["collision_energy"]
         else:
@@ -282,7 +307,7 @@ class TreeProcessor:
             if isinstance(root_repr, dgl.DGLGraph):
                 self.add_pe_embed(root_repr)
 
-        if include_targets and self.binned_targs:
+        if include_inten_targets and self.binned_targs:
             intens = out_dict["inten_targs"]
             bin_posts = np.clip(np.digitize(intens[:, 0], self.bins), 0, len(self.bins) - 1)
             new_out = np.zeros_like(self.bins)
@@ -292,16 +317,21 @@ class TreeProcessor:
             out_dict["inten_targs"] = inten_targets
         return out_dict
 
-    def add_pe_embed(self, graph):
+    def add_pe_embed(self, graph, remove_existing=False):
         pe_embeds = nn_utils.random_walk_pe(
             graph, k=self.pe_embed_k, eweight_name="e_ind"
         )
+        if remove_existing:
+            self.rm_pe_embed(graph)
         graph.ndata["h"] = torch.cat((graph.ndata["h"], pe_embeds), -1).float()
         return graph
 
+    def rm_pe_embed(self, graph):
+        graph.ndata["h"] = graph.ndata["h"][:, :-self.pe_embed_k]
+
     def process_tree_gen(self, tree: dict, convert_to_dgl=True):
         proc_out = self._process_tree(
-            tree, include_targets=False, last_row=False, convert_to_dgl=convert_to_dgl
+            tree, include_frag_targets=True, include_inten_targets=False, last_row=False, convert_to_dgl=convert_to_dgl
         )
         keys = {
             "root_repr",
@@ -317,7 +347,7 @@ class TreeProcessor:
 
     def process_tree_inten(self, tree, convert_to_dgl=True):
         proc_out = self._process_tree(
-            tree, include_targets=True, last_row=True, convert_to_dgl=convert_to_dgl
+            tree, include_frag_targets=False, include_inten_targets=True, last_row=True, convert_to_dgl=convert_to_dgl
         )
         keys = {
             "root_repr",
@@ -335,9 +365,9 @@ class TreeProcessor:
         dgl_tree = {i: proc_out[i] for i in keys}
         return {"dgl_tree": dgl_tree, "tree": tree}
 
-    def process_tree_inten_pred(self, tree: dict, convert_to_dgl=True):
+    def process_tree_inten_pred(self, tree, convert_to_dgl=True):
         proc_out = self._process_tree(
-            tree, include_targets=False, last_row=True, convert_to_dgl=convert_to_dgl
+            tree, include_frag_targets=False, include_inten_targets=False, last_row=True, convert_to_dgl=convert_to_dgl
         )
         keys = {
             "root_repr",
@@ -403,6 +433,7 @@ class TreeProcessor:
 
         g = dgl.graph(data=(src_tens, dest_tens), num_nodes=num_nodes)
         g.ndata["h"] = node_data.float()
+        g.ndata["n_id"] = torch.arange(num_nodes, dtype=torch.long)
         g.edata["e"] = bond_types_onehot.float()
         g.edata["e_ind"] = bond_types.long()
         return g
@@ -472,11 +503,7 @@ class DAGDataset(Dataset):
         self.name_to_precursors = {k: v['precursor'] for k, v in self.name_to_dict.items()}
 
     def load_tree(self, x):
-        filename = self.name_to_dict[x]["magma_file"]
-        if not type(self.magma_h5) is common.HDF5Dataset:
-            self.magma_h5 = common.HDF5Dataset(self.magma_h5)
-        fp = self.magma_h5.read_str(filename)
-        return json.loads(fp)
+        raise NotImplementedError
 
     def read_fn(self, x):
         return self.read_tree(self.load_tree(x))
@@ -602,6 +629,13 @@ class GenDataset(DAGDataset):
         }
         return output
 
+    def load_tree(self, x):
+        filename = self.name_to_dict[x]["magma_file"]
+        if not type(self.magma_h5) is common.HDF5Dataset:
+            self.magma_h5 = common.HDF5Dataset(self.magma_h5)
+        fp = self.magma_h5.read_str(filename)
+        return json.loads(fp)
+
 
 class IntenDataset(DAGDataset):
     """GenDatset."""
@@ -712,6 +746,13 @@ class IntenDataset(DAGDataset):
         }
         return output
 
+    def load_tree(self, x):
+        filekeys = self.name_to_dict[x]["magma_file"]
+        if not type(self.magma_h5) is common.PredSpecDB:
+            self.magma_h5 = common.PredSpecDB(self.magma_h5)
+        spec = self.magma_h5.read(*filekeys)
+        return spec
+
 
 class IntenContrDataset(DAGDataset):
     """Intensity Contrastive Dataset."""
@@ -725,7 +766,8 @@ class IntenContrDataset(DAGDataset):
         num_workers=0,
         use_ray: bool = False,
         num_decoys: int = 7,
-        decoy_path_pattern: str = 'results/dag_nist20/split_1_rnd1/preds_train_100/decoy_tree_preds/decoy_tree_preds_chunk_{}.hdf5',
+        decoy_path: str = 'results/dag_nist20/split_1_rnd1/preds_train_100/decoy_tree_preds/decoy_tree_preds.hdf5',
+        decoy_h5_nums: int=10,
         **kwargs,
     ):
         """__init__.
@@ -741,9 +783,8 @@ class IntenContrDataset(DAGDataset):
             num_workers=num_workers,
             use_ray=use_ray,
         )
-        self.decoy_path_pattern = decoy_path_pattern
-        self.all_h5_paths = list(Path(self.decoy_path_pattern).parent.glob(self.decoy_path_pattern.split('/')[-1].format('*')))
-        self.all_h5_nums = len(self.all_h5_paths)
+        self.decoy_db = common.PredSpecDB(decoy_path, num_h5s=decoy_h5_nums)
+        self.all_h5_nums = decoy_h5_nums
         self.num_decoys = num_decoys
 
     @classmethod
@@ -798,39 +839,35 @@ class IntenContrDataset(DAGDataset):
 
         outlist = [outdict]
 
-        h5_idx = int(common.str_to_hash(spec_name), base=16) % self.all_h5_nums
-        decoy_path = self.decoy_path_pattern.format(h5_idx)
-        decoy_h5_obj = common.HDF5Dataset(decoy_path)
-        if f'pred_{spec_name}' in decoy_h5_obj:
-            colli_eng_h5obj = decoy_h5_obj[f'pred_{spec_name}']
-            if f'collision {colli_eng}' in colli_eng_h5obj:
-                decoys_h5obj = colli_eng_h5obj[f'collision {colli_eng}']
-                decoy_keys = list(decoys_h5obj.keys())
-                if self.num_decoys < len(decoy_keys):
-                    decoy_keys = random.sample(decoy_keys, self.num_decoys)
-                for decoy_key in decoy_keys:
-                    h5_name = f'pred_{spec_name}/collision {colli_eng}/{decoy_key}'
-                    gen_pred = json.loads(decoy_h5_obj.read_str(h5_name))
-
-                    # Filter out invalid entries
-                    engine = fragmentation.FragmentEngine(
-                        gen_pred['root_canonical_smiles'], mol_str_type="smiles",
-                        mol_str_canonicalized=True)
-                    root_frag_id = engine.get_root_frag()
-                    frag_ids = [frag_entry['frag'] for frag_entry in gen_pred['frags'].values()]
-                    if any([id > root_frag_id for id in frag_ids]):  # entry is invalid
-                        logging.warning('Entry is invalid, skipping')
-                        continue
-
-                    smi = gen_pred['root_canonical_smiles']
-                    trees = self.tree_processor.process_tree_inten_pred(gen_pred)
-                    decoy_entry = trees['dgl_tree']
-                    decoy_entry.update(
-                        {"name": gen_pred['name'], "adduct": adduct, "precursor": precursor, "collision_energy": colli_eng,
-                         "smiles": smi, "decoy": 1})
-                    outlist.append(decoy_entry)
+        _, decoy_keys = self.decoy_db.get_entries(f'pred_{spec_name}', colli_eng)
+        if len(decoy_keys) > 0:
+            if self.num_decoys < len(decoy_keys):
+                decoy_keys = random.sample(decoy_keys, self.num_decoys)
+            for decoy_key in decoy_keys:
+                gen_pred = self.decoy_db.read(f'pred_{spec_name}', colli_eng, decoy_key)
+                smi = gen_pred.root_canonical_smiles
+                engine = fragmentation.FragmentEngine(smi, mol_str_type="smiles", mol_str_canonicalized=True)
+                root_frag_id = engine.get_root_frag()
+                frag_ids = gen_pred.int_frags
+                if any([id > root_frag_id for id in frag_ids]):  # entry is invalid
+                    logging.warning('Entry is invalid, skipping')
+                    continue
+                trees = self.tree_processor.process_tree_inten_pred(gen_pred)
+                decoy_entry = trees['dgl_tree']
+                decoy_entry.update(
+                    {"name": name + '_decoy_' + decoy_key,
+                     "adduct": adduct, "precursor": precursor, "collision_energy": colli_eng,
+                     "smiles": smi, "decoy": 1})
+                outlist.append(decoy_entry)
 
         return outlist
+
+    def load_tree(self, x):
+        filekeys = self.name_to_dict[x]["magma_file"]
+        if not type(self.magma_h5) is common.PredSpecDB:
+            self.magma_h5 = common.PredSpecDB(self.magma_h5)
+        spec = self.magma_h5.read(*filekeys)
+        return spec
 
     @staticmethod
     def sanitize(mol_list: List[Chem.Mol]) -> List[Chem.Mol]:
@@ -882,6 +919,13 @@ class IntenPredDataset(DAGDataset):
     @classmethod
     def get_collate_fn(cls):
         return IntenDataset.collate_fn
+
+    def load_tree(self, x):
+        filekeys = self.name_to_dict[x]["magma_file"]
+        if not type(self.magma_h5) is common.PredSpecDB:
+            self.magma_h5 = common.PredSpecDB(self.magma_h5)
+        spec = self.magma_h5.read(*filekeys)
+        return spec
 
 
 def _unroll_pad(input_list, key):

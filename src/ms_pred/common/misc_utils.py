@@ -11,9 +11,11 @@ import numpy as np
 from tqdm import tqdm
 import h5py
 import hashlib
-from matplotlib import pyplot as plt
+import torch
+import math
 
 import ms_pred.common.chem_utils as chem_utils
+from ms_pred import nn_utils
 
 try:
     from pytorch_lightning.loggers import LightningLoggerBase as Logger
@@ -28,6 +30,415 @@ NIST_COLLISION_ENERGY_STD = 31.604227557486197
 
 def get_data_dir(dataset_name: str) -> Path:
     return Path("data/spec_datasets") / dataset_name
+
+
+class MassSpec:
+    """
+    Data structure for a predicted MS/MS spectrum
+    """
+    def __init__(self, collision_energy, root_canonical_smiles=None, adduct=None, remark=None,
+                 probs=None, brokens=None, masses=None, masses_no_adduct=None,
+                 frag_form_vecs=None, frags=None, intens=None, pulled_atoms=None,
+                 **kwargs):
+        self.collision_energy = collision_energy
+        self.root_canonical_smiles = root_canonical_smiles
+        self.adduct = adduct
+        self.remark = remark
+        def safe_assign(x):
+            if isinstance(x, np.ndarray):
+                return x
+            elif isinstance(x, torch.Tensor):
+                return x.cpu().numpy()
+            else:
+                return None
+        self.probs = safe_assign(probs)
+        self.brokens = safe_assign(brokens)
+        self.masses = safe_assign(masses)
+        self.masses_no_adduct = safe_assign(masses_no_adduct)
+        self.frag_form_vecs = safe_assign(frag_form_vecs)
+        self.frags = safe_assign(frags)
+        self.intens = safe_assign(intens)
+        self.pulled_atoms = safe_assign(pulled_atoms)
+        self.meta = kwargs
+
+    def add_hydrogen_shift(self):
+        """add hydrogen shift to masses and fragments"""
+        h_pos = chem_utils.element_to_ind["H"]
+        if not self.has_brokens:
+            raise ValueError('self.brokens is required to add hydrogen shift')
+
+        if self.has_masses:
+            n = len(self.masses)
+        elif self.has_masses_no_adduct:
+            n = len(self.masses_no_adduct)
+        elif self.has_frag_form_vecs:
+            n = len(self.frag_form_vecs)
+        else:
+            raise ValueError('Cannot infer data size')
+        assert len(self.brokens) == n
+        assert self.intens is None
+
+        new_masses, new_masses_no_adduct, new_frag_form_vecs, new_frags, new_probs = [], [], [], [], []
+        for i in range(n):
+            nbrokens = int(self.brokens[i])
+            for hshift in range(-nbrokens, nbrokens + 1):
+                if self.has_frag_form_vecs: # make sure not to create negative H in form
+                    if self.frag_form_vecs[i][h_pos] < -hshift:
+                        continue
+
+                if self.has_masses:
+                    new_masses.append(self.masses[i] + chem_utils.ELEMENT_TO_MASS['H'] * hshift)
+                if self.has_masses_no_adduct:
+                    new_masses_no_adduct.append(self.masses_no_adduct[i] + chem_utils.ELEMENT_TO_MASS['H'] * hshift)
+                if self.has_frag_form_vecs:
+                    vec = self.frag_form_vecs[i].astype(np.int32)
+                    vec[h_pos] += hshift
+                    new_frag_form_vecs.append(vec.astype(np.uint8))
+                if self.has_frags:
+                    new_frags.append(self.frags[i])
+                if self.has_probs:
+                    new_probs.append(self.probs[i])
+        if self.has_masses:
+            self.masses = new_masses
+        if self.has_masses_no_adduct:
+            self.masses_no_adduct = new_masses_no_adduct
+        if self.has_frag_form_vecs:
+            self.frag_form_vecs = new_frag_form_vecs
+        if self.has_frags:
+            self.frags = new_frags
+        if self.has_probs:
+            self.probs = new_probs
+
+    @property
+    def root_form(self):
+        return chem_utils.form_from_smi(self.root_canonical_smiles) \
+            if self.root_canonical_smiles is not None else None
+
+    @property
+    def frag_form(self):
+        return [chem_utils.vec_to_formula(vec) for vec in self.frag_form_vecs] \
+            if self.frag_form_vecs is not None else None
+
+    @property
+    def info(self):
+        info = {
+            "collision_energy": self.collision_energy,
+            "root_canonical_smiles": self.root_canonical_smiles,
+            "adduct": self.adduct,
+            "remark": self.remark,
+        }
+        info.update(self.meta)
+        info = {k: v for k, v in info.items() if v is not None}
+        return info
+
+    @property
+    def int_frags(self):
+        all_frags = []
+        for bin_frag in self.frags:
+            frag = 0
+            for i, b in enumerate(bin_frag):
+                if b:
+                    frag += 2 ** i
+            all_frags.append(frag)
+        return all_frags
+
+    @property
+    def has_probs(self):
+        return self.probs is not None
+
+    @property
+    def has_masses(self):
+        return self.masses is not None
+
+    @property
+    def has_masses_no_adduct(self):
+        return self.masses_no_adduct is not None
+
+    @property
+    def has_intens(self):
+        return self.intens is not None
+
+    @property
+    def has_brokens(self):
+        return self.brokens is not None
+
+    @property
+    def has_frag_form_vecs(self):
+        return self.frag_form_vecs is not None
+
+    @property
+    def has_frags(self):
+        return self.frags is not None
+
+    @property
+    def has_pulled_atoms(self):
+        return self.pulled_atoms is not None
+
+    @property
+    def max_add_hs(self):
+        return self.brokens
+
+    @property
+    def max_remove_hs(self):
+        if self.has_frag_form_vecs and self.has_brokens:
+            nhs = self.frag_form_vecs[:, chem_utils.element_to_ind['H']]
+            return np.minimum(self.brokens, nhs)
+        else:
+            return None
+
+    def __repr__(self):
+        _repr = f'MassSpec ('
+        _repr += ', '.join([f'{k}={v}' for k, v in self.info.items()])
+        for key in ('probs', 'brokens', 'masses', 'masses_no_adduct', 'frag_form_vecs', 'frags', 'intens'):
+            obj = getattr(self, key)
+            if obj is not None:
+                _repr += f', {key}={obj.shape}'
+        _repr += ')'
+        return _repr
+
+    def __getitem__(self, item):
+        if hasattr(self, item):
+            return getattr(self, item)
+        else:
+            raise AttributeError(f'MassSpec object has no attribute {item}')
+
+    def __contains__(self, item):
+        return hasattr(self, item)
+
+
+class PredSpecDB:
+    """
+    Data structure for predicted spectrum database
+    """
+    def __init__(self, h5_path, mode="r", num_h5s=1,
+                 has_probs=True, has_brokens=True, has_masses=False, has_masses_no_adduct=True, has_frag_form_vecs=True,
+                 has_frags=True, has_intens=False, has_pulled_atoms=False,
+                 h5_persistent=None):
+        h5_path = Path(h5_path)
+        if num_h5s > 1:
+            self.all_h5_paths = [h5_path.parent / (h5_path.stem + f'_chunk_{i}' + h5_path.suffix) for i in range(num_h5s)]
+        else:
+            self.all_h5_paths = [h5_path]
+
+        self.mode = mode
+        self.h5_persistent = h5_persistent
+        h5_dataset_0 = HDF5Dataset(self.all_h5_paths[0], self.mode)
+        if self.mode == 'w':  # create new file
+            self.has_probs   = has_probs
+            self.has_brokens = has_brokens
+            self.has_masses  = has_masses
+            self.has_masses_no_adduct = has_masses_no_adduct
+            self.has_frag_form_vecs = has_frag_form_vecs
+            self.has_frags   = has_frags
+            self.has_intens  = has_intens
+            self.has_pulled_atoms = has_pulled_atoms
+            self.root_key_dict = {
+                "probs": self.has_probs,
+                "masses": self.has_masses,
+                "masses_no_adduct": self.has_masses_no_adduct,
+                "intens": self.has_intens,
+                "brokens": self.has_brokens,
+                "frag_form_vecs": self.has_frag_form_vecs,
+                "frags": self.has_frags,
+                "pulled_atoms": self.has_pulled_atoms,
+            }
+            h5_dataset_0.update_attr('.', self.root_key_dict)
+            if self.h5_persistent is None:
+                self.h5_persistent = True  # default persistent H5 objects for write mode
+        else:
+            self.root_key_dict = h5_dataset_0.read_attr('.')
+            safe_root_key_get = lambda x: self.root_key_dict[x] if x in self.root_key_dict else None
+            self.has_probs            = safe_root_key_get('probs')
+            self.has_masses           = safe_root_key_get('masses')
+            self.has_masses_no_adduct = safe_root_key_get('masses_no_adduct')
+            self.has_intens           = safe_root_key_get('intens')
+            self.has_brokens          = safe_root_key_get('brokens')
+            self.has_frag_form_vecs   = safe_root_key_get('frag_form_vecs')
+            self.has_frags            = safe_root_key_get('frags')
+            self.has_pulled_atoms     = safe_root_key_get('pulled_atoms')
+            if self.h5_persistent is None:
+                self.h5_persistent = False  # default non-persistent H5 objects for read mode (for parallel read)
+
+        if self.h5_persistent:
+            self.h5datasets = [h5_dataset_0] + [HDF5Dataset(p, self.mode) for p in self.all_h5_paths[1:]]
+        else:
+            self.h5datasets = None
+
+    def write(self, name, spec: MassSpec):
+        """write one spectrum"""
+        key_dict = {
+            "probs": spec.has_probs,
+            "masses": spec.has_masses,
+            "masses_no_adduct": spec.has_masses_no_adduct,
+            "intens": spec.has_intens,
+            "brokens": spec.has_brokens,
+            "frag_form_vecs": spec.has_frag_form_vecs,
+            "frags": spec.has_frags,
+            "pulled_atoms": spec.has_pulled_atoms,
+        }
+        h5_dataset = self._get_h5_dataset(name)
+        full_name  = self._get_full_name(name, spec.collision_energy, spec.remark)
+
+        float_arrs = []
+        if spec.has_probs: float_arrs.append(spec.probs.astype(np.float32))
+        if spec.has_masses: float_arrs.append(spec.masses.astype(np.float32))
+        if spec.has_masses_no_adduct: float_arrs.append(spec.masses_no_adduct.astype(np.float32))
+        if spec.has_intens: float_arrs.append(spec.intens.astype(np.float32))
+        if len(float_arrs) > 0:
+            h5_dataset.write_data(full_name + '/f', np.stack(float_arrs, axis=1))
+
+        uint_arrs = []
+        if spec.has_brokens: uint_arrs.append(spec.brokens.astype(np.uint8)[:, None])
+        if spec.has_frag_form_vecs: uint_arrs.append(spec.frag_form_vecs.astype(np.uint8))
+        if spec.has_frags: uint_arrs.append(nn_utils.encode_bin_to_uint8(spec.frags).astype(np.uint8))
+        if spec.has_pulled_atoms: uint_arrs.append(nn_utils.encode_bin_to_uint8(spec.pulled_atoms).astype(np.uint8))
+        if len(uint_arrs) > 0:
+            h5_dataset.write_data(full_name + '/u', np.concatenate(uint_arrs, axis=1))
+
+        if not all([self.root_key_dict[k] == v for k, v in key_dict.items()]):
+            # h5 group will have a different attribute if any attribute is different from root
+            key_dict["override"] = True
+            h5_dataset.update_attr(full_name, key_dict)
+        else:
+            h5_dataset.update_attr(full_name, {"override": False})
+        if spec.has_frags:
+            h5_dataset.update_attr(full_name, {"frag_bits": spec.frags.shape[-1]})
+        h5_dataset.update_attr(full_name, spec.info)
+
+    def read(self, name, collision_energy=None, remark=None):
+        """read a specific spectrum"""
+        h5_dataset = self._get_h5_dataset(name)
+        full_name  = self._get_full_name(name, collision_energy, remark)
+
+        key_dict = h5_dataset.read_attr(full_name)
+        if not key_dict["override"]:
+            key_dict.update(self.root_key_dict)
+
+        del key_dict["override"]
+
+        in_key_dict = lambda x: x in key_dict and key_dict[x]
+
+        spec_dict = {}
+        spec_dict.update(key_dict)
+        fdata = h5_dataset.read_data(full_name + '/f')
+        cur_idx = 0
+        for key in ("probs", "masses", "masses_no_adduct", "intens"):
+            if in_key_dict(key):
+                spec_dict[key] = fdata[:, cur_idx]
+                cur_idx += 1
+
+        udata = h5_dataset.read_data(full_name + '/u')
+        cur_idx = 0
+        if in_key_dict("brokens"):
+            spec_dict["brokens"] = udata[:, cur_idx]
+            cur_idx += 1
+        if in_key_dict("frag_form_vecs"):
+            spec_dict["frag_form_vecs"] = udata[:, cur_idx:cur_idx+chem_utils.ELEMENT_DIM]
+            cur_idx += chem_utils.ELEMENT_DIM
+        if in_key_dict("frags"):
+            frag_u8_len = math.ceil(key_dict["frag_bits"] / 8)
+            spec_dict["frags"] = nn_utils.decode_bin_from_uint8(udata[:, cur_idx:cur_idx+frag_u8_len], key_dict["frag_bits"])
+            cur_idx += frag_u8_len
+        if in_key_dict("pulled_atoms"):
+            assert "frag_bits" in key_dict
+            spec_dict["pulled_atoms"] = nn_utils.decode_bin_from_uint8(udata[:, cur_idx:], key_dict["frag_bits"])
+
+        return MassSpec(**spec_dict)
+
+    def read_all(self, name):
+        """read all entries with the same name (all remarks, all collision energies)"""
+        colli_engs, remarks = self.get_entries(name)
+        all_spec_dict = {}
+        for c, r in zip(colli_engs, remarks):
+            spec_obj = self.read(name, c, r)
+            c_key = f'collision {c}'
+            if r is None:
+                all_spec_dict[c_key] = spec_obj
+            else:
+                if r not in all_spec_dict:
+                    all_spec_dict[r] = {}
+                all_spec_dict[r][c_key] = spec_obj
+        return all_spec_dict
+
+    def _get_chunk_index(self, name):
+        if len(self.all_h5_paths) == 1:
+            return 0
+        else:
+            return int(str_to_hash(name), base=16) % len(self.all_h5_paths)
+
+    def _get_full_name(self, name, collision_energy, remark):
+        full_name = name
+        if remark is not None:
+            full_name += '/' + str(remark)
+        if collision_energy is not None:
+            full_name += '/' + self._get_collision_str(collision_energy)
+        return full_name
+
+    @staticmethod
+    def _get_collision_str(collision_energy):
+        if collision_energy is not None:
+            return f'collision {float(collision_energy):.0f}'
+        else:
+            return f'collision nan'
+
+    def _get_h5_dataset(self, name):
+        cur_i = self._get_chunk_index(name)
+        if self.h5_persistent:
+            h5_dataset = self.h5datasets[cur_i]
+        else:
+            h5_dataset = HDF5Dataset(self.all_h5_paths[cur_i], self.mode)
+        return h5_dataset
+
+    def get_all_names(self):
+        if self.h5_persistent:
+            all_h5s = self.h5datasets
+        else:
+            all_h5s = [HDF5Dataset(p, self.mode) for p in self.all_h5_paths]
+        all_names = [h5.get_all_names() for h5 in all_h5s]
+        all_names = [i for j in all_names for i in j]
+        return all_names
+
+    def get_entries(self, name, collision_energy=None):
+        """return collision energies and remarks under each name"""
+        def _enumerate_path(obj):  # recursive call
+            if obj.attrs and "override" in obj.attrs:  # reached data group
+                return None
+            else:
+                paths = []
+                for key in obj.keys():
+                    next_paths = _enumerate_path(obj[key])
+                    if next_paths is None:
+                        paths.append(key)
+                    else:
+                        for next_p in next_paths:
+                            paths.append(key + '/' + next_p)
+                return paths
+        h5_dataset = self._get_h5_dataset(name)
+        if not name in h5_dataset.h5_obj:  # no entry
+            return [], []
+        root_obj = h5_dataset.h5_obj[name]
+        all_paths = _enumerate_path(root_obj)
+        colli_engs, remarks = [], []
+        for path in all_paths:
+            keys = path.split('/')
+            if len(keys) == 1:  # collision energy
+                remarks.append(None)
+                get_ce = chem_utils.get_collision_energy(keys[0])
+                if collision_energy is None or float(collision_energy) == float(get_ce):
+                    colli_engs.append(get_ce)
+            elif len(keys) == 2:  # collision energy + remark
+                get_ce = chem_utils.get_collision_energy(keys[1])
+                if collision_energy is None or float(collision_energy) == float(get_ce):
+                    remarks.append(keys[0])
+                    colli_engs.append(get_ce)
+            else:
+                raise ValueError(f'HDF5 path is not accepted: {path}')
+        return colli_engs, remarks
+
+    def close(self):
+        for ds in self.h5datasets:
+            ds.close()
+
 
 class HDF5Dataset:
     """
@@ -89,7 +500,7 @@ class HDF5Dataset:
 
     def write_data(self, name, data):
         """write a numpy array object"""
-        self.h5_obj.create_dataset(name, data=data)
+        self.h5_obj.create_dataset(name, data=data, dtype=data.dtype)
 
     def read_attr(self, name) -> dict:
         """read attribute of name as a dict"""

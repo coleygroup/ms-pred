@@ -4,13 +4,13 @@ import pandas as pd
 from pathlib import Path
 import subprocess
 
-batch_size = 8
+batch_size = 64
 list_devices = [0, 1]
 workers = 32
 devices = ",".join([str(_) for _ in list_devices])
 python_file = "src/ms_pred/dag_pred/predict_gen.py"
 max_nodes = [10, 20, 30, 40, 50, 100, 200, 300, 500, 1000]
-gpu_workers = [len(list_devices) * _ for _ in [8, 8, 8, 8, 8, 6, 4, 3, 2, 2]]
+gpu_workers = [len(list_devices) * _ for _ in [8, 8, 8, 8, 8, 4, 3, 2, 1, 1]]
 subform_name = "magma_subform_50.hdf5"
 debug = False
 
@@ -56,8 +56,7 @@ for res_entry in res_entries:
 
         print(f"Saving inten sweep to: {save_dir}")
 
-        pred_dir_folders = []
-        form_dir_folders = []
+        pred_dir_h5s = []
         for max_node, gpu_worker in zip(max_nodes, gpu_workers):
             save_dir_temp = save_dir / str(max_node)
             save_dir_temp.mkdir(exist_ok=True)
@@ -71,38 +70,25 @@ for res_entry in res_entries:
             --save-dir {save_dir_temp} \\
             --threshold 0  \\
             --max-nodes {max_node} \\
-            --num-workers {gpu_worker} \\
+            --num-cpu-workers {workers} \\
+            --num-gpu-workers {gpu_worker} \\
             --gpu
             """
 
-            pred_dir_folders.append(save_dir_temp)
+            pred_dir_h5s.append(save_dir_temp / 'tree_preds.hdf5')
             device_str = f"CUDA_VISIBLE_DEVICES={devices}"
             cmd = f"{device_str} {cmd}"
             print(cmd + "\n")
             subprocess.run(cmd, shell=True)
 
-            # Convert to form files from dag
-        for pred_dir in pred_dir_folders:
-            tree_pred_folder = pred_dir / "tree_preds.hdf5"
-            form_pred_folder = pred_dir / "form_preds.hdf5"
-            cmd = f"""python data_scripts/dag/dag_to_subform.py \\
-                --num-workers {workers} \\
-                --dag-folder {tree_pred_folder} \\
-                --out-dir {form_pred_folder} \\
-                --all-h-shifts
-            """
-            print(cmd + "\n")
-            subprocess.run(cmd, shell=True)
-            form_dir_folders.append(form_pred_folder)
-
         res_files = []
-        for pred_dir in form_dir_folders:
+        for pred_h5 in pred_dir_h5s:
             analysis_cmd = f"""python analysis/form_pred_eval.py \\
                 --dataset {dataset} \\
-                --tree-pred-folder {pred_dir} \\
+                --tree-pred-obj {pred_h5} \\
                 --subform-name {subform_name}
             """
-            res_files.append(pred_dir.parent / "pred_eval.yaml")
+            res_files.append(pred_h5.parent / "pred_eval.yaml")
             print(analysis_cmd + "\n")
             subprocess.run(analysis_cmd, shell=True)
 

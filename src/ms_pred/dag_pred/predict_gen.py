@@ -34,7 +34,8 @@ def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", default=False, action="store_true")
     parser.add_argument("--gpu", default=False, action="store_true")
-    parser.add_argument("--num-workers", default=0, action="store", type=int)
+    parser.add_argument("--num-cpu-workers", default=0, action="store", type=int)
+    parser.add_argument("--num-gpu-workers", default=0, action="store", type=int)
     parser.add_argument("--batch-size", default=64, action="store", type=int)
     parser.add_argument("--num-decoys", default=0, action="store", type=int)
     parser.add_argument("--pubchem-map-path", default='data/pubchem/pubchem_formulae_inchikey.hdf5')
@@ -109,10 +110,10 @@ def predict():
 
     logging.info(f"Loaded model with from {best_checkpoint}")
     if kwargs["num_decoys"] == 0:
-        all_save_path = [save_dir / "tree_preds.hdf5"]
+        save_path = save_dir / "tree_preds.hdf5"
     else:
         save_dir = save_dir / "decoy_tree_preds"
-        all_save_path = [save_dir / f"decoy_tree_preds_chunk_{i}.hdf5" for i in range(kwargs["num_decoys"])]
+        save_path = save_dir / f"decoy_tree_preds.hdf5"
     save_dir.mkdir(exist_ok=True)
     with torch.no_grad():
         model.eval()
@@ -171,40 +172,37 @@ def predict():
                 for i, decoy_smi in enumerate(decoy_smis):
                     for colli_eng in collision_energies:
                         colli_eng_val = common.collision_energy_to_float(colli_eng)  # str to float
-                        out_h5_key = f"pred_{name}/collision {colli_eng}/decoy {i}.json"
                         tup_to_process.append((
-                            decoy_smi, name + f'_decoy {i}', colli_eng_val, adduct, precursor_mz,
-                            out_h5_key,
-                            int(common.str_to_hash(name), base=16) % len(all_save_path)  # output hdf5 index
+                            decoy_smi, f'pred_{name}', colli_eng_val, f'decoy {i}', adduct, precursor_mz,
                         ))
 
             else:
                 for colli_eng in collision_energies:
                     colli_eng_val = common.collision_energy_to_float(colli_eng)  # str to float
                     tup_to_process.append((
-                        smi, name, colli_eng_val, adduct, precursor_mz,
-                        f"pred_{name}_collision {colli_eng}.json",
-                        0  # only one hdf5 output
+                        smi, f'pred_{name}', colli_eng_val, None, adduct, precursor_mz,
                     ))
             return tup_to_process
 
         entries = [j for _, j in df.iterrows()]
         if kwargs["debug"]:
             entries = entries[:10]
-            kwargs["num_workers"] = 0
+            kwargs["num_gpu_workers"] = 0
+            kwargs["num_cpu_workers"] = 0
 
         logging.info('Preparing entries')
-        if kwargs["num_workers"] == 0:
+        if kwargs["num_cpu_workers"] == 0:
             predict_entries = [prepare_entry(i) for i in tqdm(entries)]
         else:
             predict_entries = common.chunked_parallel(
                 entries,
                 prepare_entry,
                 chunks=1000,
-                max_cpu=kwargs["num_workers"],
+                max_cpu=kwargs["num_cpu_workers"],
             )
         predict_entries = [j for i in predict_entries for j in i]  # unroll
-        random.shuffle(predict_entries)  # shuffle to evenly distribute graph size across batches
+        if not kwargs["debug"]:
+            random.shuffle(predict_entries)  # shuffle to evenly distribute graph size across batches
         logging.info(f'There are {len(predict_entries)} entries to process')
 
         batch_size = kwargs["batch_size"]
@@ -215,7 +213,7 @@ def predict():
         def producer_func(batch):
             torch.set_num_threads(1)
             if gpu and avail_gpu_num >= 0:
-                if kwargs["num_workers"] > 0:
+                if kwargs["num_gpu_workers"] > 0:
                     worker_id = multiprocess.process.current_process()._identity[0]  # get worker id
                     gpu_id = worker_id % avail_gpu_num
                 else:
@@ -225,8 +223,8 @@ def predict():
                 device = "cpu"
             model.to(device)
 
-            smi, name, colli_eng_val, adduct, precursor_mz, out_name, out_file_idx = list(zip(*batch))
-            pred = model.predict_mol(
+            smi, name, colli_eng_val, decoy_label, adduct, precursor_mz = list(zip(*batch))
+            pred, _ = model.predict_mol(
                 smi,
                 precursor_mz=precursor_mz,
                 collision_eng=colli_eng_val,
@@ -238,34 +236,40 @@ def predict():
                 canonical_root_smi=True,  # smi is canonical
             )
             return_list = []
-            for _smi, _name, _pred, _colli_eng_val, _adduct, _out_name, _out_file_idx in \
-                    zip(smi, name, pred, colli_eng_val, adduct, out_name, out_file_idx):
-                output = {
-                    "root_canonical_smiles": _smi,
-                    "name": _name,
-                    "frags": _pred,
-                    "collision_energy": _colli_eng_val,
-                    "adduct": _adduct,
-                }
-                return_list.append((_out_name, json.dumps(output, indent=2), _out_file_idx))
+            for i, (_smi, _name, _colli_eng_val, _decoy_label, _adduct) in \
+                    enumerate(zip(smi, name, colli_eng_val, decoy_label, adduct)):
+                mask = pred["probs"][i] > 0
+                pred_ms = common.MassSpec(
+                    root_canonical_smiles=_smi,
+                    collision_energy=_colli_eng_val,
+                    adduct=_adduct,
+                    natoms=pred["natoms"][i].item(),
+                    remark=_decoy_label,
+                    probs=pred["probs"][i][mask].cpu().numpy(),
+                    brokens=pred["brokens"][i][mask].cpu().numpy(),
+                    masses_no_adduct=pred["masses_no_adduct"][i][mask].cpu().numpy(),
+                    frag_form_vecs=pred["frag_form_vecs"][i][mask].cpu().numpy(),
+                    frags=pred["frags"][i][mask].cpu().numpy(),
+                )
+                return_list.append((_name, pred_ms))
             return return_list
 
-        def write_h5_func(out_entries):
-            h5s = [common.HDF5Dataset(save_path, mode='w') for save_path in all_save_path]
+        def write_func(out_entries):
+            specdb = common.PredSpecDB(
+                save_path, mode='w', num_h5s=kwargs["num_decoys"] if kwargs["num_decoys"] > 1 else 1,
+                has_probs=True, has_brokens=True, has_masses=True, has_frag_form_vecs=True, has_frags=True,)
             for out_batch in out_entries:
                 for out_item in out_batch:
-                    name, data, file_idx = out_item
-                    h5 = h5s[file_idx]
-                    h5.write_str(name, data)
-            for h5 in h5s:
-                h5.close()
+                    name, spec = out_item
+                    specdb.write(name, spec)
+            specdb.close()
 
-        if kwargs["num_workers"] == 0:
+        if kwargs["num_gpu_workers"] == 0:
             output_entries = [producer_func(batch) for batch in tqdm(all_batched_entries)]
-            write_h5_func(output_entries)
+            write_func(output_entries)
         else:
-            common.chunked_parallel(all_batched_entries, producer_func, output_func=write_h5_func,
-                                    chunks=1000, max_cpu=kwargs["num_workers"])
+            common.chunked_parallel(all_batched_entries, producer_func, output_func=write_func,
+                                    chunks=1000, max_cpu=kwargs["num_gpu_workers"])
 
 
 if __name__ == "__main__":

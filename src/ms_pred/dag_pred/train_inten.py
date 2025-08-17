@@ -139,8 +139,12 @@ def train_model():
 
     num_workers = kwargs.get("num_workers", 0)
     magma_dag_folder = Path(kwargs["magma_dag_folder"])
-    magma_tree_h5 = common.HDF5Dataset(magma_dag_folder)
-    name_to_json = {Path(i).stem.replace("pred_", ""): i for i in magma_tree_h5.get_all_names()}
+    magma_tree_h5 = common.PredSpecDB(magma_dag_folder)
+    name_to_keys = {}
+    for name in magma_tree_h5.get_all_names():
+        ces, remarks = magma_tree_h5.get_entries(name)
+        for ce, r in zip(ces, remarks):
+            name_to_keys[f'{name}_collision {ce}'] = (name, ce, r)
 
     pe_embed_k = kwargs["pe_embed_k"]
     root_encode = kwargs["root_encode"]
@@ -158,14 +162,14 @@ def train_model():
     train_dataset = dag_data.IntenDataset(
         train_df,
         magma_h5=magma_dag_folder,
-        magma_map=name_to_json,
+        magma_map=name_to_keys,
         num_workers=num_workers,
         tree_processor=tree_processor,
     )
     val_dataset = dag_data.IntenDataset(
         val_df,
         magma_h5=magma_dag_folder,
-        magma_map=name_to_json,
+        magma_map=name_to_keys,
         num_workers=num_workers,
         tree_processor=tree_processor,
     )
@@ -173,7 +177,7 @@ def train_model():
     test_dataset = dag_data.IntenDataset(
         test_df,
         magma_h5=magma_dag_folder,
-        magma_map=name_to_json,
+        magma_map=name_to_keys,
         num_workers=num_workers,
         tree_processor=tree_processor,
     )
