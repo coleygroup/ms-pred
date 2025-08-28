@@ -114,6 +114,7 @@ class JointModel(pl.LightningModule):
         )
 
         num_frags = frag_preds['nfrags']
+        max_nfrags = torch.max(num_frags)
         ind_maps = torch.arange(batch_size, device=device).repeat_interleave(num_frags)
 
         rep_roots, _, __ = nn_utils.slice_batched_graph(root_reprs, ind_maps)
@@ -126,8 +127,8 @@ class JointModel(pl.LightningModule):
 
         broken_bonds = frag_preds['brokens']
         nhs = frag_preds['frag_form_vecs'][:, :, common.element_to_ind['H']]
-        max_add_hs = broken_bonds
-        max_remove_hs = torch.min(broken_bonds, nhs)
+        max_add_hs = broken_bonds[:, :max_nfrags]
+        max_remove_hs = torch.min(broken_bonds, nhs)[:, :max_nfrags]
 
         mass_offset = torch.tensor(
             [(common.ion2mass[add], -common.ELECTRON_MASS) if common.is_positive_adduct(add[-1]) else
@@ -135,14 +136,14 @@ class JointModel(pl.LightningModule):
              for add in adduct], device=device)[:, :, None] + \
             (torch.arange(MAX_BROKEN_BONDS * 2 + 1, device=device)[None, None, :] - MAX_BROKEN_BONDS) * \
                       common.CHEM_MASSES[common.element_to_ind['H']].item()
-        masses = frag_preds['masses_no_adduct'][:, :, None, None] + mass_offset[:, None, :, :]
+        masses = frag_preds['masses_no_adduct'][:, :max_nfrags, None, None] + mass_offset[:, None, :, :]
 
         to_tensor = lambda x: torch.tensor(x, device=device, dtype=torch.float) if x is not None else x
         adducts = to_tensor([common.ion2onehot_pos[a] for a in adduct])
         collision_engs = to_tensor(collision_eng)
         precursor_mzs = to_tensor(precursor_mz)
         root_forms = frag_preds['root_form_vec']
-        frag_forms = frag_preds['frag_form_vecs']
+        frag_forms = frag_preds['frag_form_vecs'][:, :max_nfrags]
 
         # IDs to use to recapitulate
         inten_preds = self.inten_model_obj.predict(

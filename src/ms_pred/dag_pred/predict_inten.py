@@ -106,8 +106,13 @@ def predict():
     add_hs = model.add_hs
     embed_elem_group = model.embed_elem_group
     magma_dag_folder = Path(kwargs["magma_dag_folder"])
-    magma_tree_h5 = common.HDF5Dataset(magma_dag_folder)
-    name_to_json = {Path(i).stem.replace("pred_", ""): i for i in magma_tree_h5.get_all_names()}
+    magma_tree_h5 = common.PredSpecDB(magma_dag_folder)
+    name_to_keys = {}
+    for name in magma_tree_h5.get_all_names():
+        ces, remarks = magma_tree_h5.get_entries(name)
+        for ce, r in zip(ces, remarks):
+            name_to_keys[f'{name.replace("pred_", "")}_collision {ce}'] = (name, ce, r)
+
     num_workers = kwargs.get("num_workers", 0)
 
     tree_processor = dag_data.TreeProcessor(
@@ -119,7 +124,7 @@ def predict():
         num_workers=num_workers,
         data_dir=data_dir,
         magma_h5=magma_dag_folder,
-        magma_map=name_to_json,
+        magma_map=name_to_keys,
     )
     # Define dataloaders
     collate_fn = pred_dataset.get_collate_fn()
@@ -179,7 +184,7 @@ def predict():
                 binned_out=binned_out,
             )
 
-            outputs = outputs["spec"]
+            outputs = outputs["spec"].cpu().numpy()
             for spec, inten_frag_id, collision_energy, output_spec in zip(
                 spec_names, inten_frag_ids, collision_energies, outputs
             ):
