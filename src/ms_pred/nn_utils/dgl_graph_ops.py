@@ -176,7 +176,9 @@ def batch_remove_single_atoms(
         return None, None, None
 
     # update comp_for_cut and comp_flat to continuous values
-    comp_for_cut = torch.unique(comp_for_cut, return_inverse=True)[1]
+    uniq_comp_for_cut_vals, comp_for_cut = torch.unique(comp_for_cut, return_inverse=True)
+    if uniq_comp_for_cut_vals.min() > 0:  # if there's no single atoms in this batch
+        comp_for_cut += 1
     comp_flat    = torch.unique(comp_flat, return_inverse=True)[1]
     # now comp_flat ∈ [0..F-1]
 
