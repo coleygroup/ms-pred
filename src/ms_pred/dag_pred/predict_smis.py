@@ -130,7 +130,7 @@ def predict():
     inten_model_obj = inten_model.IntenGNN.load_from_checkpoint(inten_checkpoint) #, map_location="cuda" if gpu else "cpu")
     gen_model_obj = gen_model.FragGNN.load_from_checkpoint(gen_checkpoint) #, map_location="cuda" if gpu else "cpu")
     avail_gpu_num = torch.cuda.device_count()
-    use_gpu = gpu and avail_gpu_num >= 0
+    use_gpu = gpu and avail_gpu_num > 0
 
     # Build joint model class
 
