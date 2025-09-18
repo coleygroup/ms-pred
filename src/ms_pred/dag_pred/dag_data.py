@@ -257,7 +257,6 @@ class TreeProcessor:
         all_form_vecs = [common.formula_to_dense(i) for i in forms]
         all_form_vecs = np.array(all_form_vecs)
         root_form_vec = common.formula_to_dense(root_form)
-
         out_dict = {
             "root_repr": root_repr,
             "dgl_frags": dgl_inputs,

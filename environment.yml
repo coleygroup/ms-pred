@@ -1,4 +1,4 @@
-name: ms-gen
+name: test
 channels:
 - pytorch
 - nvidia
@@ -23,3 +23,4 @@ dependencies:
 - pytorch-scatter
 - pytorch-sparse
 - dgl
+- cudatoolkit=11.8

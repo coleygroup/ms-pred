@@ -1,0 +1,54 @@
+launcher_args: {experiment_name: iceberg_transformer_nist20,
+  script_name: "src/ms_pred/iceberg_transformer/train_inten.py",
+  slurm_script: launcher_scripts/generic_slurm.sh, 
+  launch_method: local,
+  visible_devices: [0]
+}
+universal_args:
+  _slurm_args:
+  - {_num_gpu: 1, cpus-per-task: 7, job-name: iceberg_transformer_train, mem-per-cpu: 8G,
+    time: '1-18:00:00'}
+  debug: [false]
+  gpu: [true]
+
+  seed: [1]
+  num-workers: [32]
+  batch-size: [32]
+  max-epochs: [200]
+
+  dataset-name: [nist20]
+  split-name: [split_1.tsv]
+
+  learning-rate: [0.0001]
+  lr-decay-rate: [0.825]
+
+  dropout: [0.1]
+  mpnn-type: [GGNN]
+  pe-embed-k: [10]
+  pool-op: [avg]
+  set-layers: [0]
+  hidden-size: [256]
+  weight-decay: [0.0]
+  layers: [4]
+  binned-targs: [True]
+  decoder-layers: [3]
+  encoder-layers: [3]
+  max-broken-bonds: [6]
+
+  root-encode: [graphormer]
+  inject-early: [False]
+  encode-forms: [True]
+  embed-adduct: [True]
+  embed-collision: [True]
+  embed-elem-group: [True]
+  add-hs: [true]
+  ppm-tol: [20]
+  loss-fn: ["cosine"]
+  multi-hop-max-dist: [10]
+  num-edge-dis: [10]
+
+iterative_args:
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd1]
+     seed: [1]
+     magma-folder: [results/dag_nist20/split_1_rnd1/preds_train_100_inten.hdf5]
