@@ -11,6 +11,8 @@ import math
 
 import torch
 import torch.nn as nn
+import ms_pred.nn_utils as nn_utils
+
 
 
 def init_params(module, n_layers):
@@ -36,6 +38,7 @@ class GraphNodeFeature(nn.Module):
 
         # 1 for graph token
         self.atom_encoder = nn.Linear(num_atom_features, hidden_dim)
+
         self.in_degree_encoder = nn.Embedding(num_in_degree, hidden_dim, padding_idx=0)
         self.out_degree_encoder = nn.Embedding(
             num_out_degree, hidden_dim, padding_idx=0
@@ -157,7 +160,7 @@ class GraphAttnBias(nn.Module):
                 max_dist, n_graph, n_node, n_node, self.num_heads
             ).permute(1, 2, 3, 0, 4)
             edge_input = (
-                edge_input.sum(-2) / (spatial_pos_.bfloat16().unsqueeze(-1))
+                edge_input.sum(-2) / (spatial_pos_.float().unsqueeze(-1))
             ).permute(0, 3, 1, 2)
         else:
             # [n_graph, n_node, n_node, n_head] -> [n_graph, n_head, n_node, n_node]

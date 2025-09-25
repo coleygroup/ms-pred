@@ -8,7 +8,7 @@ universal_args:
   _slurm_args:
   - {_num_gpu: 1, cpus-per-task: 7, job-name: iceberg_transformer_train, mem-per-cpu: 8G,
     time: '1-18:00:00'}
-  debug: [false]
+  debug: [False]
   gpu: [true]
 
   seed: [1]
@@ -19,12 +19,12 @@ universal_args:
   dataset-name: [nist20]
   split-name: [split_1.tsv]
 
-  learning-rate: [0.0001]
+  learning-rate: [0.0003]
   lr-decay-rate: [0.825]
 
   dropout: [0.1]
   mpnn-type: [GGNN]
-  pe-embed-k: [10]
+  pe-embed-k: [0]
   pool-op: [avg]
   set-layers: [0]
   hidden-size: [256]

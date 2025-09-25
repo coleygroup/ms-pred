@@ -11,8 +11,6 @@ from typing import Optional, Tuple
 
 import torch
 from torch import Tensor, nn
-from torch.nn.attention import SDPBackend, sdpa_kernel
-
 
 # Import fairseq replacements
 from .fairseq_replacements import FairseqDropout, quant_noise, utils
@@ -105,7 +103,10 @@ class MultiheadAttention(nn.Module):
         value: Optional[Tensor],
         attn_bias: Optional[Tensor],
         key_padding_mask: Optional[Tensor] = None,
+        need_weights: bool = True,
         attn_mask: Optional[Tensor] = None,
+        before_softmax: bool = False,
+        need_head_weights: bool = False,
     ) -> Tuple[Tensor, Optional[Tensor]]:
         """Input shape: Time x Batch x Channel
 
@@ -113,10 +114,19 @@ class MultiheadAttention(nn.Module):
             key_padding_mask (ByteTensor, optional): mask to exclude
                 keys that are pads, of shape `(batch, src_len)`, where
                 padding elements are indicated by 1s.
+            need_weights (bool, optional): return the attention weights,
+                averaged over heads (default: False).
             attn_mask (ByteTensor, optional): typically used to
                 implement causal attention, where the mask prevents the
                 attention from looking forward in time (default: None).
+            before_softmax (bool, optional): return the raw attention
+                weights and values before the attention softmax.
+            need_head_weights (bool, optional): return the attention
+                weights for each head. Implies *need_weights*. Default:
+                return the average attention weights over all heads.
         """
+        if need_head_weights:
+            need_weights = True
 
         tgt_len, bsz, embed_dim = query.size()
         src_len = tgt_len
@@ -129,62 +139,87 @@ class MultiheadAttention(nn.Module):
                 assert value is not None
                 assert src_len, bsz == value.shape[:2]
 
-        import torch.nn.functional as F
-
         q = self.q_proj(query)
         k = self.k_proj(query)
         v = self.v_proj(query)
         q *= self.scaling
 
-        # Reshape to (batch, seq_len, num_heads, head_dim) then transpose to (batch, num_heads, seq_len, head_dim)
-        q = q.permute(1, 0, 2).contiguous().view(bsz, tgt_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.permute(1, 0, 2).contiguous().view(bsz, src_len, self.num_heads, self.head_dim).transpose(1, 2)
-        v = v.permute(1, 0, 2).contiguous().view(bsz, src_len, self.num_heads, self.head_dim).transpose(1, 2)
-
-        # attn_mask: (tgt_len, src_len) or (bsz, num_heads, tgt_len, src_len)
-        # key_padding_mask: (bsz, src_len)
-        # attn_bias: (bsz * num_heads, tgt_len, src_len)
-        # F.scaled_dot_product_attention expects attn_mask as (bsz, num_heads, tgt_len, src_len) or None
-        fused_mask = None
-        if attn_mask is not None:
-            if attn_mask.dim() == 2:
-                fused_mask = attn_mask.unsqueeze(0).unsqueeze(0)  # (1, 1, tgt_len, src_len)
-            elif attn_mask.dim() == 4:
-                fused_mask = attn_mask
-        if key_padding_mask is not None:
-            # Convert key_padding_mask to float mask for F.scaled_dot_product_attention
-            # (bsz, src_len) -> (bsz, 1, 1, src_len)
-            kpm = key_padding_mask.unsqueeze(1).unsqueeze(2).to(torch.bool)
-            mask_value = float('-inf')
-            if fused_mask is not None:
-                fused_mask = fused_mask.clone()
-                fused_mask = fused_mask.masked_fill(kpm, mask_value)
-            else:
-                fused_mask = torch.zeros((bsz, self.num_heads, tgt_len, src_len), device=q.device)
-                fused_mask = fused_mask.masked_fill(kpm, mask_value)
-        if attn_bias is not None:
-            # attn_bias: (bsz * num_heads, tgt_len, src_len)
-            attn_bias_reshaped = attn_bias.view(bsz, self.num_heads, tgt_len, src_len)
-            if fused_mask is not None:
-                fused_mask = fused_mask + attn_bias_reshaped
-            else:
-                fused_mask = attn_bias_reshaped
-
-        attn_mask = fused_mask
-        # Use EfficientAttention via F.scaled_dot_product_attention
-        with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
-            attn_output = F.scaled_dot_product_attention(
-                q, k, v,
-                attn_mask=attn_mask,
-                dropout_p=self.dropout_module.p if self.training else 0.0,
-                is_causal=False,
+        q = (
+            q.contiguous()
+            .view(tgt_len, bsz * self.num_heads, self.head_dim)
+            .transpose(0, 1)
+        )
+        if k is not None:
+            k = (
+                k.contiguous()
+                .view(-1, bsz * self.num_heads, self.head_dim)
+                .transpose(0, 1)
+            )
+        if v is not None:
+            v = (
+                v.contiguous()
+                .view(-1, bsz * self.num_heads, self.head_dim)
+                .transpose(0, 1)
             )
 
-        # attn_output: (bsz, num_heads, tgt_len, head_dim)
-        attn = attn_output.transpose(1, 2).contiguous().view(bsz, tgt_len, self.embed_dim).permute(1, 0, 2)
+        assert k is not None
+        assert k.size(1) == src_len
+
+        # This is part of a workaround to get around fork/join parallelism
+        # not supporting Optional types.
+        if key_padding_mask is not None and key_padding_mask.dim() == 0:
+            key_padding_mask = None
+
+        if key_padding_mask is not None:
+            assert key_padding_mask.size(0) == bsz
+            assert key_padding_mask.size(1) == src_len
+        attn_weights = torch.bmm(q, k.transpose(1, 2))
+        attn_weights = self.apply_sparse_mask(attn_weights, tgt_len, src_len, bsz)
+
+        assert list(attn_weights.size()) == [bsz * self.num_heads, tgt_len, src_len]
+
+        if attn_bias is not None:
+            attn_weights += attn_bias.view(bsz * self.num_heads, tgt_len, src_len)
+
+        if attn_mask is not None:
+            attn_mask = attn_mask.unsqueeze(0)
+            attn_weights += attn_mask
+
+        if key_padding_mask is not None:
+            # don't attend to padding symbols
+            attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+            attn_weights = attn_weights.masked_fill(
+                key_padding_mask.unsqueeze(1).unsqueeze(2).to(torch.bool),
+                float("-inf"),
+            )
+            attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
+
+        if before_softmax:
+            return attn_weights, v
+
+        attn_weights_float = utils.softmax(
+            attn_weights, dim=-1, onnx_trace=self.onnx_trace
+        )
+        attn_weights = attn_weights_float.type_as(attn_weights)
+        attn_probs = self.dropout_module(attn_weights)
+
+        assert v is not None
+        attn = torch.bmm(attn_probs, v)
+        assert list(attn.size()) == [bsz * self.num_heads, tgt_len, self.head_dim]
+
+        attn = attn.transpose(0, 1).contiguous().view(tgt_len, bsz, embed_dim)
         attn = self.out_proj(attn)
 
-        return attn
+        attn_weights: Optional[Tensor] = None
+        if need_weights:
+            attn_weights = attn_weights_float.view(
+                bsz, self.num_heads, tgt_len, src_len
+            ).transpose(1, 0)
+            if not need_head_weights:
+                # average attention weights over heads
+                attn_weights = attn_weights.mean(dim=0)
+
+        return attn, attn_weights
 
     def apply_sparse_mask(self, attn_weights, tgt_len: int, src_len: int, bsz: int):
         return attn_weights

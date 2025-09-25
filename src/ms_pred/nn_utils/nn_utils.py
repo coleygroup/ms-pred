@@ -317,7 +317,7 @@ class MLPBlocks(nn.Module):
     ):
         super().__init__()
         self.activation = nn.ReLU()
-        self.dropout_layer = nn.Dropout(p=dropout)
+        self.dropout_layer = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
         self.input_layer = nn.Linear(input_size, hidden_size)
         middle_layer = nn.Linear(hidden_size, hidden_size)
         self.layers = get_clones(middle_layer, num_layers - 1)
@@ -364,7 +364,9 @@ class MLPBlocks(nn.Module):
                 output = self.safe_apply_bn(output, self.bn_mids[layer_index])
 
             if self.use_residuals:
-                output += old_op
+                # avoid in-place addition which can break autograd when
+                # tensors required for gradient computation are modified
+                output = output + old_op
                 old_op = output
 
         if self.output_layer is not None:

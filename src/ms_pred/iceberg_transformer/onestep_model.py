@@ -1,4 +1,4 @@
-"""Inten model """
+"""Onestep model """
 import numpy as np
 from typing import List
 import json
@@ -16,7 +16,6 @@ import functools
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from ms_pred.graphormer.graphormer_graph_encoder import GraphormerGraphEncoder
-from ms_pred.efficient_attention_transformer.efficient_attention_transformer import EfficientAttentionTransformerEncoder, EfficientAttentionTransformerDecoder
 
 
 import ms_pred.common as common
@@ -25,7 +24,7 @@ import ms_pred.magma.fragmentation as fragmentation
 import ms_pred.magma.run_magma as magma
 from .dataset import TreeProcessor 
 
-class IntenModel(pl.LightningModule):
+class OneStepModel(pl.LightningModule):
     def __init__(
         self,
         hidden_size: int,
@@ -56,6 +55,8 @@ class IntenModel(pl.LightningModule):
         ppm_tol: float = 20,
         multi_hop_max_dist: int = 5,
         num_edge_dis: int = 10,
+        predicted_mask_threshold: float = 0.5,
+        frag_prediction_weight: float = 1,
         **kwargs,
     ):
         """__init__ _summary_
@@ -100,6 +101,9 @@ class IntenModel(pl.LightningModule):
         self.max_frags = max_frags
         self.multi_hop_max_dist = multi_hop_max_dist
         self.num_edge_dis = num_edge_dis
+        self.predicted_mask_threshold = predicted_mask_threshold
+        self.frag_prediction_weight = frag_prediction_weight
+        self.frag_prediction_weight = frag_prediction_weight
 
 
         self.pool = dgl_nn.AvgPooling()
@@ -208,12 +212,10 @@ class IntenModel(pl.LightningModule):
             # Also create transformation layer for rich tensor features
         else:
             raise ValueError(f"Unsupported root_encode: {self.root_encode}")
+        self.root_module_fragmask = copy.deepcopy(self.root_module)
 
         self.nhead = 8
         assert decoder_layers > 0, "Decoder layers must be greater than 0"
-        # self.frag_decoder = EfficientAttentionTransformerDecoder(self.decoder_layers, self.hidden_size, self.nhead, dim_feedforward=self.hidden_size * 4, dropout=self.dropout)
-        # if self.encoder_layers > 0:
-        #     self.inten_trans_layers = EfficientAttentionTransformerEncoder(self.encoder_layers, self.hidden_size, nhead=8, dim_feedforward=self.hidden_size * 4, dropout=self.dropout)
         frag_decoder_layer = nn.TransformerDecoderLayer(self.hidden_size, nhead=self.nhead, batch_first=True, dim_feedforward=self.hidden_size * 4, dropout=self.dropout)
         self.frag_decoder = nn.TransformerDecoder(frag_decoder_layer, self.decoder_layers)
         if self.encoder_layers > 0:
@@ -239,10 +241,23 @@ class IntenModel(pl.LightningModule):
 
         # Intensity buckets + fragment token mapper
         buckets = torch.DoubleTensor(np.linspace(0, 1500, 15000))
+        self.token_mapper = nn.Linear(self.hidden_size + 2 * self.formula_in_dim + (self.max_broken_bonds + 1), self.hidden_size)
         self.inten_buckets = nn.Parameter(buckets)
         self.inten_buckets.requires_grad = False
-        self.token_mapper = nn.Linear(self.hidden_size + 2 * self.formula_in_dim 
-                                    + (self.max_broken_bonds + 1), self.hidden_size)
+        self.fragment_vec = nn.Parameter(torch.zeros((max_frags-1, self.hidden_size), dtype=torch.float32)) # Leave one slot for root
+        torch.nn.init.xavier_uniform_(self.fragment_vec)
+        self.fragment_vec.requires_grad = True
+
+        self.fragment_mapper = nn_utils.MLPBlocks(
+            input_size=2*self.hidden_size,
+            hidden_size=2*self.hidden_size,
+            output_size=self.hidden_size,
+            dropout=self.dropout,
+            use_residuals=True,
+            num_layers=1,
+        )
+        self.bce_loss = nn.BCELoss(reduction="none")
+
 
         if loss_fn == "cosine":
             self.loss_fn = self.cos_loss
@@ -269,6 +284,7 @@ class IntenModel(pl.LightningModule):
         atom_hs=None,
         total_hs=None,
         graphormer_input=None,  # New parameter for Graphormer input format
+        use_predicted_mask=False,
     ):
         """forward _summary_
 
@@ -373,6 +389,10 @@ class IntenModel(pl.LightningModule):
                 node_embeddings = final_layer_output[1:].transpose(0, 1)  # [B, T-1, H]
                 root_tokens = graph_rep.unsqueeze(1)
 
+                inner_states_fragmask, graph_rep_fragmask = self.root_module_fragmask(graphormer_input)
+                final_layer_output_fragmask = inner_states_fragmask[-1]
+                node_embeddings_fragmask = final_layer_output_fragmask[1:].transpose(0, 1)  # [B, T-1, H]
+                root_tokens_fragmask = graph_rep_fragmask.unsqueeze(1)
             else:
                 raise ValueError("graphormer_input is required when root_encode='graphormer'")     
         else:
@@ -393,12 +413,28 @@ class IntenModel(pl.LightningModule):
         # frag_targs: [N1, N2] - fragment masks (1.0 for atoms in fragment, 0.0 otherwise)
         device = frag_targs.device
         atom_form_vecs_padded = nn_utils.pad_packed_tensor(atom_form_vecs, num_atoms, 0)
+        root_tokens_fragmask_expanded = root_tokens_fragmask.expand(batch_size, self.max_frags-1, self.hidden_size)
+        frag_vec_expanded = self.fragment_vec.unsqueeze(0).expand(batch_size, self.max_frags-1, self.hidden_size)
+        token_mapped = self.fragment_mapper(torch.cat([root_tokens_fragmask_expanded, frag_vec_expanded], dim=-1))
         atom_mask = torch.arange(node_embeddings.shape[1], device=device).unsqueeze(0) >= num_atoms.unsqueeze(1)
+        frag_logits = torch.bmm(token_mapped, node_embeddings_fragmask.transpose(1, 2))
 
 
         # Mask logits for padded atoms so they don't contribute; large negative drives prob->0
+        frag_logits = frag_logits.masked_fill(atom_mask.unsqueeze(1), -99999)
+        frag_predicted = self.sigmoid(frag_logits)
+        frag_predicted = F.pad(frag_predicted, (0, 0, 1, 0, 0, 0), value=1)  # Pad to max_frags
 
-        frag_targs_padded = nn_utils.pad_packed_tensor(frag_targs, num_frag_targs, True)
+        if use_predicted_mask:
+            frags_padded = frag_predicted > self.predicted_mask_threshold
+            row_mask = (frags_padded).any(dim=-1)
+            kept = [frags_padded[b, row_mask[b]] for b in range(frags_padded.size(0))]
+            num_frag_targs = torch.tensor([k.size(0) for k in kept], dtype=torch.long, device=device)
+            frag_targs_padded = torch.nn.utils.rnn.pad_sequence(kept, batch_first=True, padding_value=1).bool()
+            frag_targs = nn_utils.pack_padded_tensor(frag_targs_padded, num_frag_targs)
+        else:
+            frag_targs_padded = nn_utils.pad_packed_tensor(frag_targs, num_frag_targs, True)
+        # frag_targs_padded = nn_utils.pad_packed_tensor(frag_targs, num_frag_targs, True)
 
         # Now expand to fragment structure and compute per-fragment quantities in a vectorized way
         # Build fragment->molecule index mapping and expand per-molecule tensors
@@ -548,7 +584,8 @@ class IntenModel(pl.LightningModule):
         )
         output_unbinned_alpha = output_unbinned * pool_weights
 
-        return {"output_binned": output_binned, "output": output_unbinned_alpha}
+        return {"output_binned": output_binned, "output": output_unbinned_alpha,
+                "frag_predicted": frag_predicted}
 
     
     def _common_step(self, batch, name="train"):
@@ -567,7 +604,15 @@ class IntenModel(pl.LightningModule):
             atom_hs=batch["atom_hs"],
             total_hs=batch["total_hs"],
             graphormer_input=batch.get("graphormer_input", None),  # Pass Graphormer input if available
+            use_predicted_mask=name!="train",
         )
+        if name == "train":
+            mean_frag_pred_loss = self._frag_loss(
+                pred_obj["frag_predicted"],
+                batch["frag_targs"],
+                batch["num_frag_targs"],
+                batch["num_atoms"]
+            )
 
         if self.binned_targs:
             pred_inten = pred_obj["output_binned"]
@@ -587,10 +632,41 @@ class IntenModel(pl.LightningModule):
         self.log(
             f"{name}_loss", loss["loss"].item(), batch_size=batch_size, on_epoch=True
         )
+        if name == 'train':
+            self.log(f"{name}_frag_pred_loss", mean_frag_pred_loss.item(), batch_size=batch_size)
+            loss["loss"] = loss["loss"] + mean_frag_pred_loss * self.frag_prediction_weight
         for k, v in loss.items():
             if k != "loss":
                 self.log(f"{name}_aux_{k}", v.item(), batch_size=batch_size)
         return loss
+    
+    def _frag_loss(
+        self,
+        frags_predicted: torch.Tensor,
+        frag_targs: torch.Tensor,
+        num_frag_targs: torch.Tensor,
+        num_atoms: torch.Tensor
+    ) -> torch.Tensor:
+        # frags_predicted: [B, max_frags, max_nodes]
+        # frag_targs: packed [sum_frags, max_nodes], num_frag_targs: [B]
+        B, max_frags, max_nodes = frags_predicted.shape
+        frag_targs_padded = nn_utils.pad_packed_tensor(
+            frag_targs, num_frag_targs, False
+        ).float()  # [B, max_targs, max_nodes]
+        B, max_targs, _ = frag_targs_padded.shape
+
+        scores_exp = frags_predicted.unsqueeze(1).expand(B, max_targs, max_frags, max_nodes)
+        targs_exp = frag_targs_padded.unsqueeze(2).expand_as(scores_exp)
+        per_pair_loss = self.bce_loss(scores_exp, targs_exp)  # [B, max_targs, max_frags, max_nodes]
+        cost = per_pair_loss.sum(dim=-1)  # [B, max_targs, max_frags]
+
+        n2_cols = torch.full_like(num_frag_targs, max_frags)
+        assign = pygm.hungarian(
+            -cost, backend="pytorch", n1=num_frag_targs, n2=n2_cols
+        )  # [B, max_targs, max_frags]
+
+        loss_assigned = (cost * assign).sum(dim=(1, 2))/(num_frag_targs*num_atoms)
+        return loss_assigned.mean()
 
     def training_step(self, batch, batch_idx):
         """training_step."""

@@ -20,6 +20,7 @@ import ms_pred.common as common
 import ms_pred.nn_utils as nn_utils
 import ms_pred.magma.fragmentation as fragmentation
 from ms_pred.dag_pred.dag_data import DAGDataset, _collate_root
+import torch.nn.functional as F
 import json
 
 
@@ -486,11 +487,8 @@ class TreeProcessor:
                     v = path_nodes[hop + 1]
                     edge_input[src, tgt, hop] = bond_feat_tensor_long[u, v]
 
-        attn_bias = torch.zeros([num_atoms + 1, num_atoms + 1], dtype=torch.float)
-        for i in range(num_atoms):
-            for j in range(num_atoms):
-                if spatial_pos[i, j] >= spatial_pos_max:
-                    attn_bias[i + 1, j + 1] = float("-inf")
+        attn_bias = torch.where(spatial_pos >= spatial_pos_max, float("-inf"), 0.0)
+        attn_bias = F.pad(attn_bias, (1, 0, 1, 0), value=0.0)
 
         return {
             "x": x,
@@ -603,12 +601,12 @@ class IntenDataset(DAGDataset):
             batch_size = len(graphormer_inputs)
 
             x_batch = torch.zeros([batch_size, max_nodes_gf, node_feat_dim], dtype=torch.float32)
-            attn_bias_batch = torch.zeros([batch_size, max_nodes_gf + 1, max_nodes_gf + 1], dtype=torch.float)
+            attn_bias_batch = torch.full([batch_size, max_nodes_gf + 1, max_nodes_gf + 1], -99999, dtype=torch.float32)
             attn_edge_type_batch = torch.zeros([batch_size, max_nodes_gf, max_nodes_gf, edge_feat_dim], dtype=torch.float32)
             spatial_pos_batch = torch.zeros([batch_size, max_nodes_gf, max_nodes_gf], dtype=torch.long)
             in_degree_batch = torch.zeros([batch_size, max_nodes_gf], dtype=torch.long)
             out_degree_batch = torch.zeros([batch_size, max_nodes_gf], dtype=torch.long)
-            edge_input_batch = torch.zeros([batch_size, max_nodes_gf, max_nodes_gf, max_dist, edge_feat_dim], dtype=torch.long)
+            edge_input_batch = torch.zeros([batch_size, max_nodes_gf, max_nodes_gf, max_dist, edge_feat_dim], dtype=torch.float32)
 
             for i, gf_input in enumerate(graphormer_inputs):
                 num_nodes = gf_input['x'].shape[0]
@@ -628,7 +626,7 @@ class IntenDataset(DAGDataset):
                 'spatial_pos': spatial_pos_batch,
                 'in_degree': in_degree_batch,
                 'out_degree': out_degree_batch,
-                'edge_input': edge_input_batch.float(),
+                'edge_input': edge_input_batch,
             }
             num_atoms = torch.tensor([gf['num_atoms'] for gf in graphormer_inputs], dtype=torch.long)
         else:

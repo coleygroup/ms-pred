@@ -197,15 +197,6 @@ class GraphormerGraphEncoder(nn.Module):
         attn_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         is_tpu = False
-        # compute padding mask. This is needed for multi-head attention
-        data_x = batched_data["x"]
-        n_graph, n_node = data_x.size()[:2]
-        padding_mask = (data_x[:, :, 0]).eq(0)  # B x T x 1
-        padding_mask_cls = torch.zeros(
-            n_graph, 1, device=padding_mask.device, dtype=padding_mask.dtype
-        )
-        padding_mask = torch.cat((padding_mask_cls, padding_mask), dim=1)
-        # B x (T+1) x 1
 
         if token_embeddings is not None:
             x = token_embeddings
@@ -242,9 +233,8 @@ class GraphormerGraphEncoder(nn.Module):
             inner_states.append(x)
 
         for layer in self.layers:
-            x = layer(
+            x, _ = layer(
                 x,
-                self_attn_padding_mask=padding_mask,
                 self_attn_mask=attn_mask,
                 self_attn_bias=attn_bias,
             )
