@@ -67,7 +67,7 @@ for test_entry in test_entries:
             print(f"Could not find model {inten_model}; skipping\n: {json.dumps(test_entry, indent=1)}")
             continue
     else:
-        inten_model = inten_ckpt
+        inten_model = Path(inten_ckpt)
 
     # use inten model to get gen model yaml
     args = yaml.safe_load(open(inten_model.parent.parent / "args.yaml", "r"))
