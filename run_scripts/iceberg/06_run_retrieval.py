@@ -63,22 +63,16 @@ for test_entry in test_entries:
         inten_dir = Path(f"results/dag_inten_{dataset}")
         inten_model = inten_dir / train_split / "version_1/best.ckpt"  # contrastive learning model is version 1
                                                                        # if no contrastive finetuning, change version_1 to version_0
+        args = yaml.safe_load(open(inten_model.parent.parent / "args.yaml", "r"))
+        
         if not inten_model.exists():
             print(f"Could not find model {inten_model}; skipping\n: {json.dumps(test_entry, indent=1)}")
             continue
+        form_folder = Path(args["magma_dag_folder"])
+        gen_model = form_folder.parent / "version_0/best.ckpt"
     else:
         inten_model = Path(inten_ckpt)
-
-    # use inten model to get gen model yaml
-    args = yaml.safe_load(open(inten_model.parent.parent / "args.yaml", "r"))
-    form_folder = Path(args["magma_dag_folder"])
-    gen_model = form_folder.parent / "version_0/best.ckpt"
-    if gen_ckpt is not None: 
-        # check if they match
-        print(f"Checking if gen_ckpt {gen_ckpt} matches gen_model {gen_model}: {gen_ckpt == gen_model}")
-        if gen_ckpt != gen_model:
-            print(f"Gen model {gen_model} does not match gen_ckpt {gen_ckpt}; skipping\n: {json.dumps(test_entry, indent=1)}")
-            continue
+        gen_model = Path(gen_ckpt)
 
     labels = f"data/spec_datasets/{dataset}/retrieval/cands_df_{split}_{maxk}.tsv"
 
