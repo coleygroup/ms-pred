@@ -50,3 +50,6 @@ find-links = ["https://data.pyg.org/whl/torch-2.4.0+cu121.html", "https://data.p
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.uv.extra-build-dependencies]
+ms-gen = ["numpy"]
+
