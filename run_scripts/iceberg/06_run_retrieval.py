@@ -18,8 +18,8 @@ test_entries = [
     {"dataset": "nist20",
      "train_split": "split_1_rnd1",
      "test_split": "split_1",
-     "gen_ckpt": "version_0/best.ckpt",
-     "inten_ckpt": "version_1/best.ckpt",
+     "gen_ckpt": "../ms-models/dag_nist20/split_1_rnd1/version_0/best.ckpt",
+     "inten_ckpt": "../ms-models/dag_inten_nist20/split_1_rnd1/version_1/best.ckpt",
      "max_k": 50},
 
     # {"dataset": "nist20",
