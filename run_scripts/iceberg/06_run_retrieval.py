@@ -18,6 +18,8 @@ test_entries = [
     {"dataset": "nist20",
      "train_split": "split_1_rnd1",
      "test_split": "split_1",
+     "gen_ckpt": "version_0/best.ckpt",
+     "inten_ckpt": "version_1/best.ckpt",
      "max_k": 50},
 
     # {"dataset": "nist20",
@@ -53,21 +55,35 @@ for test_entry in test_entries:
     train_split = test_entry['train_split']
     split = test_entry['test_split']
     maxk = test_entry['max_k']
-    inten_dir = Path(f"results/dag_inten_{dataset}")
-    inten_model = inten_dir / train_split / "version_1/best.ckpt"  # contrastive learning model is version 1
-                                                                   # if no contrastive finetuning, change version_1 to version_0
-    if not inten_model.exists():
-        print(f"Could not find model {inten_model}; skipping\n: {json.dumps(test_entry, indent=1)}")
-        continue
+    
+    gen_ckpt = test_entry.get("gen_ckpt", None)
+    inten_ckpt = test_entry.get("inten_ckpt", None)
+
+    if inten_ckpt is None:
+        inten_dir = Path(f"results/dag_inten_{dataset}")
+        inten_model = inten_dir / train_split / "version_1/best.ckpt"  # contrastive learning model is version 1
+                                                                       # if no contrastive finetuning, change version_1 to version_0
+        if not inten_model.exists():
+            print(f"Could not find model {inten_model}; skipping\n: {json.dumps(test_entry, indent=1)}")
+            continue
+    else:
+        inten_model = inten_ckpt
+
+    # use inten model to get gen model yaml
+    args = yaml.safe_load(open(inten_model.parent.parent / "args.yaml", "r"))
+    form_folder = Path(args["magma_dag_folder"])
+    gen_model = form_folder.parent / "version_0/best.ckpt"
+    if gen_ckpt is not None: 
+        # check if they match
+        print(f"Checking if gen_ckpt {gen_ckpt} matches gen_model {gen_model}: {gen_ckpt == gen_model}")
+        if gen_ckpt != gen_model:
+            print(f"Gen model {gen_model} does not match gen_ckpt {gen_ckpt}; skipping\n: {json.dumps(test_entry, indent=1)}")
+            continue
 
     labels = f"data/spec_datasets/{dataset}/retrieval/cands_df_{split}_{maxk}.tsv"
 
     save_dir = inten_model.parent.parent / f"retrieval_{dataset}_{split}_{maxk}"
     save_dir.mkdir(exist_ok=True)
-
-    args = yaml.safe_load(open(inten_model.parent.parent / "args.yaml", "r"))
-    form_folder = Path(args["magma_dag_folder"])
-    gen_model = form_folder.parent / "version_0/best.ckpt"
 
     save_dir = save_dir
     save_dir.mkdir(exist_ok=True)
