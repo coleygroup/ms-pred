@@ -12,7 +12,7 @@ def floyd_warshall(adjacency_matrix):
 	assert nrows == ncols
 	cdef unsigned int n = nrows
 
-	adj_mat_copy = adjacency_matrix.astype(long, order='C', casting='safe', copy=True)
+	adj_mat_copy = adjacency_matrix.astype(int, order='C', casting='safe', copy=True)
 	assert adj_mat_copy.flags['C_CONTIGUOUS']
 	cdef numpy.ndarray[long, ndim=2, mode='c'] M = adj_mat_copy
 	cdef numpy.ndarray[long, ndim=2, mode='c'] path = -1 * numpy.ones([n, n], dtype=numpy.int64)
@@ -69,8 +69,8 @@ def gen_edge_input(max_dist, path, edge_feat):
 	cdef unsigned int n = nrows
 	cdef unsigned int max_dist_copy = max_dist
 
-	path_copy = path.astype(long, order='C', casting='safe', copy=True)
-	edge_feat_copy = edge_feat.astype(long, order='C', casting='safe', copy=True)
+	path_copy = path.astype(int, order='C', casting='safe', copy=True)
+	edge_feat_copy = edge_feat.astype(int, order='C', casting='safe', copy=True)
 	assert path_copy.flags['C_CONTIGUOUS']
 	assert edge_feat_copy.flags['C_CONTIGUOUS']
 
