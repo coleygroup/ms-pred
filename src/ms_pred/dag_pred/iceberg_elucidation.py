@@ -245,7 +245,10 @@ def iceberg_prediction(
     # generate temp directory
     param_str = exp_name + '|'
     for cand_smi, adduct, instrument, ce in sorted(zip(candidate_smiles, adducts, instruments, collision_energies)):
-        param_str += '|' + cand_smi + ';' + str(common.ion2onehot_pos[adduct]) + ';' + str(common.instrument2onehot_pos[instrument]) + ';' + ','.join(sorted(ce))
+        if instrument is None:
+            param_str += '|' + cand_smi + ';' + str(common.ion2onehot_pos[adduct]) + ';' + ','.join(sorted(ce))
+        else:
+            param_str += '|' + cand_smi + ';' + str(common.ion2onehot_pos[adduct]) + ';' + str(common.instrument2onehot_pos[instrument]) + ';' + ','.join(sorted(ce))
     param_str += '||' + str(gen_ckpt.absolute()) + '||' + str(inten_ckpt.absolute()) + '||' + cuda_devices + \
                  '||' + f'{batch_size:d}-{num_workers:d}-{sparse_k:d}-{max_nodes:d}||' + f'{threshold:.2f}' + \
                  '||' + ('binned_out' if binned_out else "")
@@ -338,7 +341,7 @@ def load_real_spec(
         real_spec = [(k, common.max_inten_spec(v, max_num_inten=20, inten_thresh=intensity_threshold)) for k, v in real_spec]
         real_spec = [(k, common.combined_electronic_denoising(v)) for k, v in real_spec]
         # real_spec = list(common.denoise_spectra_dict(dict(real_spec)).items())
-
+        # pass
     real_spec = common.process_spec_file(meta, real_spec, merge_specs=False)
     # round collision energy to integer
     real_spec = {float(common.get_collision_energy(k)): v for k, v in real_spec.items()}
@@ -363,7 +366,7 @@ def load_pred_spec(
 
     """
     load_dir = Path(load_dir)
-    if load_dir.endswith('.hdf5'):
+    if str(load_dir).endswith('.hdf5'):
         preds_specs = common.HDF5Dataset(load_dir)
     else:
         preds_specs = common.HDF5Dataset(load_dir / 'preds.hdf5')
@@ -371,7 +374,7 @@ def load_pred_spec(
     pred_smis = []
     pred_frags = []
     # iterate over h5 layers
-    for pred_spec_obj in pred_specs.h5_obj.values():
+    for pred_spec_obj in preds_specs.h5_obj.values():
         for smiles_obj in pred_spec_obj.values():
             smi = None
             spec_dict = {}
@@ -418,7 +421,7 @@ def load_pred_spec(
             pred_spec_ars.append(spec_dict)
             pred_frags.append(frag_dict)
             pred_smis.append(smi)
-    pred_specs.close()
+    preds_specs.close()
     pred_specs = np.array(pred_spec_ars)
     smiles = np.array(pred_smis)
 
@@ -471,7 +474,7 @@ def elucidation_over_candidates(
     # hack the precursor mz if there are multiple formulae within tolerance
     precursor_mass = common.merge_mz(precursor_mass, ppm)
 
-    real_spec = load_real_spec(real_spec, real_spec_type, precursor_mass, nce, ppm, nist_path)
+    real_spec = load_real_spec(real_spec, real_spec_type, precursor_mass, nce, ppm, nist_path,  denoise_spectrum=True)
     smiles, pred_specs, pred_frags = load_pred_spec(load_dir, step_collision_energy)
 
     # transform spec to binned spectrum
@@ -703,7 +706,7 @@ def explain_peaks(
         all_ces = list(pred_spec.keys())
         real_spec = None
     else:
-        real_spec = load_real_spec(real_spec, real_spec_type, precursor_mass, nce, ppm)
+        real_spec = load_real_spec(real_spec, real_spec_type, precursor_mass, nce, ppm, denoise_spectrum=True)
         if merge_spec:
             real_spec = common.merge_specs(real_spec)
         all_ces = set(pred_spec.keys()).intersection(real_spec.keys())
