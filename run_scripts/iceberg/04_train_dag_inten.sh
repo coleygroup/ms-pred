@@ -6,7 +6,7 @@ python launcher_scripts/run_from_config.py configs/iceberg/dag_inten_train_nist2
 # python launcher_scripts/run_from_config.py configs/iceberg/dag_inten_contr_finetune_nist20.yaml
 
 # MassSpecGym: Contains both entropy and cosine loss experiments 
-python launcher_scripts/run_from_config.py configs/iceberg/dag_inten_train_msg_allev.yaml
+#python launcher_scripts/run_from_config.py configs/iceberg/dag_inten_train_msg_allev.yaml
 
 # To contrastive finetune:
-python launcher_scripts/run_from_config.py configs/iceberg/dag_inten_contr_finetune_msg.yaml
+#python launcher_scripts/run_from_config.py configs/iceberg/dag_inten_contr_finetune_msg.yaml
