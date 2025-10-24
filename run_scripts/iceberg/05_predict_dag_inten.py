@@ -12,6 +12,7 @@ test_entries = [
     # {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd1"},
     # {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd2"},
     # {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd3"},
+    # {"dataset": "msg", "split": "split_1", "folder": "split_1_rnd1"},
 ]
 devices = ",".join([str(_) for _ in [0, 1]])
 
