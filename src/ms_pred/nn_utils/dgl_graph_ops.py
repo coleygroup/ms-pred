@@ -201,15 +201,16 @@ def batch_remove_single_atoms(
         out.scatter_reduce_(0, comp_for_cut, src, reduce, include_self=False)
         return out[1:]  # ignore zero‐index entries
 
-    broken_bonds = scatter_aggregate(bond_types, reduce='max').float()
     # NOTE: for ring breaking
     #       _____
     #      /     \
-    #     A       B   ← Removing B yields broken_bonds = 1
+    #     A       B   ← Removing B yields broken_bonds = k
     #      \     /
     #       ‾‾‾‾‾
+    # if you want broken_bonds = 1 in this case, use
+    # broken_bonds = scatter_aggregate(bond_types, reduce='max').float()
     # if you want broken_bonds = 2 in this case, use
-    # broken_bonds = scatter_aggregate(bond_types, reduce='sum').float() // 2
+    broken_bonds = torch.floor(scatter_aggregate(bond_types, reduce='sum').float() / 2)
     mapped_info = {}
     for key, info in map_info.items():
         mapped_info[key] = scatter_aggregate(info[job_idx_map[kept_nodes]], reduce='max')

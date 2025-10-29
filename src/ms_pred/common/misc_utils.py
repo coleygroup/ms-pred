@@ -1271,6 +1271,7 @@ def build_mgf_str(
             spec_ar = np.vstack([i for i in sorted(spec_ar, key=lambda x: x[0])])
         else:
             raise NotImplementedError()
+        str_rows.append(f"Num peaks={len(spec_ar)}")
         str_rows.extend([f"{i} {j}" for i, j in spec_ar])
         str_rows.append("END IONS")
 

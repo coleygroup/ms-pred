@@ -76,14 +76,7 @@ def candidates_from_pubchem(
         def smiles_from_pubchem(form):
             try:
                 compounds = pcp.get_compounds(form, namespace='formula')
-                return_smis = []
-                for cmpd in compounds:
-                    smiles_records = [i for i in cmpd.to_dict().get("record").get("props") if i["urn"]["label"] == "SMILES"]
-                    smi = None
-                    if len(smiles_records) > 0:
-                        smi = smiles_records[0]['value']['sval']
-                    return_smis.append(smi)
-                return return_smis
+                return [cmpd.smiles for cmpd in compounds]
                 # Was working: return [cmpd.isomeric_smiles for cmpd in compounds]
             except pcp.BadRequestError:
                 return []
@@ -91,7 +84,10 @@ def candidates_from_pubchem(
             smiles = smiles_from_pubchem(formula)
         except pcp.ServerError: # retry
             smiles = smiles_from_pubchem(formula)
+    return sanitize_smiles(smiles, formula)
 
+
+def sanitize_smiles(smiles:List[str], formula:str):
     target_mass = common.formula_mass(formula)
 
     # remove stereo chemistry, mass mismatch (due to isotopes) and duplicates

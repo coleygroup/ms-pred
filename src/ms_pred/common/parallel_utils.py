@@ -76,7 +76,11 @@ def chunked_parallel(
     def batch_func(list_inputs):
         outputs = []
         for i in list_inputs:
-            outputs.append(function(i))
+            try:
+                outp = function(i)
+            except TypeError: # missing argument
+                outp = function(*i)
+            outputs.append(outp)
         return outputs
 
     list_len = len(input_list)
