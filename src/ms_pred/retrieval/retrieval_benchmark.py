@@ -9,6 +9,10 @@ from collections import defaultdict
 from functools import partial
 from typing import Dict, List
 import copy
+import requests, threading
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pygmtools as pygm
 
@@ -91,7 +95,7 @@ def process_spec_file(spec_name, name_to_colli: dict, spec_dir: Path, num_bins: 
 
 
 def dist_bin(cand_preds_dict: List[Dict], true_spec_dict: dict, sparse=True, ignore_peak=None, func='cos', selected_evs=None, agg=True) -> np.ndarray:
-    """cos_dist for binned spectrum
+    """distance function for binned spectrum
 
     Args:
         cand_preds_dict: List of candidates
@@ -103,7 +107,6 @@ def dist_bin(cand_preds_dict: List[Dict], true_spec_dict: dict, sparse=True, ign
     """
     dist = []
     true_npeaks = []
-    ## sampled_evs = np.random.choice(evs, 3, p = ())
     if selected_evs:
         true_spec_dict = {k: v for k, v in true_spec_dict.items() if str(k) in selected_evs}
 
@@ -295,6 +298,64 @@ def rank_test_entry(
     }
 
 
+BASE_URL = "https://npclassifier.gnps2.org/classify"
+
+# ---- Thread-safe session factory (one Session per thread) ----
+_tls = threading.local()
+def get_session():
+    if getattr(_tls, "session", None) is None:
+        s = requests.Session()
+        retry = Retry(
+            total=3, backoff_factor=0.3,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods={"GET"},
+        )
+        # Increase pool_maxsize so multiple threads can reuse connections
+        s.mount("https://", HTTPAdapter(max_retries=retry, pool_connections=100, pool_maxsize=100))
+        s.headers.update({"User-Agent": "npclassifier-python-demo/0.2"})
+        _tls.session = s
+    return _tls.session
+
+def classify_smiles(smiles: str, timeout: float = 10.0) -> dict:
+    sess = get_session()
+    resp = sess.get(BASE_URL, params={"smiles": smiles}, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
+def classify_name_to_smi(name_to_smi: dict[str, str], max_workers: int = 16) -> dict[str, dict]:
+    # 1) De-duplicate identical SMILES to avoid paying for repeats
+    unique = {}
+    for name, smi in name_to_smi.items():
+        unique.setdefault(smi, []).append(name)
+
+    # 2) Parallel fetch unique SMILES
+    smi_to_result: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(classify_smiles, smi): smi for smi in unique}
+        for fut in tqdm(as_completed(futures), total=len(futures), desc="Classifying"):
+            smi = futures[fut]
+            try:
+                smi_to_result[smi] = fut.result()
+            except requests.HTTPError as e:
+                smi_to_result[smi] = {"error": f"HTTP {e.response.status_code}", "details": str(e)}
+            except requests.RequestException as e:
+                smi_to_result[smi] = {"error": "request-failed", "details": str(e)}
+
+    # 3) Expand back to name→result (keep only pathway_results if you prefer)
+    name_to_result = {}
+    for smi, names in unique.items():
+        for name in names:
+            name_to_result[name] = smi_to_result[smi]
+    return name_to_result
+
+def name_to_superclass(name_to_smi: dict[str, str], **kwargs) -> dict[str, list[str] | None]:
+    raw = classify_name_to_smi(name_to_smi, **kwargs)
+    return {
+        name: (res.get("superclass_results") if isinstance(res, dict) and "superclass_results" in res else None)
+        for name, res in raw.items()
+    }
+
+
 def main(args):
     """main."""
     dataset = args.dataset
@@ -310,6 +371,8 @@ def main(args):
     name_to_smi = dict(data_df[["spec", "smiles"]].values)
     name_to_ion = dict(data_df[["spec", "ionization"]].values)
     name_to_colli = dict(data_df[["spec", "collision_energies"]].values)
+    name_to_class = name_to_superclass(name_to_smi, max_workers=16)
+    name_to_class = {name: (cls[0] if len(cls) == 1 else None) for name, cls in name_to_class.items()}
 
     pred_file = Path(args.pred_file)
     outfile = args.outfile
@@ -324,11 +387,15 @@ def main(args):
         outfile_grouped_peak = (
                 pred_file.parent / f"rerank_eval_grouped_npeak_{dist_fn}.tsv"
         )
+        outfile_grouped_class = (
+                pred_file.parent / f"rerank_eval_grouped_class_{dist_fn}.tsv"
+        )
     else:
         outfile = Path(outfile)
         outfile_grouped_ion = outfile.parent / f"{outfile.stem}_grouped_ion.tsv"
         outfile_grouped_mass = outfile.parent / f"{outfile.stem}_grouped_mass.tsv"
         outfile_grouped_peak = outfile.parent / f"{outfile.stem}_grouped_npeak.tsv"
+        outfile_grouped_class = outfile.parent / f"{outfile.stem}_grouped_class.tsv"
 
     pred_specs = common.HDF5Dataset(pred_file)
     if binned_pred:
@@ -455,11 +522,13 @@ def main(args):
 
     for i in output_entries:
         i["ion"] = name_to_ion[i["spec_name"]]
+        i["class"] = name_to_class[i["spec_name"]]
 
     df = pd.DataFrame(output_entries)
 
     for group_key, out_name in zip(
-        ["mass_bin", "ion", "peak_bin_avg"], [outfile_grouped_mass, outfile_grouped_ion, outfile_grouped_peak]
+        ["mass_bin", "ion", "peak_bin_avg", "class"],
+        [outfile_grouped_mass, outfile_grouped_ion, outfile_grouped_peak, outfile_grouped_class]
     ):
         df_grouped = pd.concat(
             [df.groupby(group_key).mean(numeric_only=True), df.groupby(group_key).size()], axis=1
