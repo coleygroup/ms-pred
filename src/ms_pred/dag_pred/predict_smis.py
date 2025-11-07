@@ -142,11 +142,19 @@ def predict():
         gen_model_obj=gen_model_obj, inten_model_obj=inten_model_obj
     )
 
+    binned_out = kwargs["binned_out"]
+
+    if binned_out:
+        out_name = "binned_preds.hdf5"
+    else:
+        out_name = "preds.hdf5"
+        
+    save_path = save_dir / out_name
+    save_dir.mkdir(exist_ok=True)
+
     with torch.no_grad():
         model.eval()
         model.freeze()
-
-        binned_out = kwargs["binned_out"]
 
         def prepare_entry(entry):
             smi = entry["smiles"]
@@ -216,8 +224,8 @@ def predict():
             )
             return_list = []
             if binned_out:
-                for output_spec, spec_name, smi, h5_name in \
-                        zip(full_outputs["spec"], spec_names, smis, h5_names):
+                for output_spec, spec_name, smi, h5_name, collision_energy in \
+                        zip(full_outputs["spec"], spec_names, smis, h5_names, colli_eng_vals):
                     output_spec = output_spec.cpu().numpy()
                     if kwargs["sparse_out"]:
                         sparse_k = kwargs["sparse_k"]
@@ -226,10 +234,20 @@ def predict():
                         output_spec = np.stack([best_inds, best_intens], -1)
 
                     inchikey = common.inchikey_from_smiles(smi)
-                    return_list.append((h5_name, spec_name, smi, inchikey, output_spec, None))
+                    pred_ms = common.MassSpec(
+                        root_canonical_smiles=smi,
+                        collision_energy=collision_energy,
+                        output_spec=output_spec,
+                        num_bins=15000,
+                        upper_limit=1500,
+                        sparse_out=kwargs["sparse_out"],
+                        inchikey=inchikey,
+                    )
+                    #spec_name = spec_name + "_" + common.PredSpecDB._get_collision_str(collision_energy)
+                    return_list.append((spec_name, pred_ms))
             else:
-                for output_spec, spec_name, smi, h5_name, pred_frag in \
-                        zip(full_outputs["spec"], spec_names, smis, h5_names, full_outputs["frag"]):
+                for output_spec, spec_name, smi, h5_name, pred_frag, collision_energy in \
+                        zip(full_outputs["spec"], spec_names, smis, h5_names, full_outputs["frag"], colli_eng_vals):
                     assert kwargs["sparse_out"], 'sparse_out must be True for non-binned output'
                     output_spec = output_spec.cpu().numpy()
                     pred_frag = pred_frag.cpu().numpy()
@@ -238,27 +256,51 @@ def predict():
                     output_spec = output_spec[best_inds, :]
                     pred_frag = np.array(pred_frag)[best_inds]
                     inchikey = common.inchikey_from_smiles(smi)
-                    return_list.append((h5_name, spec_name, smi, inchikey, output_spec, pred_frag))
+                    pred_ms = common.MassSpec(
+                        root_canonical_smiles=smi,
+                        collision_energy=collision_energy,
+                        output_spec=output_spec,
+                        frags=pred_frag,
+                        num_bins=15000,
+                        upper_limit=1500,
+                        sparse_out=kwargs["sparse_out"],
+                        inchikey=inchikey,
+                    )
+                    #spec_name = spec_name + "_" + common.PredSpecDB._get_collision_str(collision_energy)
+                    return_list.append((spec_name, pred_ms))
             return return_list
-
-        if binned_out:
-            out_name = "binned_preds.hdf5"
-        else:
-            out_name = "preds.hdf5"
-
+        
         def write_h5_func(out_entries):
-            h5 = common.HDF5Dataset(save_dir / out_name, mode='w')
-            h5.attrs['num_bins'] = 15000
-            h5.attrs['upper_limit'] = 1500
-            h5.attrs['sparse_out'] = kwargs["sparse_out"]
+            specdb = None
+            if binned_out:
+                specdb = common.PredSpecDB(
+                    h5_path=save_path, mode='w',
+                    has_probs=False, has_brokens=False, has_masses=False, has_masses_no_adduct=False, has_frag_form_vecs=False, 
+                    has_frags=False, has_intens=True, has_pulled_atoms=False)
+            else:
+                specdb = common.PredSpecDB(
+                    h5_path=save_path, mode='w',
+                    has_probs=False, has_brokens=False, has_masses=False, has_masses_no_adduct=False, has_frag_form_vecs=False, 
+                    has_frags=True, has_intens=True, has_pulled_atoms=False)   
             for out_batch in out_entries:
                 for out_item in out_batch:
-                    h5_name, spec_name, smi, inchikey, output_spec, pred_frag = out_item
-                    h5.write_data(h5_name + '/spec', output_spec)
-                    if pred_frag is not None:
-                        h5.write_str(h5_name + '/frag', json.dumps(pred_frag.tolist()))  # save as string avoids overflow
-                    h5.update_attr(h5_name, {'smiles': smi, 'ikey': inchikey, 'spec_name': spec_name})
-            h5.close()
+                    name, spec = out_item
+                    specdb.write(name, spec)
+            specdb.close()
+
+        # def write_h5_func(out_entries):
+        #     h5 = common.HDF5Dataset(save_dir / out_name, mode='w')
+        #     h5.attrs['num_bins'] = 15000
+        #     h5.attrs['upper_limit'] = 1500
+        #     h5.attrs['sparse_out'] = kwargs["sparse_out"]
+        #     for out_batch in out_entries:
+        #         for out_item in out_batch:
+        #             h5_name, spec_name, smi, inchikey, output_spec, pred_frag = out_item
+        #             h5.write_data(h5_name + '/spec', output_spec)
+        #             if pred_frag is not None:
+        #                 h5.write_str(h5_name + '/frag', json.dumps(pred_frag.tolist()))  # save as string avoids overflow
+        #             h5.update_attr(h5_name, {'smiles': smi, 'ikey': inchikey, 'spec_name': spec_name})
+        #     h5.close()
 
         if use_gpu:
             if kwargs["num_gpu_workers"] == 0:

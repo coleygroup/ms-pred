@@ -320,14 +320,21 @@ class PredSpecDB:
 
         spec_dict = {}
         spec_dict.update(key_dict)
-        fdata = h5_dataset.read_data(full_name + '/f')
+        try:
+            fdata = h5_dataset.read_data(full_name + '/f')
+        except:
+            #case of no f data
+            fdata = None
         cur_idx = 0
         for key in ("probs", "masses", "masses_no_adduct", "intens"):
             if in_key_dict(key):
                 spec_dict[key] = fdata[:, cur_idx]
                 cur_idx += 1
-
-        udata = h5_dataset.read_data(full_name + '/u')
+        try:
+            udata = h5_dataset.read_data(full_name + '/u')
+        except:
+            #case of no u data
+            udata = None
         cur_idx = 0
         if in_key_dict("brokens"):
             spec_dict["brokens"] = udata[:, cur_idx]
@@ -434,6 +441,14 @@ class PredSpecDB:
             else:
                 raise ValueError(f'HDF5 path is not accepted: {path}')
         return colli_engs, remarks
+
+    def get_all_specs(self):
+        """return all spectra in the database"""
+        all_names = self.get_all_names()
+        all_specs = {}
+        for name in all_names:
+            all_specs[name] = self.read_all(name)
+        return all_specs
 
     def close(self):
         for ds in self.h5datasets:

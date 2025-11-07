@@ -199,20 +199,27 @@ def predict():
 
     # Export pred objects
     if binned_out:
-        h5 = common.HDF5Dataset(Path(kwargs["save_dir"]) / "binned_preds.hdf5", mode='w')
-        h5.attrs['num_bins'] = model.inten_buckets.shape[-1]
-        h5.attrs['upper_limit'] = 1500
-        h5.attrs['sparse_out'] = False
+        h5_path = Path(kwargs["save_dir"]) / "binned_preds.hdf5"
+        specdb = common.PredSpecDB(h5_path=h5_path, mode='w', 
+                                   has_probs=False, has_brokens=False, has_masses=False, has_masses_no_adduct=False, has_frag_form_vecs=False, 
+                                   has_frags=False, has_intens=True, has_pulled_atoms=False)
         for output_obj in pred_list:
             spec_name = output_obj["spec_name"]
             smi = output_obj["smiles"]
-            inchikey = common.inchikey_from_smiles(smi)
+            #inchikey = common.inchikey_from_smiles(smi)
             collision_energy = output_obj["collision_energy"]
             output_spec = output_obj["output_spec"]
-            h5_name = f'pred_{spec_name}/ikey {inchikey}/collision {collision_energy}'
-            h5.write_data(h5_name + '/spec', output_spec)
-            h5.update_attr(h5_name, {'smiles': smi, 'ikey': inchikey, 'spec_name': spec_name})
-        h5.close()
+            pred_ms = common.MassSpec(
+                root_canonical_smiles=smi,
+                collision_energy=collision_energy.cpu().numpy(),
+                intens=output_spec,
+                num_bins=model.inten_buckets.shape[-1],
+                upper_limit=1500,
+                sparse_out=False,
+            )
+            specdb.write(spec_name, pred_ms)
+        specdb.close()
+
 
         # spec_names_ar = [str(i["spec_name"]) for i in pred_list]
         # smiles_ar = [str(i["smiles"]) for i in pred_list]

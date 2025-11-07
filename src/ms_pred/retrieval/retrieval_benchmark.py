@@ -397,31 +397,46 @@ def main(args):
         outfile_grouped_peak = outfile.parent / f"{outfile.stem}_grouped_npeak.tsv"
         outfile_grouped_class = outfile.parent / f"{outfile.stem}_grouped_class.tsv"
 
-    pred_specs = common.HDF5Dataset(pred_file)
-    if binned_pred:
-        upper_limit = pred_specs.attrs["upper_limit"]
-        num_bins = pred_specs.attrs["num_bins"]
-    use_sparse = pred_specs.attrs["sparse_out"]
+    pred_specs = common.PredSpecDB(h5_path=pred_file, mode='r')
+    all_spec_dict = pred_specs.get_all_specs()
+    use_sparse = None
+    for spec_id, spec_data in all_spec_dict.items():
+        for spec_id2, spec_data2 in spec_data.items():
+            use_sparse = spec_data2['meta']["sparse_out"]
+            if binned_pred:
+                upper_limit = spec_data2['meta']['upper_limit']
+                num_bins = spec_data2['meta']['num_bins']
+            break
+    
 
     pred_spec_ars = []
     pred_ikeys = []
     pred_spec_names = []
-    # iterate over h5 layers
-    for pred_spec_obj in pred_specs.h5_obj.values():
-        for smiles_obj in pred_spec_obj.values():
-            ikey = None
-            spec_dict = {}
-            name = None
-            for collision_eng_key, collision_eng_obj in smiles_obj.items():
-                if name is None:
-                    name = collision_eng_obj.attrs['spec_name']
-                if ikey is None:
-                    ikey = collision_eng_obj.attrs['ikey']
-                collision_eng_key = common.get_collision_energy(collision_eng_key)
-                spec_dict[collision_eng_key] = collision_eng_obj['spec'][:]
-            pred_spec_ars.append(spec_dict)
-            pred_ikeys.append(ikey)
+    for spec_id, spec_data2 in all_spec_dict.items():
+        for spec_id2, spec_data in spec_data2.items():
+            #upper_limit = spec_data['meta']['upper_limit']
+            #num_bins = spec_data['meta']['num_bins']
+            name = spec_id
+            smiles = spec_data['root_canonical_smiles'] 
+            pred_spec_ars.append(spec_data['meta']['output_spec'][:])
+            pred_ikeys.append(spec_data['meta']['inchikey'])
             pred_spec_names.append(name)
+    # iterate over h5 layers
+    # for pred_spec_obj in pred_specs.h5_obj.values():
+    #     for smiles_obj in pred_spec_obj.values():
+    #         ikey = None
+    #         spec_dict = {}
+    #         name = None
+    #         for collision_eng_key, collision_eng_obj in smiles_obj.items():
+    #             if name is None:
+    #                 name = collision_eng_obj.attrs['spec_name']
+    #             if ikey is None:
+    #                 ikey = collision_eng_obj.attrs['ikey']
+    #             collision_eng_key = common.get_collision_energy(collision_eng_key)
+    #             spec_dict[collision_eng_key] = collision_eng_obj['spec'][:]
+    #         pred_spec_ars.append(spec_dict)
+    #         pred_ikeys.append(ikey)
+    #         pred_spec_names.append(name)
 
     pred_spec_ars = np.array(pred_spec_ars)
     pred_ikeys = np.array(pred_ikeys)

@@ -104,32 +104,49 @@ def main(args):
         outfile = binned_pred_file.parent / "pred_eval.yaml"
     outfile_grouped_template = str(outfile.parent / "pred_eval_grouped_{}.tsv")
 
-    pred_specs = common.HDF5Dataset(binned_pred_file)
-    upper_limit = pred_specs.attrs["upper_limit"]
-    num_bins = pred_specs.attrs["num_bins"]
+    #pred_specs = common.HDF5Dataset(binned_pred_file)
+    pred_specs = common.PredSpecDB(h5_path=binned_pred_file, mode='r')
+    all_spec_dict = pred_specs.get_all_specs()
+
+    #upper_limit = pred_specs.attrs["upper_limit"]
+    #num_bins = pred_specs.attrs["num_bins"]
 
     pred_spec_ars = []
     pred_smiles = []
     pred_spec_names = []
     collision_energies = []
     ion_types = []
-    # iterate over h5 layers
-    for pred_spec_obj in pred_specs.h5_obj.values():
-        for smiles_obj in pred_spec_obj.values():
-            smiles = None
-            name = None
-            for collision_eng_key, collision_eng_obj in smiles_obj.items():
-                if name is None:
-                    name = collision_eng_obj.attrs['spec_name']
-                if smiles is None:
-                    smiles = collision_eng_obj.attrs['smiles']
-                name = common.rm_collision_str(name)
-                collision_eng_key = common.get_collision_energy(collision_eng_key)
-                pred_spec_ars.append(collision_eng_obj['spec'][:])
-                pred_smiles.append(smiles)
-                pred_spec_names.append(name + f'_collision {float(collision_eng_key):.0f}')
-                collision_energies.append(collision_eng_key)
-                ion_types.append(name_to_ion[name])
+
+    for spec_id, spec_data2 in all_spec_dict.items():
+        for spec_id2, spec_data in spec_data2.items():
+            upper_limit = spec_data['meta']['upper_limit']
+            num_bins = spec_data['meta']['num_bins']
+            name = spec_id
+            smiles = spec_data['root_canonical_smiles']
+            name = common.rm_collision_str(name)
+            collision_eng_key = common.get_collision_energy(spec_id)
+            pred_spec_ars.append(spec_data['intens'][:])
+            pred_smiles.append(smiles)
+            pred_spec_names.append(name + f'_collision {float(collision_eng_key):.0f}')
+            collision_energies.append(collision_eng_key)
+            ion_types.append(name_to_ion[name])
+        # # iterate over h5 layers
+        # for pred_spec_obj in pred_specs.h5_obj.values():
+        #     for smiles_obj in pred_spec_obj.values():
+        #         smiles = None
+        #         name = None
+        #         for collision_eng_key, collision_eng_obj in smiles_obj.items():
+        #             if name is None:
+        #                 name = collision_eng_obj.attrs['spec_name']
+        #             if smiles is None:
+        #                 smiles = collision_eng_obj.attrs['smiles']
+        #             name = common.rm_collision_str(name)
+        #             collision_eng_key = common.get_collision_energy(collision_eng_key)
+        #             pred_spec_ars.append(collision_eng_obj['spec'][:])
+        #             pred_smiles.append(smiles)
+        #             pred_spec_names.append(name + f'_collision {float(collision_eng_key):.0f}')
+        #             collision_energies.append(collision_eng_key)
+        #             ion_types.append(name_to_ion[name])
 
     read_spec = partial(
         process_spec_file,
