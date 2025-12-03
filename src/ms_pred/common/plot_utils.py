@@ -16,6 +16,7 @@ import numpy as np
 from rdkit import Chem
 from rdkit.Chem import Draw
 from matplotlib import gridspec
+from .misc_utils import MassSpec
 
 
 legend_params = dict(frameon=False, facecolor="none", fancybox=False)
@@ -171,12 +172,15 @@ def plot_compare_ms(spec1, spec2, spec1_name='', spec2_name='', ce_label='', dpi
         plt.sca(ax)
     if largest_mz is None:
         largest_mz = 0
-    for idx, spec in enumerate((spec1, spec2)):
+    if isinstance(spec1, MassSpec): spec1 = spec1.spec
+    if isinstance(spec2, MassSpec): spec2 = spec2.spec
+
+    def _plot_spec(spec, largest_mz, upper_half=True):
         spec = np.array(spec).astype(np.float64)
         spec[:, 1] = spec[:, 1] / spec[:, 1].max()
         spec = spec[spec[:, 1] > 0.01]  # remove low intensity peaks
         largest_mz = max(largest_mz, spec[:, 0].max())
-        intensity_arr = spec[:, 1] if idx == 0 else -spec[:, 1]
+        intensity_arr = spec[:, 1] if upper_half else -spec[:, 1]
         for mz, inten in zip(spec[:, 0], intensity_arr):
             mz_in_spec1 = np.min(np.abs(mz - spec1[:, 0])) / mz < 1e-6 * ppm
             mz_in_spec2 = np.min(np.abs(mz - spec2[:, 0])) / mz < 1e-6 * ppm
@@ -188,6 +192,10 @@ def plot_compare_ms(spec1, spec2, spec1_name='', spec2_name='', ce_label='', dpi
                 color = spec2_color
             markerline, stemlines, baseline = plt.stem(mz, inten, color, markerfmt=" ", basefmt=" ")
             plt.setp(stemlines, 'linewidth', 0.25)
+        return largest_mz
+
+    largest_mz = _plot_spec(spec1, largest_mz, True)
+    largest_mz = _plot_spec(spec2, largest_mz, False)
 
     plt.axhline(y=0, color='k', linestyle='-', linewidth=0.4)
     plt.text(-0.07, 0.6, spec1_name, rotation=90, rotation_mode='anchor',
@@ -223,6 +231,10 @@ def plot_compare_ref_ms_with_structures(
     """
     Plot up to 4 MS spectra with optional molecule structures in a 2x2 layout.
     """
+    if isinstance(spec1, MassSpec): spec1 = spec1.spec
+    if isinstance(spec2, MassSpec): spec2 = spec2.spec
+    if isinstance(spec3, MassSpec): spec3 = spec3.spec
+    if isinstance(spec4, MassSpec): spec4 = spec4.spec
 
     spectra = [spec1, spec2]
     names = [f'{spec1_name} ({spec1_ce_label} eV)', f'{spec2_name} ({spec2_ce_label} eV)']
@@ -271,7 +283,7 @@ def plot_compare_ref_ms_with_structures(
     else:
         plt.show()
 
-def plot_ms(spec, spec_name='', ce_label='', dpi=300, ax=None, largest_mz=None, linewidth=0.25):
+def plot_ms(spec: MassSpec, spec_name='', ce_label='', dpi=300, ax=None, largest_mz=None, linewidth=0.25):
     """
     spec is a 2d array [(mz1, inten1), (mz2, inten2), ...]
     """
@@ -280,6 +292,7 @@ def plot_ms(spec, spec_name='', ce_label='', dpi=300, ax=None, largest_mz=None, 
         ax = plt.gca()
     else:
         plt.sca(ax)
+    if isinstance(spec, MassSpec): spec = spec.spec
     spec = np.array(spec).astype(np.float64)
     spec[:, 1] = spec[:, 1] / spec[:, 1].max()
     spec = spec[spec[:, 1] > 0.01]
@@ -377,7 +390,8 @@ def plot_mol_as_vector(mol, hatoms=None, hbonds=None, atomcmap=None, atomscores=
         cnorm = mpl.colors.Normalize(vmin=min(atomscores), vmax=max(atomscores))
         colors = {i: cmap(cnorm(s)) for i, s in enumerate(atomscores)}
         d2d.DrawMolecule(mol, highlightAtoms=hatoms, highlightBonds=hbonds, highlightAtomColors=colors)
-        plt.colorbar(plt.cm.ScalarMappable(cnorm, cmap))
+        sm = mpl.cm.ScalarMappable(norm=cnorm, cmap=cmap)
+        plt.colorbar(sm, ax=ax)
     else:
         d2d.DrawMolecule(mol, highlightAtoms=hatoms, highlightBonds=hbonds)
     d2d.FinishDrawing()

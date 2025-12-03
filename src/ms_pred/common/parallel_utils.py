@@ -181,7 +181,7 @@ def subprocess_parallel(cmd_list, max_parallel=4, max_parallel_per_gpu=None, gpu
 
             def run_command(cmd, new_env, job_id, gpu_id):
                 if delay_start > 0:
-                    time.sleep(delay_start * job_id)
+                    time.sleep(delay_start * gpu_id)
                 print(f"Running on GPU {gpu_id}: {cmd}\n")
                 env = os.environ.copy()
                 env['CUDA_VISIBLE_DEVICES'] = str(gpu_id)

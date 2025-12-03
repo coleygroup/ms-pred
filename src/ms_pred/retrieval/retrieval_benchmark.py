@@ -41,12 +41,8 @@ def get_args():
         default=False,
         help="If true, ignore the precursor peak",
     )
-    parser.add_argument(
-        "--binned-pred",
-        action="store_true",
-        default=False,
-        help="If true, the spec predictions are binned",
-    )
+    parser.add_argument("--num-bins", default=15000, help="Number of bins for spectra")
+    parser.add_argument("--upper-limit", default=1500, help="Largest m/z value")
     return parser.parse_args()
 
 
@@ -176,7 +172,6 @@ def dist_bin(cand_preds_dict: List[Dict], true_spec_dict: dict, sparse=True, ign
 # define cosine/entropy functions
 cos_dist_bin = partial(dist_bin, func='cos')
 entropy_dist_bin = partial(dist_bin, func='entropy')
-emd_dist_bin = partial(dist_bin, func='emd')
 
 
 def cos_dist_hun(cand_preds_dict: List[Dict], true_spec_dict: dict, parent_mass: float, ignore_peak=False) -> np.ndarray:
@@ -238,11 +233,11 @@ def rank_test_entry(
         kwargs:
     """
     if dist_fn == "cos" and binned_pred:
-        dist = cos_dist_bin(cand_preds_dict=cand_preds, true_spec_dict=true_spec, ignore_peak=parent_mass_idx)
+        dist = cos_dist_bin(cand_preds_dict=cand_preds, true_spec_dict=true_spec, sparse=False, ignore_peak=parent_mass_idx)
     elif dist_fn == "cos" and not binned_pred:
         dist = cos_dist_hun(cand_preds_dict=cand_preds, true_spec_dict=true_spec, parent_mass=parent_mass, ignore_peak=parent_mass_idx is not None)
     elif dist_fn == "entropy" and binned_pred:
-        dist = entropy_dist_bin(cand_preds_dict=cand_preds, true_spec_dict=true_spec, ignore_peak=parent_mass_idx)
+        dist = entropy_dist_bin(cand_preds_dict=cand_preds, true_spec_dict=true_spec, sparse=False, ignore_peak=parent_mass_idx)
     elif dist_fn == "random":
         dist = np.random.randn(cand_preds.shape[0])
     else:
@@ -362,7 +357,8 @@ def main(args):
     formula_dir_name = args.formula_dir_name
     dist_fn = args.dist_fn
     ignore_parent_peak = args.ignore_parent_peak
-    binned_pred = args.binned_pred
+    num_bins = args.num_bins
+    upper_limit = args.upper_limit
     data_folder = Path(f"data/spec_datasets/{dataset}")
     form_folder = data_folder / f"subformulae/{formula_dir_name}/"
     data_df = pd.read_csv(data_folder / "labels.tsv", sep="\t")
@@ -398,45 +394,17 @@ def main(args):
         outfile_grouped_class = outfile.parent / f"{outfile.stem}_grouped_class.tsv"
 
     pred_specs = common.PredSpecDB(h5_path=pred_file, mode='r')
-    all_spec_dict = pred_specs.get_all_specs()
-    use_sparse = None
-    for spec_id, spec_data in all_spec_dict.items():
-        for spec_id2, spec_data2 in spec_data.items():
-            use_sparse = spec_data2['meta']["sparse_out"]
-            if binned_pred:
-                upper_limit = spec_data2['meta']['upper_limit']
-                num_bins = spec_data2['meta']['num_bins']
-            break
-    
 
     pred_spec_ars = []
     pred_ikeys = []
     pred_spec_names = []
-    for spec_id, spec_data2 in all_spec_dict.items():
-        for spec_id2, spec_data in spec_data2.items():
-            #upper_limit = spec_data['meta']['upper_limit']
-            #num_bins = spec_data['meta']['num_bins']
-            name = spec_id
-            smiles = spec_data['root_canonical_smiles'] 
-            pred_spec_ars.append(spec_data['meta']['output_spec'][:])
-            pred_ikeys.append(spec_data['meta']['inchikey'])
-            pred_spec_names.append(name)
-    # iterate over h5 layers
-    # for pred_spec_obj in pred_specs.h5_obj.values():
-    #     for smiles_obj in pred_spec_obj.values():
-    #         ikey = None
-    #         spec_dict = {}
-    #         name = None
-    #         for collision_eng_key, collision_eng_obj in smiles_obj.items():
-    #             if name is None:
-    #                 name = collision_eng_obj.attrs['spec_name']
-    #             if ikey is None:
-    #                 ikey = collision_eng_obj.attrs['ikey']
-    #             collision_eng_key = common.get_collision_energy(collision_eng_key)
-    #             spec_dict[collision_eng_key] = collision_eng_obj['spec'][:]
-    #         pred_spec_ars.append(spec_dict)
-    #         pred_ikeys.append(ikey)
-    #         pred_spec_names.append(name)
+    for spec_id, cand_ikey, spec_dict in pred_specs.get_all_specs():
+        pred_spec = {}
+        for ce, spec_data in spec_dict.items():
+            pred_spec[common.get_collision_energy(ce)] = spec_data.bin_spectrum()
+        pred_spec_ars.append(pred_spec)
+        pred_ikeys.append(cand_ikey.strip('ikey '))
+        pred_spec_names.append(spec_id.strip('pred_'))
 
     pred_spec_ars = np.array(pred_spec_ars)
     pred_ikeys = np.array(pred_ikeys)
@@ -455,25 +423,15 @@ def main(args):
     for idx in range(len(pred_spec_ars)):  # filter predicted spec
         pred_spec_ars[idx] = {k: v for k, v in pred_spec_ars[idx].items() if 'nan' not in k}
 
-    # Only use sparse valid for now
-    assert use_sparse
+    read_spec = partial(
+        process_spec_file,
+        name_to_colli=name_to_colli,
+        num_bins=num_bins,
+        upper_limit=upper_limit,
+        spec_dir=form_folder,
+        binned_spec=True,  # load binned true spectrum
+    )
 
-    if binned_pred:
-        read_spec = partial(
-            process_spec_file,
-            name_to_colli=name_to_colli,
-            num_bins=num_bins,
-            upper_limit=upper_limit,
-            spec_dir=form_folder,
-            binned_spec=True,  # load binned true spectrum
-        )
-    else:
-        read_spec = partial(
-            process_spec_file,
-            name_to_colli=name_to_colli,
-            spec_dir=form_folder,
-            binned_spec=False,  # load sparse true spectrum
-        )
     true_specs = common.chunked_parallel(
         pred_spec_names_unique,
         read_spec,
@@ -509,7 +467,7 @@ def main(args):
             continue
         all_entries.append(new_entry)
 
-    rank_test_entry_ = partial(rank_test_entry, dist_fn=dist_fn, binned_pred=binned_pred)
+    rank_test_entry_ = partial(rank_test_entry, dist_fn=dist_fn, binned_pred=True)
     all_out = [rank_test_entry_(**test_entry) for test_entry in all_entries]
 
     # Compute avg and individual stats

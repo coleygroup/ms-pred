@@ -694,7 +694,7 @@ def collision_energy_to_float(colli_eng):
         return float(colli_eng)
 
 
-def sanitize(mol_list: List[Chem.Mol], mol_type='mol', return_indices=False) -> List[Chem.Mol]:
+def sanitize(mol_list: List[Chem.Mol], mol_type='mol', return_indices=False, canonicalize=True) -> List[Chem.Mol]:
     """sanitize a list of mols"""
     new_mol_list = []
     new_idx_list = []
@@ -723,20 +723,52 @@ def sanitize(mol_list: List[Chem.Mol], mol_type='mol', return_indices=False) -> 
             mol = Chem.MolFromSmiles(smiles)
             if mol is None:
                 continue
-            inchi = Chem.MolToInchi(mol)
-            mol = canonical_mol_from_inchi(inchi)
+            if canonicalize: # avoids weird tautomers, time-consuming
+                inchi = Chem.MolToInchi(mol)
+                mol = canonical_mol_from_inchi(inchi)
+
+            # block weird compounds such as [FeH6] and [SH6]
+            blocked_atoms = {"Fe", "S"}
+            atoms = {a.GetSymbol() for a in mol.GetAtoms()}
+            if atoms.issubset(blocked_atoms.union({"H"})):
+                continue
+
             if mol is not None:
                 new_mol_list.append(mol)
                 new_idx_list.append(idx)
         except ValueError:
             logging.warning(f"Bad smiles")
 
-    if mol_type == 'smi':
-        new_mol_list = [Chem.MolToSmiles(mol) for mol in new_mol_list]
-    elif mol_type == 'inchi':
-        new_mol_list = [Chem.MolToInchi(mol) for mol in new_mol_list]
+    if canonicalize:
+        if mol_type == 'smi':
+            new_mol_list = [Chem.MolToSmiles(mol) for mol in new_mol_list]
+        elif mol_type == 'inchi':
+            new_mol_list = [Chem.MolToInchi(mol) for mol in new_mol_list]
+    else:
+        new_mol_list = [mol_list[idx] for idx in new_idx_list]
 
     if return_indices:
         return new_mol_list, new_idx_list
     else:
         return new_mol_list
+
+
+def get_formula_subdir(form):
+    c_path, o_path, h_path = None, None, None
+    for (chem_symbol, num) in re.findall(CHEM_FORMULA_SIZE, form):
+        if chem_symbol == 'C':
+            c_path = f'{chem_symbol}{num}/'
+        if chem_symbol == 'O':
+            o_path = f'{chem_symbol}{num}/'
+        if chem_symbol == 'H':
+            h_path = f'{chem_symbol}{num}/'
+    subdir = ''
+    if c_path is not None:
+        subdir += c_path
+    if o_path is not None:
+        subdir += o_path
+    if h_path is not None:
+        subdir += h_path
+    if len(subdir) == 0:
+        subdir = 'others'
+    return subdir

@@ -16,7 +16,7 @@ from rdkit.Chem.Draw import IPythonConsole
 import pubchempy as pcp
 import pickle
 import copy
-from typing import List
+from typing import List, Tuple
 import pygmtools as pygm
 import yaml
 import socket
@@ -87,12 +87,12 @@ def candidates_from_pubchem(
     return sanitize_smiles(smiles, formula)
 
 
-def sanitize_smiles(smiles:List[str], formula:str):
+def sanitize_smiles(smiles:List[str], formula:str, canonicalize=True):
     target_mass = common.formula_mass(formula)
 
     # remove stereo chemistry, mass mismatch (due to isotopes) and duplicates
     smiles = [smi for smi in smiles if '.' not in smi]  # rm mixtures
-    smiles = common.sanitize(smiles, 'smi')  # sanitize (remove weired structures)
+    smiles = common.sanitize(smiles, 'smi', canonicalize=canonicalize)  # sanitize (remove weired structures)
     smiles = [common.rm_stereo(smi) for smi in smiles]  # rm stereo chemistry information
     smiles = [smi for smi in smiles if smi is not None]
     smiles = [smi for smi in smiles if np.abs(common.mass_from_smi(smi) - target_mass) < 0.01]  # rm mass mismatch (usually due to isotopes)
@@ -300,10 +300,11 @@ def load_real_spec(
     denoise_spectrum:bool=True,
     intensity_threshold:float=0.05,
     **kwargs,
-):
+) -> common.CompositeMassSpec:
     if real_spec_type == 'raw':
         meta = {}
-        real_spec = [(k, v) for k, v in real_spec.items()]
+        real_spec = [common.MassSpec(k, masses=v[:, 0], intens=v[:, 1]) for k, v in real_spec.items()]
+        real_spec = common.CompositeMassSpec(real_spec)
     elif real_spec_type == 'ms':
         real_spec_path = Path(real_spec)
         meta, real_spec = common.parse_spectra(real_spec_path)
@@ -324,89 +325,25 @@ def load_real_spec(
             precursor_mass = float(meta['parentmass'])
     assert precursor_mass is not None
 
-    # denoise spectrum (thresholding)
-    if denoise_spectrum:
-        real_spec = [(k, common.max_inten_spec(v, max_num_inten=20, inten_thresh=intensity_threshold)) for k, v in real_spec]
-        real_spec = [(k, common.electronic_denoising(v)) for k, v in real_spec]
-
-    real_spec = common.process_spec_file(meta, real_spec, merge_specs=False)
-
-    # round collision energy to integer
-    real_spec = {float(common.get_collision_energy(k)): v for k, v in real_spec.items()}
-    if nce:
-        real_spec = {common.nce_to_ev(k, precursor_mass): v for k, v in real_spec.items()}
-    real_spec = {f'{float(k):.0f}': v for k, v in real_spec.items()}
+    real_spec.process_spec_file(parentmass=precursor_mass, denoise=denoise_spectrum,
+                                max_num_inten=20, inten_thresh=intensity_threshold)
+    if nce: real_spec.nce_to_ev(precursor_mass)
 
     return real_spec
 
 
-def load_pred_spec(
-    load_dir:str,
-    merge_spec:bool,
-    merge_method='sum',
-):
+def load_pred_spec(load_dir:str) -> Tuple[List[str], List[common.CompositeMassSpec]]:
     """
-    Args:
-        load_dir: str
-        merge_spec: bool
-
-    Returns:
-
+    Load predicted spectrum
     """
     load_dir = Path(load_dir)
-
-    pred_specs = common.HDF5Dataset(load_dir / 'preds.hdf5')
-    pred_spec_ars = []
-    pred_smis = []
-    pred_frags = []
-    # iterate over h5 layers
-    for pred_spec_obj in pred_specs.h5_obj.values():
-        for smiles_obj in pred_spec_obj.values():
-            smi = None
-            spec_dict = {}
-            frag_dict = {}
-            for collision_eng_key, collision_eng_obj in smiles_obj.items():
-                if smi is None:
-                    smi = collision_eng_obj.attrs['smiles']
-                collision_eng_key = common.get_collision_energy(collision_eng_key)
-                spec_dict[collision_eng_key] = collision_eng_obj['spec'][:]
-                frag_dict[collision_eng_key] = json.loads(collision_eng_obj['frag'][0])
-
-            if merge_spec:
-                mz_frag_to_tup = {}
-                for collision_eng_key in spec_dict.keys():
-                    for spec, frag in zip(spec_dict[collision_eng_key], frag_dict[collision_eng_key]):
-                        mz, inten = spec
-                        mz_frag = f'{mz:.4f}_{frag}'
-                        cur_tup = mz_frag_to_tup.get(mz_frag)
-                        if cur_tup is None:
-                            mz_frag_to_tup[mz_frag] = [mz, inten, frag]
-                        else:
-                            if merge_method == 'sum':
-                                cur_tup[1] += inten
-                            elif merge_method == 'max':
-                                cur_tup[1] = max(inten, cur_tup[1])
-                            else:
-                                raise ValueError(f'Unknown merge_method {merge_method}')
-
-                merged_spec, merged_frag = [], []
-                for tup in mz_frag_to_tup.values():
-                    merged_spec.append((tup[0], tup[1]))
-                    merged_frag.append(tup[2])
-                merged_spec = np.array(merged_spec)
-                merged_spec[:, 1] = merged_spec[:, 1] / merged_spec[:, 1].max()
-                spec_dict, frag_dict = {}, {}
-                spec_dict['nan'] = merged_spec  # 'nan' means merged
-                frag_dict['nan'] = np.array(merged_frag)
-
-            pred_spec_ars.append(spec_dict)
-            pred_frags.append(frag_dict)
-            pred_smis.append(smi)
-    pred_specs.close()
-    pred_specs = np.array(pred_spec_ars)
-    smiles = np.array(pred_smis)
-
-    return smiles, pred_specs, pred_frags
+    pred_db = common.PredSpecDB(load_dir / 'preds.hdf5')
+    pred_specs = []
+    smiles = []
+    for spec_id, cand_ikey, composite_spec in pred_db.get_all_specs():
+        smiles.append(composite_spec.root_canonical_smiles)
+        pred_specs.append(composite_spec)
+    return smiles, pred_specs
 
 
 def elucidation_over_candidates(
@@ -455,13 +392,12 @@ def elucidation_over_candidates(
     precursor_mass = common.merge_mz(precursor_mass, ppm)
 
     real_spec = load_real_spec(real_spec, real_spec_type, precursor_mass, nce, ppm)
-    smiles, pred_specs, pred_frags = load_pred_spec(load_dir, step_collision_energy)
+    smiles, pred_specs = load_pred_spec(load_dir)
 
     # transform spec to binned spectrum
-    real_binned = {k: common.bin_spectra([v], num_bins)[0] for k, v in real_spec.items()}
-    pred_binned_specs = [
-        {k: common.bin_spectra([v], num_bins, pool_fn='add')[0] for k, v in s.items()}
-        for s in pred_specs]
+    real_spec.bin_spectrum(pool_fn='max')  # max aggregation for experimental spectra
+    for pred_spec in pred_specs:
+        pred_spec.bin_spectrum(pool_fn='add')  # sum aggregation for predicted spectra
 
     # get target inchikey (if any)
     if real_smiles is not None:
@@ -469,25 +405,33 @@ def elucidation_over_candidates(
     else:
         target_inchikey = None
 
-    # compute distance
-    dist = dist_bin(pred_binned_specs, real_binned, ignore_peak=(precursor_mass - 1) * 10 if ignore_precursor else None,
-                    sparse=False, func=dist_func)
+    if step_collision_energy:
+        assert len(real_spec.values()) == 1
+        real_spec = list(real_spec.values())[0]
+        merge_method = 'stepped'
+    else:
+        merge_method = 'unmerged'
 
-    sorted_indices = np.argsort(dist)
+    # compute similarity
+    sim = [pred_spec.similarity(real_spec, ignore_mass=precursor_mass-1 if ignore_precursor else None,
+                                merge_method=merge_method, metric=dist_func)
+           for pred_spec in pred_specs]
+
+    sorted_indices = np.argsort(sim)[::-1]
 
     found_true = False
     true_idx = -1
     for rnk, idx in enumerate(sorted_indices):
-        d = dist[idx]
+        s = sim[idx]
         smi = smiles[idx]
         inchikey = common.inchikey_from_smiles(smi)
         if target_inchikey is not None and inchikey in target_inchikey:
-            print((f'[{mol_name}] ' if len(mol_name) > 0 else "") + f'Found target mol at {rnk+1}/{len(sorted_indices)}, ent_dist={d:.3f}')
+            print((f'[{mol_name}] ' if len(mol_name) > 0 else "") + f'Found target mol at {rnk+1}/{len(sorted_indices)}, ent_sim={s:.3f}')
             found_true = True
             true_idx = idx
         if idx >= topk and found_true:
             break
-    return [(smiles[i], dist[i], i == true_idx) for i in sorted_indices[:topk]]
+    return [(smiles[i], 1 - sim[i], i == true_idx) for i in sorted_indices[:topk]]
 
 
 def plot_top_mols(
@@ -572,7 +516,7 @@ def explain_peaks(
     precursor_mass = common.merge_mz(precursor_mass, ppm)
 
     # load predicted spec & get the interested prediction
-    smiles, pred_specs, pred_frags = load_pred_spec(load_dir, merge_spec)
+    smiles, pred_specs = load_pred_spec(load_dir)
     cand_inchikeys = [common.inchikey_from_smiles(common.rm_stereo(smi)) for smi in smiles]
 
     # get the interested
@@ -594,7 +538,6 @@ def explain_peaks(
     idx = cand_inchikeys.index(inchikey_of_interest)
     smi = smiles[idx]
     pred_spec = pred_specs[idx]
-    pred_frag = pred_frags[idx]
     engine = fragmentation.FragmentEngine(smi, mol_str_type='smiles')
 
     if real_spec is None or real_spec_type == 'none':  # only plot the predicted spec
@@ -602,9 +545,11 @@ def explain_peaks(
         real_spec = None
     else:
         real_spec = load_real_spec(real_spec, real_spec_type, precursor_mass, nce, ppm)
-        if merge_spec:
-            real_spec = common.merge_specs(real_spec)
         all_ces = set(pred_spec.keys()).intersection(real_spec.keys())
+        if merge_spec:
+            real_spec = {'nan': real_spec.merge_spectra()}
+            pred_spec = {'nan': pred_spec.merge_spectra()}
+            all_ces = {'nan'}
 
     if axes is None:
         axes = [None] * len(all_ces)
@@ -629,7 +574,7 @@ def explain_peaks(
         # display mass of real spectrum
         if display_expmass and real_spec is not None:
             mz_to_plot = dict()
-            for mz, inten in real_spec[ce]:
+            for mz, inten in real_spec[ce].spec:
                 if mz.round(2) in mz_to_plot:
                     if mz_to_plot[mz.round(2)][1] < inten:
                         mz_to_plot[mz.round(2)] = mz, inten
@@ -644,8 +589,8 @@ def explain_peaks(
 
         # explain predicted spectrum
         counter = 0
-        pred_spec[ce][:, 1] = pred_spec[ce][:, 1] / np.max(pred_spec[ce][:, 1])
-        for spec, frag in sorted(zip(pred_spec[ce], pred_frag[ce]), key=lambda x: x[0][1], reverse=True): # sort by inten
+        pred_spec[ce].intens = pred_spec[ce].intens / np.max(pred_spec[ce].intens)
+        for spec, frag in sorted(zip(pred_spec[ce].spec, pred_spec[ce].int_frags), key=lambda x: x[0][1], reverse=True): # sort by inten
             if counter >= num_peaks:
                 break
             mz, inten = spec
@@ -740,7 +685,7 @@ def modi_finder(
     real_spec2 = load_real_spec(real_spec2, real_spec_type2, precursor_mass2, nce2, ppm, denoise_spectrum=False)
 
     # load predicted spectra and fragments
-    smiles, pred_specs, pred_frags = load_pred_spec(load_dir, step_collision_energy)
+    smiles, pred_specs = load_pred_spec(load_dir)
     cand_inchikeys = [common.inchikey_from_smiles(common.rm_stereo(smi)) for smi in smiles]
 
     if mol_type1 == 'smi':
@@ -763,7 +708,7 @@ def modi_finder(
     pred_spec = pred_specs[idx]
     engine = fragmentation.FragmentEngine(smi, mol_str_type='smiles')
 
-    if any([ce2 not in pred_spec for ce2 in real_spec2.keys()]):  # collision energy mismatch
+    if any([ce2 not in pred_spec.keys() for ce2 in real_spec2.keys()]):  # collision energy mismatch
         colli_eng1 = list(pred_spec.keys())
         colli_eng2 = list(real_spec2.keys())
         colli_eng1_arr = np.array([float(ce) for ce in colli_eng1])
@@ -775,7 +720,7 @@ def modi_finder(
         print(f'The following collision energies pairs are matched between two spectra:\n'
               f'{matched_pairs}')
 
-    if not all([ce2 in real_spec1 and ce2 in pred_spec for ce2 in real_spec2.keys()]):
+    if not all([ce2 in real_spec1.keys() and ce2 in pred_spec.keys() for ce2 in real_spec2.keys()]):
         raise ValueError('Collision energy mismatch:\n'
                          f'pred_spec1 {pred_spec.keys()}\n'
                          f'real_spec1 {real_spec1.keys()}\n'
@@ -794,13 +739,13 @@ def modi_finder(
     interested_peaks = {}
     for ce, spec2 in real_spec2.items():
         cur_matched_peaks = []
-        for mz, inten in spec2:
-            shifted_mz_in_spec_a = np.min(np.abs(mz - real_spec1[ce][:, 0] - mass_diff)) / mz < 1e-6 * ppm
-            mz_in_spec_a = np.min(np.abs(mz - real_spec1[ce][:, 0])) / mz < 1e-6 * ppm
+        for mz, inten in zip(spec2.masses, spec2.intens):
+            shifted_mz_in_spec_a = np.min(np.abs(mz - real_spec1[ce].masses - mass_diff)) / mz < 1e-6 * ppm
+            mz_in_spec_a = np.min(np.abs(mz - real_spec1[ce].masses)) / mz < 1e-6 * ppm
             if shifted_mz_in_spec_a:
                 if mz_in_spec_a:
-                    a_idx = np.where(np.abs(mz - real_spec1[ce][:, 0]) / mz < 1e-6 * ppm)[0][0]
-                    a_mz, a_inten = real_spec1[ce][a_idx]
+                    a_idx = np.where(np.abs(mz - real_spec1[ce].masses) / mz < 1e-6 * ppm)[0][0]
+                    a_mz, a_inten = real_spec1[ce].spec[a_idx]
                     if inten > a_inten:
                         cur_matched_peaks.append((mz, inten - a_inten))
                 else:
@@ -813,8 +758,8 @@ def modi_finder(
     atom_scores = np.zeros(engine.natoms)
     for (ce, int_peaks), ax in zip(interested_peaks.items(), axes):
         # find peak matching and plot peaks
-        peak_matching = np.abs(int_peaks[:, 0][:, None] - real_spec2[ce][:, 0][None, :]) < int_peaks[:, 0][:, None] * 1e-6 * ppm
-        common.plot_compare_ms(int_peaks, real_spec2[ce], name1 + f'{formula_diff}', name2, f'# of matched peaks={np.sum(peak_matching.max(axis=-1))}', dpi=500, ax=ax)
+        peak_matching = np.abs(int_peaks[:, 0][:, None] - real_spec2[ce].masses[None, :]) < int_peaks[:, 0][:, None] * 1e-6 * ppm
+        common.plot_compare_ms(int_peaks, real_spec2[ce].spec, name1 + f'{formula_diff}', name2, f'# of matched peaks={np.sum(peak_matching.max(axis=-1))}', dpi=500, ax=ax)
 
         # find fragments to peaks
         counter = 0
@@ -824,13 +769,13 @@ def modi_finder(
             mz, inten = int_peaks[i]
             if mz > mz_cutoff:
                 continue
-            peak_matching = np.abs(mz - mass_diff - pred_spec[ce][:, 0]) < mz * 1e-6 * ppm
+            peak_matching = np.abs(mz - mass_diff - pred_spec[ce].masses) < mz * 1e-6 * ppm
             plot_count = 0
             peak_atom_scores = np.zeros(engine.natoms)
             for j in np.where(peak_matching)[0]:
-                covered_atoms = engine.get_present_atoms(pred_frags[idx][ce][j])[0] # bitmap to indices
-                peak_atom_scores[covered_atoms] += pred_specs[idx][ce][j][1]
-                draw_dict = engine.get_draw_dict(pred_frags[idx][ce][j])
+                covered_atoms = engine.get_present_atoms(pred_spec[ce].int_frags[j])[0] # bitmap to indices
+                peak_atom_scores[covered_atoms] += pred_spec[ce].intens[j]
+                draw_dict = engine.get_draw_dict(pred_spec[ce].int_frags[j])
                 common.plot_mol_as_vector(
                     draw_dict["mol"], hatoms=draw_dict["hatoms"], hbonds=draw_dict["hbonds"],
                     offset=(mz, inten + plot_count * 0.1), zoom=0.0005, ax=plt.gca()
