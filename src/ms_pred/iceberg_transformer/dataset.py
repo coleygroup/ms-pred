@@ -512,6 +512,7 @@ class IntenDataset(DAGDataset):
         add_hs: bool = False,
         embed_elem_group: bool = False,
         tree_processor: TreeProcessor = None,
+        datatype: str = "PredSpecDB",
         **kwargs,
     ):
         super().__init__(df, magma_h5, magma_map, **kwargs)
@@ -521,6 +522,7 @@ class IntenDataset(DAGDataset):
         self.embed_elem_group = embed_elem_group
         self.tree_processor = tree_processor
         self.read_tree = self.tree_processor.featurize_tree
+        self.datatype = datatype
 
     def __getitem__(self, idx: int):
         name = self.spec_names[idx]
@@ -539,11 +541,20 @@ class IntenDataset(DAGDataset):
         return IntenDataset.collate_fn
 
     def load_tree(self, x):
-        filekeys = self.name_to_dict[x]["magma_file"]
-        if not type(self.magma_h5) is common.PredSpecDB:
-            self.magma_h5 = common.PredSpecDB(self.magma_h5)
-        spec = self.magma_h5.read(*filekeys)
-        return spec
+        if self.datatype == "PredSpecDB":
+            filekeys = self.name_to_dict[x]["magma_file"]
+            if not type(self.magma_h5) is common.PredSpecDB:
+                self.magma_h5 = common.PredSpecDB(self.magma_h5)
+            spec = self.magma_h5.read(*filekeys)
+            return spec
+        elif self.datatype == "HDF5":
+            filename = self.name_to_dict[x]["magma_file"]
+            if not type(self.magma_h5) is common.HDF5Dataset:
+                self.magma_h5 = common.HDF5Dataset(self.magma_h5)
+            fp = self.magma_h5.read_str(filename)
+            return json.loads(fp)
+        else:
+            raise ValueError(f"Unsupported datatype: {self.datatype}")
 
     @staticmethod
     def collate_fn(batch):
@@ -656,5 +667,49 @@ class IntenDataset(DAGDataset):
             "graphormer_input": graphormer_batch,
             "num_atoms": num_atoms,
         }
+        return output
+    
+class GenDataset(DAGDataset):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        magma_h5: Path,
+        magma_map: dict,
+        **kwargs,
+    ):
+        super().__init__(df, magma_h5, magma_map, **kwargs)
+        self.read_tree = self.load_tree
 
+    def __getitem__(self, idx: int):
+        name = self.spec_names[idx]
+        adduct = self.name_to_adducts[name]
+        precursor = self.name_to_precursors[name]
+        entry = self.read_fn(name)
+        outdict = {"name": name, "adduct": adduct, "precursor": precursor}
+        outdict.update(entry)
+        return outdict
+
+    @classmethod
+    def get_collate_fn(cls):
+        return GenDataset.collate_fn
+
+    def load_tree(self, x):
+        filekeys = self.name_to_dict[x]["magma_file"]
+        if not type(self.magma_h5) is common.PredSpecDB:
+            self.magma_h5 = common.PredSpecDB(self.magma_h5)
+        spec = self.magma_h5.read(*filekeys)
+        return spec
+
+    @staticmethod
+    def collate_fn(batch):
+        names = [item["name"] for item in batch]
+        smis = [item["root_smiles"] for item in batch]
+        adducts = torch.FloatTensor([item["adduct"] for item in batch])
+        precursor_mzs = torch.FloatTensor([item["precursor"] for item in batch])
+        output = {
+            "smis": smis,
+            "names": names,
+            "adducts": adducts,
+            "precursor_mzs": precursor_mzs,
+        }
         return output

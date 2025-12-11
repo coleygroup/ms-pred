@@ -703,6 +703,110 @@ class SetTransformerEncoder(nn.Module):
         for layer in self.layers:
             feat = layer(feat, lengths)
         return feat
+    
+class SlotDecoder(nn.Module):
+    def __init__(self, hidden_dim=256, num_slots=40, nhead=8, num_layers=3):
+        super().__init__()
+        self.num_slots = num_slots
+
+        # Learnable slot embeddings
+        self.slots = nn.Parameter(torch.randn(num_slots, hidden_dim))
+
+        # Transformer decoder layers
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=hidden_dim,
+            nhead=nhead,
+            dim_feedforward=hidden_dim * 4,
+            batch_first=True,
+        )
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
+
+    def forward(self, graph_tokens, node_embeddings, memory_key_padding_mask=None):
+        """
+        graph_tokens: [B, 1, d]
+        node_embeddings: [B, N, d]
+        """
+        B, N, d = node_embeddings.size()
+        slots = self.slots.unsqueeze(0).expand(B, -1, -1)  # [B, K, d]
+
+        # Use both graph token and nodes as memory for decoder
+        memory = torch.cat([graph_tokens, node_embeddings], dim=1)  # [B, 1+N, d]
+
+        out = self.decoder(tgt=slots, memory=memory, memory_key_padding_mask=memory_key_padding_mask)  # [B, K, d]
+        return out
+    
+class SlotAttention(nn.Module):
+    def __init__(self, num_slots, dim, iters = 3, eps = 1e-8, hidden_dim = 128):
+        super().__init__()
+        self.num_slots = num_slots
+        self.iters = iters
+        self.eps = eps
+        self.scale = dim ** -0.5
+
+        self.slots_mu = nn.Parameter(torch.randn(1, 1, dim))
+        self.slots_sigma = nn.Parameter(torch.rand(1, 1, dim))
+
+        self.to_q = nn.Linear(dim, dim)
+        self.to_k = nn.Linear(dim, dim)
+        self.to_v = nn.Linear(dim, dim)
+
+        self.gru = nn.GRUCell(dim, dim)
+
+        hidden_dim = max(dim, hidden_dim)
+
+        self.fc1 = nn.Linear(dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, dim)
+
+        self.norm_input  = nn.LayerNorm(dim)
+        self.norm_slots  = nn.LayerNorm(dim)
+        self.norm_pre_ff = nn.LayerNorm(dim)
+
+    def forward(self, inputs, num_slots = None, key_padding_mask=None):
+        """
+        inputs: [B, N, D]
+        key_padding_mask: [B, N] (bool), True for positions to ignore (masked)
+        """
+        b, n, d = inputs.shape
+        n_s = num_slots if num_slots is not None else self.num_slots
+        
+        mu = self.slots_mu.expand(b, n_s, -1)
+        sigma = self.slots_sigma.expand(b, n_s, -1)
+        slots = torch.normal(mu, sigma)
+
+        inputs = self.norm_input(inputs)        
+        k, v = self.to_k(inputs), self.to_v(inputs)
+
+        if key_padding_mask is not None:
+            # key_padding_mask: [B, N], True for masked positions
+            # We'll use this to mask attention logits later
+            mask = key_padding_mask.unsqueeze(1)  # [B, 1, N]
+        else:
+            mask = None
+
+        for _ in range(self.iters):
+            slots_prev = slots
+
+            slots = self.norm_slots(slots)
+            q = self.to_q(slots)
+
+            dots = torch.einsum('bid,bjd->bij', q, k) * self.scale  # [B, num_slots, N]
+            if mask is not None:
+                dots = dots.masked_fill(mask, float('-inf'))
+
+            attn = dots.softmax(dim=-1) + self.eps
+            attn = attn / attn.sum(dim=-1, keepdim=True)
+
+            updates = torch.einsum('bjd,bij->bid', v, attn)
+
+            slots = self.gru(
+                updates.reshape(-1, d),
+                slots_prev.reshape(-1, d)
+            )
+
+            slots = slots.reshape(b, -1, d)
+            slots = slots + self.fc2(F.relu(self.fc1(self.norm_pre_ff(slots))))
+
+        return slots
 
 
 def _gen_mask(lengths_x, lengths_y, max_len_x, max_len_y):
@@ -886,3 +990,5 @@ def dict_to_device(data_dict, device):
         else:
             sent_dict[key] = value
     return sent_dict
+
+

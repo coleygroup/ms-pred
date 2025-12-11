@@ -2,13 +2,13 @@ launcher_args: {experiment_name: iceberg_transformer_nist20,
   script_name: "src/ms_pred/iceberg_transformer/train_inten.py",
   slurm_script: launcher_scripts/generic_slurm.sh, 
   launch_method: local,
-  visible_devices: [0]
+  visible_devices: [3]
 }
 universal_args:
   _slurm_args:
   - {_num_gpu: 1, cpus-per-task: 7, job-name: iceberg_transformer_train, mem-per-cpu: 8G,
     time: '1-18:00:00'}
-  debug: [False]
+  debug: [true]
   gpu: [true]
 
   seed: [1]
@@ -46,6 +46,7 @@ universal_args:
   loss-fn: ["cosine"]
   multi-hop-max-dist: [10]
   num-edge-dis: [10]
+  use-flash-attn: [false]  # --- IGNORE ---
 
 iterative_args:
   -  split-name: [split_1.tsv]

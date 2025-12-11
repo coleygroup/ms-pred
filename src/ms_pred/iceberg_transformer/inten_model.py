@@ -159,16 +159,6 @@ class IntenModel(pl.LightningModule):
             self.collision_embedder_denominators.requires_grad = False
             collision_shift = pe_dim
 
-            # Not used: Compute the merged collision embedding as the mean of all energies 0 - 100 eV
-            # collision_eng_steps = torch.arange(0, 100, 0.01)
-            # self.collision_embed_merged = nn.Parameter(torch.cat(
-            #     (torch.sin(collision_eng_steps.unsqueeze(1) / self.collision_embedder_denominators.unsqueeze(0)),
-            #      torch.cos(collision_eng_steps.unsqueeze(1) / self.collision_embedder_denominators.unsqueeze(0))),
-            #     dim=1
-            # ).mean(dim=0))
-            # self.collision_embed_merged.requires_grad = False
-
-            # All-zero for collision == nan
             self.collision_embed_merged = nn.Parameter(torch.zeros(pe_dim))
             self.collision_embed_merged.requires_grad = False
 

@@ -1,19 +1,19 @@
 launcher_args: {experiment_name: frag_only_nist20,
-  script_name: "src/ms_pred/iceberg_transformer/train_frag.py",
+  script_name: "src/ms_pred/iceberg_transformer/test_frag.py",
   slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,
   visible_devices: [0]
 }
 universal_args:
   _slurm_args:
-  - {_num_gpu: 1, cpus-per-task: 7, job-name: frag_only_train, mem-per-cpu: 8G,
+  - {_num_gpu: 1, cpus-per-task: 7, job-name: frag_only_test, mem-per-cpu: 8G,
     time: '1-12:00:00'}
   debug: [false]
   gpu: [true]
 
   seed: [1]
   num-workers: [32]
-  batch-size: [32]
+  batch-size: [128]
   max-epochs: [150]
 
   dataset-name: [nist20]
@@ -34,6 +34,7 @@ universal_args:
   add-hs: [true]
   multi-hop-max-dist: [5]
   num-edge-dis: [10]
+  test-checkpoint: ["results/frag_only_nist20/split_1_rnd1/version_37/best.ckpt"]
 
 iterative_args:
   -  split-name: [split_1.tsv]

@@ -24,6 +24,7 @@ from torch.utils.data import DataLoader
 import ms_pred.common as common
 from ms_pred.iceberg_transformer.dataset import IntenDataset, TreeProcessor
 from ms_pred.iceberg_transformer.frag_model import FragOnlyModel
+import ms_pred.nn_utils as nn_utils
 
 
 def add_frag_train_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -48,15 +49,13 @@ def add_frag_train_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
     parser.add_argument("--lr-decay-rate", default=1.0, type=float)
     parser.add_argument("--weight-decay", default=0.0, type=float)
     parser.add_argument("--test-checkpoint", default="", type=str)
-    parser.add_argument("--embed-adduct", default=False, action="store_true")
-    parser.add_argument("--embed-collision", default=False, action="store_true")
-    parser.add_argument("--embed-elem-group", default=False, action="store_true")
 
     # Model params
     parser.add_argument("--dropout", default=0.2, type=float)
     parser.add_argument("--hidden-size", default=512, type=int)
     parser.add_argument("--root-encode", default="graphormer", choices=["gnn", "graphormer"], type=str)
     parser.add_argument("--add-hs", default=True, action="store_true")
+    parser.add_argument("--embed-elem-group", default=True, action="store_true")
     parser.add_argument("--pe-embed-k", default=10, type=int)
     parser.add_argument("--layers", default=6, type=int)
     parser.add_argument("--warmup", default=1000, type=int)
@@ -71,13 +70,68 @@ def get_args():
     parser = add_frag_train_args(parser)
     return parser.parse_args()
 
+def connected_subgraph_mask_batch(adj_batch, masks_batch, max_iter=None):
+    """
+    Vectorized connectivity check for masked subgraphs in a batch of graphs.
+    
+    Parameters
+    ----------
+    adj_batch : (B, N, N) float/bool Tensor
+        Batched adjacency matrices (0/1), padded with zeros.
+    masks_batch : (B, M, N) float/bool Tensor
+        Batched subgraph masks (0/1), padded with zeros.
+    node_counts : (B,) Tensor[int], optional
+        Number of valid nodes per graph. If None, assume all N are valid.
+    max_iter : int, optional
+        Max BFS iterations. Defaults to N (sufficient for connectivity).
+    
+    Returns
+    -------
+    connected : (B, M) BoolTensor
+        Whether each subgraph is connected.
+    """
+    B, N, _ = adj_batch.shape
+    _, M, _ = masks_batch.shape
+    device = adj_batch.device
+    
+    if max_iter is None:
+        max_iter = N
+    
+    # expand adjacency for (B, M, N, N)
+    A = adj_batch[:, None, :, :].expand(B, M, N, N)
+    
+    # masks (B, M, N)
+    masks = masks_batch.bool()
+    sizes = masks.sum(-1)  # (B, M)
+    
+    # choose first node in each mask as "root"
+    first_nodes = masks.float().cumsum(-1) == 1  # (B, M, N)
+    
+    # initialize frontier & visited
+    visited = first_nodes.clone()
+    frontier = first_nodes.clone()
+    
+    for _ in range(max_iter):
+        if not frontier.any():
+            break
+        # multiply adjacency with frontier: (B, M, N)
+        # frontier (B, M, N) -> (B,M,1,N)
+        new_reach = torch.matmul(frontier.unsqueeze(-2).float(), A.float()).squeeze(-2).bool()
+        new_reach = new_reach & masks & ~visited
+        visited |= new_reach
+        frontier = new_reach
+    
+    # subgraph connected if visited covers all masked nodes
+    connected = (visited.sum(-1) == sizes) | (sizes <= 1)
+    return connected
 
-def train_model():
+
+def test_model():
     args = get_args()
     kwargs: Dict[str, Any] = args.__dict__
 
     save_dir = kwargs["save_dir"]
-    common.setup_logger(save_dir, log_name="frag_train.log", debug=kwargs["debug"])
+    common.setup_logger(save_dir, log_name="frag_test.log", debug=kwargs["debug"])
     pl.seed_everything(kwargs.get("seed"))
 
     # Dump args
@@ -98,8 +152,6 @@ def train_model():
         df = df[:1000]
     spec_names = df["spec"].values
     train_inds, val_inds, test_inds = common.get_splits(spec_names, split_file)
-    train_df = df.iloc[train_inds]
-    val_df = df.iloc[val_inds]
     test_df = df.iloc[test_inds]
 
     magma_folder = kwargs["magma_folder"]
@@ -118,30 +170,6 @@ def train_model():
         multi_hop_max_dist=kwargs["multi_hop_max_dist"],
     )
 
-    train_dataset = IntenDataset(
-        train_df,
-        magma_h5=magma_h5_path,
-        magma_map=name_to_json,
-        num_workers=num_workers,
-        root_encode=kwargs["root_encode"],
-        binned_targs=False,
-        add_hs=kwargs["add_hs"],
-        embed_elem_group=kwargs["embed_elem_group"],
-        tree_processor=tree_processor,
-        datatype="HDF5",
-    )
-    val_dataset = IntenDataset(
-        val_df,
-        magma_h5=magma_h5_path,
-        magma_map=name_to_json,
-        num_workers=num_workers,
-        root_encode=kwargs["root_encode"],
-        binned_targs=False,
-        add_hs=kwargs["add_hs"],
-        embed_elem_group=kwargs["embed_elem_group"],
-        tree_processor=tree_processor,
-        datatype="HDF5",
-    )
     test_dataset = IntenDataset(
         test_df,
         magma_h5=magma_h5_path,
@@ -156,27 +184,9 @@ def train_model():
     )
 
     # Dataloaders
-    collate_fn = train_dataset.get_collate_fn()
+    collate_fn = test_dataset.get_collate_fn()
     persistent_workers = kwargs["num_workers"] > 0
     mp_context = 'spawn' if num_workers > 0 else None
-    train_loader = DataLoader(
-        train_dataset,
-        num_workers=kwargs["num_workers"],
-        collate_fn=collate_fn,
-        shuffle=True,
-        batch_size=kwargs["batch_size"],
-        persistent_workers=persistent_workers,
-        multiprocessing_context=mp_context,
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        num_workers=kwargs["num_workers"],
-        collate_fn=collate_fn,
-        shuffle=False,
-        batch_size=kwargs["batch_size"],
-        persistent_workers=persistent_workers,
-        multiprocessing_context=mp_context,
-    )
     test_loader = DataLoader(
         test_dataset,
         num_workers=kwargs["num_workers"],
@@ -186,88 +196,45 @@ def train_model():
         persistent_workers=persistent_workers,
         multiprocessing_context=mp_context,
     )
-
-    # Model
-    model = FragOnlyModel(
-        hidden_size=kwargs["hidden_size"],
-        layers=kwargs["layers"],
-        dropout=kwargs["dropout"],
-        learning_rate=kwargs["learning_rate"],
-        lr_decay_rate=kwargs["lr_decay_rate"],
-        weight_decay=kwargs["weight_decay"],
-        warmup=kwargs["warmup"],
-        root_encode=kwargs["root_encode"],
-        node_feats=train_dataset.get_node_feats(),
-        edge_feats=tree_processor.get_edge_feats(),
-        max_frags=kwargs["max_frags"],
-        multi_hop_max_dist=kwargs["multi_hop_max_dist"],
-        num_edge_dis=kwargs["num_edge_dis"],
-        embed_adduct=kwargs["embed_adduct"],
-        embed_collision=kwargs["embed_collision"],
-        embed_elem_group=kwargs["embed_elem_group"],
-    )
-
-    # Trainer
-    monitor = "val_loss"
-    if kwargs["debug"]:
-        kwargs["max_epochs"] = 2
-    if kwargs["debug_overfit"]:
-        kwargs["min_epochs"] = 2000
-        kwargs["max_epochs"] = None
-        monitor = "train_loss"
-
-    tb_logger = pl_loggers.TensorBoardLogger(save_dir, name="")
-    console_logger = common.ConsoleLogger()
-    checkpoint_callback = ModelCheckpoint(
-        monitor=monitor,
-        dirpath=tb_logger.log_dir,
-        filename="best",
-        save_weights_only=False,
-    )
-    earlystop_callback = EarlyStopping(monitor=monitor, patience=5)
-    callbacks = [earlystop_callback, checkpoint_callback]
-
-    trainer = pl.Trainer(
-        logger=[tb_logger, console_logger],
-        accelerator="gpu" if kwargs["gpu"] else "cpu",
-        devices=1 if kwargs["gpu"] else 0,
-        callbacks=callbacks,
-        gradient_clip_val=5,
-        min_epochs=kwargs["min_epochs"],
-        max_epochs=kwargs["max_epochs"],
-        gradient_clip_algorithm="value",
-        num_sanity_val_steps=2 if kwargs["debug"] else 0,
-    )
-
-    if not kwargs["test_checkpoint"]:
-        if kwargs["debug_overfit"]:
-            trainer.fit(model, train_loader)
-        else:
-            trainer.fit(model, train_loader, val_loader)
-
-        checkpoint_callback = trainer.checkpoint_callback
-        test_checkpoint = checkpoint_callback.best_model_path
-        test_checkpoint_score = checkpoint_callback.best_model_score.item()
-    else:
-        test_checkpoint = kwargs["test_checkpoint"]
-        test_checkpoint_score = "[unknown]"
-
-    # Load from checkpoint
-    model = FragOnlyModel.load_from_checkpoint(test_checkpoint)
-    logging.info(
-        f"Loaded model from {test_checkpoint} with val loss of {test_checkpoint_score}"
-    )
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = FragOnlyModel.load_from_checkpoint(kwargs["test_checkpoint"]).to(device)
+    pred_boundary = model.pred_boundary
+    model.freeze()
     model.eval()
-    trainer.test(model=model, dataloaders=test_loader)
-
-
+    recalls = []
+    connected_counts = []
+    with torch.no_grad():
+        for batch in test_loader:
+            for c in batch:
+                if isinstance(batch[c], torch.Tensor):
+                    batch[c] = batch[c].to(device)
+                if c == "graphormer_input":
+                    for k in batch[c]:
+                        if isinstance(batch[c][k], torch.Tensor):
+                            batch[c][k] = batch[c][k].to(device)
+            out = model(batch)
+            pattern_predicted = out["frag_predicted"] > 0.5
+            adj_batch = batch["adj_matrices"] > 0.5
+            frag_targs_padded = nn_utils.pad_packed_tensor(
+                batch["frag_targs"], batch["num_frag_targs"], False
+            )
+            if pred_boundary:
+                pattern_predicted, pattern_count = model.breakpoints_to_patterns(pattern_predicted, adj_batch, batch["num_atoms"])
+            pattern_match_recall = model.pattern_match_recall(pattern_predicted, frag_targs_padded, batch["num_frag_targs"])
+            recalls.append(pattern_match_recall)
+            connected_count = connected_subgraph_mask_batch(adj_batch, pattern_predicted)
+            connected_counts.append(connected_count.sum().item())
+        total_connected = sum(connected_counts)
+        logging.info(f"Total connected fragments ratio: {total_connected} / {len(test_dataset)*100}")
+        avg_recall = torch.mean(torch.cat(recalls)).item()
+        logging.info(f"Average test set fragment pattern recall: {avg_recall:.4f}")
 def main():
-    train_model()
+    test_model()
 
 
 if __name__ == "__main__":
     import time
     start_time = time.time()
-    train_model()
+    test_model()
     end_time = time.time()
     logging.info(f"Program finished in: {end_time - start_time} seconds")
