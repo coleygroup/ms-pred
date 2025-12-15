@@ -19,9 +19,11 @@ try:
                           '[#7,S,O,Se,Te;!H0]-[#7X2,#6,#15]=[#7,#16,#8,Se,Te]'),
         TautomerTransform('1,3 (thio)keto/enol r', '[O,S,Se,Te;X2!H0]-[C]=[C]'),
     )
+    _TAUT_CANON = TautomerCanonicalizer(transforms=_TAUTOMER_TRANSFORMS)
 except ModuleNotFoundError:
     from rdkit.Chem.MolStandardize.rdMolStandardize import TautomerEnumerator  # newer rdkit
     _RD_TAUTOMER_CANONICALIZER = 'v2'
+    _TAUT_ENUM = TautomerEnumerator()
 
 P_TBL = Chem.GetPeriodicTable()
 
@@ -475,11 +477,9 @@ def canonical_mol_from_inchi(inchi):
     if mol is None:
         return None
     if _RD_TAUTOMER_CANONICALIZER == 'v1':
-        _molvs_t = TautomerCanonicalizer(transforms=_TAUTOMER_TRANSFORMS)
-        mol = _molvs_t.canonicalize(mol)
+        mol = _TAUT_CANON.canonicalize(mol)
     else:
-        _te = TautomerEnumerator()
-        mol = _te.Canonicalize(mol)
+        mol = _TAUT_ENUM.Canonicalize(mol)
     return mol
 
 

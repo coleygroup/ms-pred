@@ -1,0 +1,2635 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>ICEBERG Spectrum Retrieval</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <style>
+        body {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            margin: 0;
+            padding: 0;
+            background: #f5f5f7;
+            color: #111827;
+        }
+        header {
+            background: #111827;
+            color: #f9fafb;
+            padding: 0.75rem 2rem;
+        }
+        .header-inner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .header-title {
+            margin: 0;
+            font-size: 1.3rem;
+            font-weight: 600;
+        }
+
+        main {
+            max-width: 1150px;
+            margin: 1.5rem auto 3rem;
+            padding: 0 1rem;
+        }
+        .card {
+            background: #ffffff;
+            border-radius: 0.75rem;
+            padding: 1.5rem;
+            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+            margin-bottom: 1.5rem;
+        }
+        .card h2 {
+            margin-top: 0;
+            font-size: 1.2rem;
+        }
+        label {
+            display: block;
+            font-size: 0.875rem;
+            font-weight: 500;
+            margin-bottom: 0.25rem;
+            color: #374151;
+        }
+        input[type="text"], select, textarea {
+            width: 100%;
+            padding: 0.5rem 0.75rem;
+            border-radius: 0.5rem;
+            border: 1px solid #d1d5db;
+            font-size: 0.9rem;
+            box-sizing: border-box;
+        }
+        textarea {
+            min-height: 140px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            resize: vertical;
+        }
+        .smiles-cell {
+            cursor: pointer;
+        }
+        #copy-toast {
+            position: fixed;
+            bottom: 1rem;
+            right: 1rem;
+            background: #111827;
+            color: #f9fafb;
+            padding: 0.5rem 0.75rem;
+            border-radius: 999px;
+            font-size: 0.8rem;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s ease-in-out;
+            z-index: 100;
+        }
+        #copy-toast.show {
+            opacity: 1;
+        }
+        .row {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+        .row > div {
+            flex: 1;
+            min-width: 0;
+        }
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0.55rem 1.1rem;
+            border-radius: 999px;
+            font-size: 0.9rem;
+            border: none;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .btn-primary {
+            background: #2563eb;
+            color: white;
+        }
+        .btn-secondary {
+            background: #e5e7eb;
+            color: #111827;
+        }
+        .btn + .btn {
+            margin-left: 0.5rem;
+        }
+        .spectrum-block {
+            border-radius: 0.5rem;
+            border: 1px solid #e5e7eb;
+            padding: 0.75rem;
+            margin-bottom: 0.75rem;
+            background: #f9fafb;
+        }
+        .spectrum-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.25rem;
+        }
+        .spectrum-header span {
+            font-weight: 500;
+            font-size: 0.9rem;
+        }
+        .spectrum-header button {
+            font-size: 0.75rem;
+            padding: 0.25rem 0.6rem;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+        }
+        th, td {
+            padding: 0.5rem 0.4rem;
+            text-align: left;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        th {
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: #6b7280;
+        }
+        tbody tr:hover {
+            background: #f3f4f6;
+        }
+        tbody tr.row-pinned {
+            background: #eff6ff !important;
+            box-shadow: inset 0 0 0 1px #2563eb33;
+        }
+        .badge {
+            display: inline-block;
+            padding: 0.1rem 0.45rem;
+            font-size: 0.7rem;
+            border-radius: 999px;
+            background: #e5e7eb;
+            color: #374151;
+        }
+        .similarity {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas;
+        }
+        .flash {
+            padding: 0.6rem 0.9rem;
+            border-radius: 0.5rem;
+            margin-bottom: 0.5rem;
+            font-size: 0.85rem;
+        }
+        .flash-danger {
+            background: #fef2f2;
+            color: #b91c1c;
+        }
+        .flash-warning {
+            background: #fffbeb;
+            color: #92400e;
+        }
+
+        /* Layout for table + structure preview */
+        .results-layout {
+            position: relative;      /* enable absolute positioning inside */
+        }
+
+        .results-layout-table {
+            width: 100%;
+        }
+
+        .preview-card {
+            position: absolute;
+            top: 20px;               /* will be updated in JS per row */
+            right: 20px;             /* float at upper-right of table */
+            width: 280px;
+
+            display: none;           /* hidden until hover/pin */
+            z-index: 50;
+
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 0.75rem;
+            padding: 0.75rem;
+            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.15);
+        }
+
+        .preview-card h3 {
+            margin-top: 0;
+            margin-bottom: 0.25rem;
+            font-size: 0.95rem;
+        }
+
+        .preview-img-wrapper img {
+            max-width: 100%;
+            max-height: 260px;
+            border-radius: 0.5rem;
+        }
+
+        .preview-caption {
+            margin-top: 0.5rem;
+            font-size: 0.8rem;
+            color: #4b5563;
+            word-break: break-all;
+        }
+
+        .preview-helper {
+            margin-top: 0.3rem;
+            font-size: 0.75rem;
+            color: #9ca3af;
+        }
+
+        .footer {
+            margin-top: 2rem;
+            padding-top: 1rem;
+            border-top: 1px solid #e5e7eb;
+            font-size: 0.8rem;
+            color: #6b7280;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+        .footer a {
+            color: #2563eb;
+            text-decoration: none;
+        }
+        .footer a:hover {
+            text-decoration: underline;
+        }
+        .footer-top {
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+        }
+        .footer-bottom {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+        .footer-bottom img {
+            height: 32px;
+        }
+        .footer-bottom span {
+            font-size: 0.8rem;
+        }
+
+        /* -------- Loading overlay & spinner -------- */
+        .loading-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.35);
+            display: none;              /* shown on submit via JS */
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+        }
+        .loading-box {
+            background: #ffffff;
+            border-radius: 0.75rem;
+            padding: 1rem 1.5rem;
+            box-shadow: 0 10px 25px rgba(15, 23, 42, 0.2);
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            font-size: 0.9rem;
+            color: #111827;
+        }
+        .loading-spinner {
+            width: 32px;
+            height: 32px;
+            border-radius: 999px;
+            border: 3px solid #e5e7eb;
+            border-top-color: #2563eb;
+            animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+
+    <script>
+        function addSpectrumBlock() {
+            const container = document.getElementById("spectra-container");
+            const idx = container.querySelectorAll(".spectrum-block").length + 1;
+
+            const block = document.createElement("div");
+            block.className = "spectrum-block";
+
+            block.innerHTML = `
+                <div class="spectrum-header">
+                    <span>Spectrum ${idx}</span>
+                    <button type="button" class="btn btn-secondary" onclick="removeSpectrumBlock(this)">Remove</button>
+                </div>
+
+                <div class="row">
+                    <div>
+                        <label>Acquisition mode</label>
+                        <select name="spectrum_mode"
+                                class="acq-mode-select"
+                                onchange="onAcquisitionModeChange(this)">
+                            <option value="single" selected>Single NCE</option>
+                            <option value="stepped">Stepped NCE</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="single-nce-row">
+                    <div class="row">
+                        <div>
+                            <label>Collision energy (NCE, %)</label>
+                            <select name="spectrum_nce">
+                                <option value="10">10</option>
+                                <option value="20">20</option>
+                                <option value="30" selected>30</option>
+                                <option value="40">40</option>
+                                <option value="50">50</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="stepped-nce-row" style="display:none; margin-top:0.5rem;">
+                    <label>Stepped collision energies (NCE, %)</label>
+                    <div class="stepped-nce-options" style="font-size:0.8rem; color:#4b5563; display:flex; gap:0.5rem; flex-wrap:wrap;">
+                        <label><input type="checkbox" class="stepped-nce-checkbox" value="10"> 10</label>
+                        <label><input type="checkbox" class="stepped-nce-checkbox" value="20"> 20</label>
+                        <label><input type="checkbox" class="stepped-nce-checkbox" value="30"> 30</label>
+                        <label><input type="checkbox" class="stepped-nce-checkbox" value="40"> 40</label>
+                        <label><input type="checkbox" class="stepped-nce-checkbox" value="50"> 50</label>
+                    </div>
+                    <input type="hidden" name="spectrum_stepped_nces" value="">
+                    <div style="font-size:0.75rem; color:#6b7280; margin-top:0.25rem;">
+                        Select one or more stepped NCEs, e.g. 20/30/50.
+                    </div>
+                </div>
+
+                <label style="margin-top:0.5rem;">Spectrum (m/z intensity per line)</label>
+                <textarea name="spectrum_text" placeholder="59.9664 0.0967&#10;60.9743 0.0679&#10;62.9899 0.0450&#10;..."></textarea>
+            `;
+            container.appendChild(block);
+        }
+
+        function removeSpectrumBlock(button) {
+            const block = button.closest(".spectrum-block");
+            block.remove();
+        }
+
+        function csvEscape(value) {
+            if (value == null) return "";
+            value = String(value);
+            if (/[",\n]/.test(value)) {
+                return '"' + value.replace(/"/g, '""') + '"';
+            }
+            return value;
+        }
+
+        function exportResultsCsv() {
+            const tbody = document.getElementById("results-body");
+            if (!tbody) {
+                alert("No results to export.");
+                return;
+            }
+            const rows = Array.from(tbody.querySelectorAll("tr"));
+            if (!rows.length) {
+                alert("No results to export.");
+                return;
+            }
+
+            // Header row
+            const headers = [
+                "Rank",
+                "Similarity",
+                "Formula",
+                "SMILES",
+                "InChIKey",
+                "Adduct",
+                "Collision_energy_eV",
+                "Description"
+            ];
+            const csvRows = [];
+            csvRows.push(headers.join(","));
+
+            rows.forEach((row) => {
+                const cells = row.querySelectorAll("td");
+                if (cells.length < 8) return;
+
+                const rank = cells[0].textContent.trim();
+                const similarity = cells[1].textContent.trim();
+                const formula = cells[2].textContent.trim();
+
+                // use full SMILES from data-smiles if available
+                const smiles = row.getAttribute("data-smiles") ||
+                               cells[3].getAttribute("data-smiles") ||
+                               cells[3].textContent.trim();
+
+                // full InChIKey is stored in the title attribute of the 5th cell
+                const inchikeyCell = cells[4];
+                const inchikeyFull = inchikeyCell.getAttribute("data-inchikey") ||
+                                     inchikeyCell.textContent.trim();
+
+                const adduct = cells[5].textContent.trim();
+                const collision = cells[6].textContent.trim();
+                const desc = cells[7].textContent.trim();
+
+                const values = [
+                    rank,
+                    similarity,
+                    formula,
+                    smiles,
+                    inchikeyFull,
+                    adduct,
+                    collision,
+                    desc
+                ];
+
+                csvRows.push(values.map(csvEscape).join(","));
+            });
+
+            const csvContent = csvRows.join("\n");
+            const blob = new Blob([csvContent], {
+                type: "text/csv;charset=utf-8;"
+            });
+            const url = URL.createObjectURL(blob);
+
+            const a = document.createElement("a");
+            const formulaInput = document.getElementById("formula");
+            const formulaVal = formulaInput ? formulaInput.value.trim() : "";
+            a.href = url;
+            a.download = formulaVal
+                ? `retrieved_candidates_${formulaVal}.csv`
+                : "retrieved_candidates.csv";
+
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+
+        function convertMgfToMspText(mgfText) {
+            const lines = mgfText.split(/\r?\n/);
+            const entries = [];
+            let current = null;
+
+            for (const rawLine of lines) {
+                const line = rawLine.trim();
+                if (line === "BEGIN IONS") {
+                    current = [];
+                }
+                if (current) {
+                    current.push(line);
+                }
+                if (line === "END IONS" && current) {
+                    entries.push(current);
+                    current = null;
+                }
+            }
+
+            const outLines = [];
+
+            for (const block of entries) {
+                const params = {};
+                const peaks = [];
+
+                for (const line of block) {
+                    if (!line) continue;
+                    if (line.startsWith("BEGIN") || line.startsWith("END")) continue;
+
+                    const eqIdx = line.indexOf("=");
+                    if (eqIdx !== -1) {
+                        const k = line.slice(0, eqIdx).trim().toUpperCase();
+                        const v = line.slice(eqIdx + 1).trim();
+                        params[k] = v;
+                    } else {
+                        const parts = line.split(/\s+/);
+                        if (parts.length >= 2) {
+                            peaks.push([parts[0], parts[1]]);
+                        }
+                    }
+                }
+
+                const nameVal = params["DESCRIPTION"] || "Unknown";
+                const precursorMz = params["PEPMASS"] || "";
+
+                outLines.push(`Name: ${nameVal}`);
+                outLines.push(`PrecursorMZ: ${precursorMz}`);
+                if (params["SMILES"]) {
+                    outLines.push(`SMILES: ${params["SMILES"]}`);
+                }
+                if (params["INCHI"]) {
+                    outLines.push(`INCHI: ${params["INCHI"]}`);
+                }
+                if (params["INCHIKEY"]) {
+                    outLines.push(`InChIKey: ${params["INCHIKEY"]}`);
+                }
+                if (params["FORMULA"]) {
+                    outLines.push(`Formula: ${params["FORMULA"]}`);
+                }
+                outLines.push(`Num Peaks: ${peaks.length}`);
+                for (const [mz, inten] of peaks) {
+                    outLines.push(`${mz}\t${inten}`);
+                }
+                outLines.push(""); // blank line between entries
+            }
+
+            return outLines.join("\n") + "\n";
+        }
+
+        function downloadMgfOnly(downloadBaseUrl) {
+            const formulaInput = document.getElementById("download-formula");
+            const formula = formulaInput.value.trim();
+            if (!formula) {
+                alert("Please enter a chemical formula.");
+                return;
+            }
+            const url = downloadBaseUrl + "?formula=" + encodeURIComponent(formula);
+            // Let the browser handle the download normally
+            window.location.href = url;
+        }
+
+        function downloadMgfAndMsp(downloadBaseUrl) {
+            const formulaInput = document.getElementById("download-formula");
+            const formula = formulaInput.value.trim();
+            if (!formula) {
+                alert("Please enter a chemical formula.");
+                return;
+            }
+
+            const url = downloadBaseUrl + "?formula=" + encodeURIComponent(formula);
+
+            fetch(url)
+                .then(resp => {
+                    if (!resp.ok) {
+                        throw new Error("Failed to download MGF (" + resp.status + ")");
+                    }
+                    return resp.text();
+                })
+                .then(mgfText => {
+                    // 1) Trigger MGF download
+                    const mgfBlob = new Blob([mgfText], { type: "text/plain" });
+                    const mgfUrl = URL.createObjectURL(mgfBlob);
+                    const a1 = document.createElement("a");
+                    a1.href = mgfUrl;
+                    a1.download = formula + ".mgf";
+                    document.body.appendChild(a1);
+                    a1.click();
+                    document.body.removeChild(a1);
+                    URL.revokeObjectURL(mgfUrl);
+
+                    // 2) Convert to MSP locally and trigger MSP download
+                    const mspText = convertMgfToMspText(mgfText);
+                    const mspBlob = new Blob([mspText], { type: "text/plain" });
+                    const mspUrl = URL.createObjectURL(mspBlob);
+                    const a2 = document.createElement("a");
+                    a2.href = mspUrl;
+                    a2.download = formula + ".msp";
+                    document.body.appendChild(a2);
+                    a2.click();
+                    document.body.removeChild(a2);
+                    URL.revokeObjectURL(mspUrl);
+                })
+                .catch(err => {
+                    console.error(err);
+                    alert("Failed to download and convert MGF: " + err.message);
+                });
+        }
+
+        function populateSpectraFromUpload(spectra) {
+            const container = document.getElementById("spectra-container");
+
+            // Clear any existing blocks (including the initial template block)
+            container.innerHTML = "";
+
+            spectra.forEach((spec, idx) => {
+                const block = document.createElement("div");
+                block.className = "spectrum-block";
+
+                const ev = Number(spec.collision_energy);
+                const nce = Number(spec.nce_cont);
+                let nceGuess = spec.nce_guess != null ? Number(spec.nce_guess) : 30;
+
+                // Clamp nceGuess just in case
+                const possibleNCEs = [10, 20, 30, 40, 50];
+                if (!possibleNCEs.includes(nceGuess)) {
+                    // fallback: nearest bucket
+                    let best = 30;
+                    let bestDiff = Infinity;
+                    for (const nce of possibleNCEs) {
+                        const diff = Math.abs(nceGuess - nce);
+                        if (diff < bestDiff) {
+                            bestDiff = diff;
+                            best = nce;
+                        }
+                    }
+                    nceGuess = best;
+                }
+
+                const evLine =
+                    !Number.isNaN(ev) && Number.isFinite(ev)
+                        ? `<div style="font-size:0.75rem; color:#6b7280; margin-top:0.25rem;">
+                               Detected CE ≈ ${ev.toFixed(0)} eV | NCE ≈ ${nce.toFixed(0)} % (from .ms)
+                           </div>`
+                        : "";
+
+                block.innerHTML = `
+                    <div class="spectrum-header">
+                        <span>Spectrum ${idx + 1} (from .ms)</span>
+                        <button type="button" class="btn btn-secondary" onclick="removeSpectrumBlock(this)">Remove</button>
+                    </div>
+
+                    <div class="row">
+                        <div>
+                            <label>Acquisition mode</label>
+                            <select name="spectrum_mode"
+                                    class="acq-mode-select"
+                                    onchange="onAcquisitionModeChange(this)">
+                                <option value="single" selected>Single NCE</option>
+                                <option value="stepped">Stepped NCE</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="single-nce-row">
+                        <div class="row">
+                            <div>
+                                <label>Collision energy (NCE, %)</label>
+                                <select name="spectrum_nce">
+                                    <option value="10" ${nceGuess === 10 ? "selected" : ""}>10</option>
+                                    <option value="20" ${nceGuess === 20 ? "selected" : ""}>20</option>
+                                    <option value="30" ${nceGuess === 30 ? "selected" : ""}>30</option>
+                                    <option value="40" ${nceGuess === 40 ? "selected" : ""}>40</option>
+                                    <option value="50" ${nceGuess === 50 ? "selected" : ""}>50</option>
+                                </select>
+
+                                <!-- Persist the exact values so POST can reuse them -->
+                                <input type="hidden" name="spectrum_ev"
+                                       value="${!Number.isNaN(ev) && Number.isFinite(ev) ? ev : ""}">
+                                <input type="hidden" name="spectrum_nce_cont"
+                                       value="${!Number.isNaN(nce) && Number.isFinite(nce) ? nce : ""}">
+
+                                ${evLine}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="stepped-nce-row" style="display:none; margin-top:0.5rem;">
+                        <label>Stepped collision energies (NCE, %)</label>
+                        <div class="stepped-nce-options" style="font-size:0.8rem; color:#4b5563; display:flex; gap:0.5rem; flex-wrap:wrap;">
+                            <label><input type="checkbox" class="stepped-nce-checkbox" value="10"> 10</label>
+                            <label><input type="checkbox" class="stepped-nce-checkbox" value="20"> 20</label>
+                            <label><input type="checkbox" class="stepped-nce-checkbox" value="30"> 30</label>
+                            <label><input type="checkbox" class="stepped-nce-checkbox" value="40"> 40</label>
+                            <label><input type="checkbox" class="stepped-nce-checkbox" value="50"> 50</label>
+                        </div>
+                        <input type="hidden" name="spectrum_stepped_nces" value="">
+                        <div style="font-size:0.75rem; color:#6b7280; margin-top:0.25rem;">
+                            Select one or more stepped NCEs, e.g. 20/30/50.
+                        </div>
+                    </div>
+
+                    <label style="margin-top:0.5rem;">Spectrum (m/z intensity per line)</label>
+                    <textarea name="spectrum_text"></textarea>
+                `;
+
+                const textarea = block.querySelector('textarea[name="spectrum_text"]');
+                textarea.value = spec.spectrum_text || "";
+
+                container.appendChild(block);
+            });
+        }
+
+        function onAcquisitionModeChange(selectEl) {
+            const block = selectEl.closest(".spectrum-block");
+            if (!block) return;
+
+            const mode = selectEl.value;
+            const singleRow = block.querySelector(".single-nce-row");
+            const steppedRow = block.querySelector(".stepped-nce-row");
+
+            if (mode === "stepped") {
+                if (singleRow) singleRow.style.display = "none";
+                if (steppedRow) steppedRow.style.display = "";
+            } else {
+                if (singleRow) singleRow.style.display = "";
+                if (steppedRow) steppedRow.style.display = "none";
+            }
+        }
+
+        const EV_TOL = 1.0;  // match your Python EV_TOLERANCE
+
+        function parseCeListFromAttr(ceAttr) {
+            // ceAttr is something like "6" or "6, 18, 40"
+            if (!ceAttr) return [];
+
+            return ceAttr
+                .split(/[,;]+/)          // split on commas and/or semicolons
+                .map(s => parseFloat(s.trim()))
+                .filter(v => Number.isFinite(v));
+        }
+
+        function getRetrievalData() {
+            if (typeof window === "undefined") return null;
+            if (!window.RETRIEVAL_DATA) return null;
+            return window.RETRIEVAL_DATA;
+        }
+
+        function findHitFromRetrievalData(formula, adduct, smiles) {
+            const rd = getRetrievalData();
+            if (!rd || !Array.isArray(rd.hits)) return null;
+
+            // Simple match: SMILES + (optional) formula/adduct
+            return rd.hits.find(h =>
+                h &&
+                h.smiles === smiles &&
+                (!h.formula || !formula || h.formula === formula) &&
+                (!h.adduct || !adduct || h.adduct === adduct)
+            ) || null;
+        }
+
+        function mergePeaks(listOfPeaks, isPred=false) {
+            const all = [];
+            for (const peaks of listOfPeaks || []) {
+                if (!Array.isArray(peaks)) continue;
+                for (const p of peaks) {
+                    const mz = Number(p.mz);
+                    const inten = Number(p.inten);
+                    if (!Number.isFinite(mz) || !Number.isFinite(inten) || inten <= 0) continue;
+                    all.push({
+                        mz,
+                        inten,
+                        frag_id: p.frag_id !== undefined ? p.frag_id : null,
+                    });
+                }
+            }
+
+            if (!all.length) return [];
+
+            all.sort((a, b) => a.mz - b.mz);
+
+            const merged = [];
+            const PPM = 20;
+
+            let current = { ...all[0] };
+
+            for (let i = 1; i < all.length; i++) {
+                const p = all[i];
+                const ppm = Math.abs(p.mz - current.mz) / current.mz * 1e6;
+
+                if (ppm <= PPM) {
+                    // ----------- UPDATED MERGING LOGIC -----------
+                    if (isPred) {
+                        // Predicted spectrum => SUM intensities
+                        const total = current.inten + p.inten;
+
+                        // Weighted centroid for m/z
+                        const w1 = current.inten / total;
+                        const w2 = p.inten / total;
+                        current.mz = current.mz * w1 + p.mz * w2;
+                        current.inten = total;
+
+                    } else {
+                        // Experimental spectrum => MAX intensity
+                        // Keep the m/z of whichever had the larger intensity
+                        if (p.inten > current.inten) {
+                            current.mz = p.mz;
+                        }
+                        current.inten = Math.max(current.inten, p.inten);
+                    }
+
+                    // Propagate fragment id if missing
+                    if (current.frag_id == null && p.frag_id != null) {
+                        current.frag_id = p.frag_id;
+                    }
+
+                } else {
+                    merged.push(current);
+                    current = { ...p };
+                }
+            }
+
+            merged.push(current);
+            return merged;
+        }
+
+        function makeCeLabelSingle(ev, nceVal) {
+            let label = `CE ${ev.toFixed(0)} eV`;
+            if (Number.isFinite(nceVal)) {
+                label += ` | NCE ≈ ${nceVal.toFixed(0)}%`;
+            }
+            return label;
+        }
+
+        function makeCeLabelMerged(evList, nceVals) {
+            const evStr = evList.map(v => v.toFixed(0)).join("/");
+            let label = `Merged ${evStr} eV`;
+            const finiteNces = (nceVals || []).filter(v => Number.isFinite(v));
+            if (finiteNces.length) {
+                const nceStr = finiteNces.map(v => `${v.toFixed(0)}%`).join("/");
+                label += ` | NCE ≈ ${nceStr}`;
+            }
+            return label;
+        }
+
+        function buildCeEntriesFromRetrieval(formula, adduct, smiles, ceList) {
+            const rd = getRetrievalData();
+            if (!rd || !Array.isArray(rd.hits)) {
+                return [];
+            }
+
+            // Locate the hit corresponding to the selected row
+            const hit = rd.hits.find(
+                (h) =>
+                    h.formula === formula &&
+                    h.adduct === adduct &&
+                    h.smiles === smiles
+            );
+            if (!hit) {
+                return [];
+            }
+
+            const expAll = Array.isArray(rd.exp_spectra) ? rd.exp_spectra : [];
+            const predAll = Array.isArray(hit.pred_spectra) ? hit.pred_spectra : [];
+            const steppedMode = !!rd.stepped_mode;
+
+            // Helper: find the closest spectrum to a given CE (within EV_TOL)
+            function findClosestSpecByEv(list, ev) {
+                let best = null;
+                let bestDiff = Infinity;
+                for (const spec of list || []) {
+                    const ce = Number(
+                        spec.collision_energy_ev !== undefined
+                            ? spec.collision_energy_ev
+                            : spec.collision_energy
+                    );
+                    if (!Number.isFinite(ce)) continue;
+                    const diff = Math.abs(ce - ev);
+                    if (diff <= EV_TOL && diff < bestDiff) {
+                        bestDiff = diff;
+                        best = spec;
+                    }
+                }
+                return best;
+            }
+
+            // Normalize CE list: unique, numeric, sorted
+            const uniqueCes = Array.from(
+                new Set((ceList || []).map(v => Number(v)).filter(v => Number.isFinite(v)))
+            ).sort((a, b) => a - b);
+
+            // Defensive: if nothing parsed, bail out
+            if (!uniqueCes.length) {
+                return [];
+            }
+
+            // --- Stepped mode: one experimental spectrum, library merged across CEs ---
+            if (steppedMode) {
+                if (!expAll.length) return [];
+
+                const expObj = expAll[0];  // single stepped spectrum
+                const predPeaksToMerge = [];
+                const usedCes = [];
+
+                for (const ceEv of uniqueCes) {
+                    const p = findClosestSpecByEv(predAll, ceEv);
+                    if (!p || !Array.isArray(p.peaks) || !p.peaks.length) continue;
+                    predPeaksToMerge.push(p.peaks);
+                    const ce = Number(
+                        p.collision_energy_ev !== undefined
+                            ? p.collision_energy_ev
+                            : p.collision_energy
+                    );
+                    if (Number.isFinite(ce)) {
+                        usedCes.push(ce);
+                    }
+                }
+
+                if (!predPeaksToMerge.length || !Array.isArray(expObj.peaks) || !expObj.peaks.length) {
+                    return [];
+                }
+
+                const predMerged = mergePeaks(predPeaksToMerge, true);
+                const ceEvList = Array.from(new Set(usedCes)).sort((a, b) => a - b);
+                const nceVals = [Number(expObj.nce)].filter(v => Number.isFinite(v));
+
+                return [
+                    {
+                        ceEvList: ceEvList,
+                        ceLabel: makeCeLabelMerged(ceEvList, nceVals),
+                        exp: {
+                            collision_energy_ev: Number(
+                                expObj.collision_energy_ev !== undefined
+                                    ? expObj.collision_energy_ev
+                                    : expObj.collision_energy
+                            ),
+                            nce: Number.isFinite(Number(expObj.nce)) ? Number(expObj.nce) : null,
+                            peaks: Array.isArray(expObj.peaks) ? expObj.peaks : [],
+                        },
+                        pred: {
+                            collision_energy_ev: ceEvList.length ? ceEvList[0] : null,
+                            peaks: predMerged,
+                        },
+                    },
+                ];
+            }
+
+            // --- Non-stepped mode: one experimental spectrum per CE bucket ---
+
+            const entries = [];
+
+            // 1) Per-CE entries
+            for (const ceEv of uniqueCes) {
+                const expObj = findClosestSpecByEv(expAll, ceEv);
+                const predObj = findClosestSpecByEv(predAll, ceEv);
+
+                if (
+                    !expObj ||
+                    !Array.isArray(expObj.peaks) ||
+                    !expObj.peaks.length ||
+                    !predObj ||
+                    !Array.isArray(predObj.peaks) ||
+                    !predObj.peaks.length
+                ) {
+                    continue;
+                }
+
+                const expCe = Number(
+                    expObj.collision_energy_ev !== undefined
+                        ? expObj.collision_energy_ev
+                        : expObj.collision_energy
+                );
+                const predCe = Number(
+                    predObj.collision_energy_ev !== undefined
+                        ? predObj.collision_energy_ev
+                        : predObj.collision_energy
+                );
+                const nceVal = Number(expObj.nce);
+
+                entries.push({
+                    ceEvList: [ceEv],
+                    ceLabel: makeCeLabelSingle(ceEv, nceVal),
+                    exp: {
+                        collision_energy_ev: Number.isFinite(expCe) ? expCe : ceEv,
+                        nce: Number.isFinite(nceVal) ? nceVal : null,
+                        peaks: expObj.peaks,
+                    },
+                    pred: {
+                        collision_energy_ev: Number.isFinite(predCe) ? predCe : ceEv,
+                        peaks: predObj.peaks,
+                    },
+                });
+            }
+
+            if (!entries.length) {
+                return [];
+            }
+
+            // 2) Optional multi-CE merged entry if >1 CE
+            if (uniqueCes.length > 1) {
+                const expPeaksToMerge = entries.map(e => e.exp.peaks);
+                const predPeaksToMerge = entries.map(e => e.pred.peaks);
+                const expMerged = mergePeaks(expPeaksToMerge, true);
+                const predMerged = mergePeaks(predPeaksToMerge, true);
+
+                if (expMerged.length && predMerged.length) {
+                    const nceVals = entries
+                        .map(e => Number(e.exp.nce))
+                        .filter(v => Number.isFinite(v));
+                    const ceEvList = [...uniqueCes];
+
+                    entries.unshift({
+                        ceEvList: ceEvList,
+                        ceLabel: makeCeLabelMerged(ceEvList, nceVals),
+                        exp: {
+                            collision_energy_ev: ceEvList[0],
+                            nce:
+                                nceVals.length
+                                    ? nceVals.reduce((a, b) => a + b, 0) / nceVals.length
+                                    : null,
+                            peaks: expMerged,
+                        },
+                        pred: {
+                            collision_energy_ev: ceEvList[0],
+                            peaks: predMerged,
+                        },
+                    });
+                }
+            }
+
+            return entries;
+        }
+
+        async function viewMirrorPlot(btn) {
+            const formulaEl = document.getElementById("formula");
+            const adductEl = document.getElementById("adduct");
+
+            const formula = formulaEl ? formulaEl.value.trim() : "";
+            const adduct = adductEl ? adductEl.value.trim() : "[M+H]+";
+            const smiles = btn.getAttribute("data-smiles") || "";
+            const ceAttr = btn.getAttribute("data-ce") || "";   // e.g. "11, 17"
+            const ceList = parseCeListFromAttr(ceAttr);         // e.g. [11, 17]
+
+            if (!formula || !smiles) {
+                alert("Missing formula or SMILES.");
+                return;
+            }
+            if (!ceList.length) {
+                alert("No valid collision energy found for this candidate.");
+                return;
+            }
+
+            const rd = getRetrievalData();
+            if (!rd) {
+                alert("No retrieval data cached. Please run a retrieval first.");
+                return;
+            }
+
+            const ceEntries = buildCeEntriesFromRetrieval(formula, adduct, smiles, ceList);
+            if (!ceEntries.length) {
+                alert(
+                    "No suitable experimental/predicted spectra found for this candidate " +
+                    "at the selected collision energy."
+                );
+                return;
+            }
+
+            console.log("viewMirrorPlot ceEntries (from retrieval):", ceEntries);
+            openMirrorPlotWindow({ formula, adduct, smiles, ceEntries });
+        }
+
+        function openMirrorPlotWindow(config) {
+            const { formula, adduct, smiles, ceEntries } = config;
+
+            const win = window.open("", "_blank");
+            if (!win) {
+                alert("Popup blocked. Please allow popups for this site.");
+                return;
+            }
+
+            const doc = win.document;
+
+            // Basic HTML scaffold
+            doc.open();
+            doc.write("<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Mirror plot</title></head><body></body></html>");
+            doc.close();
+
+            const head = doc.head || doc.getElementsByTagName("head")[0];
+            const body = doc.body || doc.getElementsByTagName("body")[0];
+
+            // Styles for popup and overlays
+            const style = doc.createElement("style");
+            style.textContent = [
+                "body {",
+                "  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;",
+                "  margin: 0;",
+                "  padding: 1.5rem;",
+                "  background: #f5f5f7;",
+                "  color: #111827;",
+                "}",
+                ".card {",
+                "  background: #ffffff;",
+                "  border-radius: 0.75rem;",
+                "  padding: 1.25rem 1.5rem;",
+                "  max-width: 980px;",
+                "  margin: 0 auto;",
+                "  box-shadow: 0 8px 20px rgba(15,23,42,0.06);",
+                "}",
+                "h1 { margin-top: 0; }",
+                ".subtitle {",
+                "  font-size: 0.85rem;",
+                "  color: #6b7280;",
+                "  margin-bottom: 1rem;",
+                "}",
+                "label {",
+                "  display: block;",
+                "  font-size: 0.85rem;",
+                "  font-weight: 500;",
+                "  margin-bottom: 0.25rem;",
+                "  color: #374151;",
+                "}",
+                "select {",
+                "  width: 100%;",
+                "  padding: 0.45rem 0.7rem;",
+                "  border-radius: 0.5rem;",
+                "  border: 1px solid #d1d5db;",
+                "  font-size: 0.9rem;",
+                "  box-sizing: border-box;",
+                "}",
+                "button {",
+                "  margin-top: 0.75rem;",
+                "  padding: 0.5rem 1.1rem;",
+                "  border-radius: 999px;",
+                "  border: none;",
+                "  background: #2563eb;",
+                "  color: #ffffff;",
+                "  font-size: 0.9rem;",
+                "  cursor: pointer;",
+                "}",
+                "button:disabled {",
+                "  opacity: 0.6;",
+                "  cursor: default;",
+                "}",
+                "#status {",
+                "  font-size: 0.8rem;",
+                "  color: #6b7280;",
+                "  margin-top: 0.5rem;",
+                "  min-height: 1em;",
+                "}",
+                "#plot-area {",
+                "  margin-top: 1.25rem;",
+                "  position: relative;",
+                "}",
+                "#plot-area svg {",
+                "  max-width: 100%;",
+                "  border-radius: 0.5rem;",
+                "  box-shadow: 0 8px 20px rgba(15,23,42,0.08);",
+                "  display: block;",
+                "}",
+                "#legend {",
+                "  margin-top: 0.35rem;",
+                "  font-size: 0.8rem;",
+                "  color: #4b5563;",
+                "}",
+                ".fragment-overlay-container {",
+                "  position: absolute;",
+                "  left: 0;",
+                "  top: 0;",
+                "  width: 100%;",
+                "  height: 100%;",
+                "  pointer-events: none;",
+                "}",
+                ".fragment-overlay {",
+                "  position: absolute;",
+                "  width: 80px;",
+                "  background: transparent;",
+                "  border-radius: 0.6rem;",
+                "  box-shadow: none;",
+                "  border: 1px solid transparent;",
+                "  padding: 0;",
+                "  pointer-events: auto;",
+                "  transition: transform 0.15s ease, box-shadow 0.15s ease,",
+                "              border-color 0.15s ease, background-color 0.15s ease;",
+                "}",
+                ".fragment-overlay:hover {",
+                "  border-color: #d1d5db;",
+                "}",
+                ".fragment-overlay.active {",
+                "  transform: scale(1.22);",
+                "  border-color: #2563eb;",
+                "  background: rgba(255, 255, 255, 0.8);",
+                "  z-index: 3;",
+                "}",
+                ".fragment-overlay-label {",
+                "  font-size: 0.75rem;",
+                "  font-weight: 600;",
+                "  text-align: center;",
+                "  margin-bottom: 0.2rem;",
+                "  color: #111827;",
+                "}",
+                ".fragment-overlay svg {",
+                "  width: 100%;",
+                "  height: auto;",
+                "  display: block;",
+                "  box-shadow: none !important;",
+                "  filter: none !important;",
+                "}",
+                ".fragment-detail-panel {",
+                "  margin-top: 1rem;",
+                "  padding: 0.75rem 1rem;",
+                "  border-radius: 0.75rem;",
+                "  border: 1px solid #e5e7eb;",
+                "  background: #f9fafb;",
+                "}",
+                ".fragment-detail-title {",
+                "  font-size: 0.8rem;",
+                "  font-weight: 600;",
+                "  color: #4b5563;",
+                "  text-transform: uppercase;",
+                "  letter-spacing: 0.06em;",
+                "  margin-bottom: 0.5rem;",
+                "}",
+                "#fragment-detail-body {",
+                "  display: flex;",
+                "  align-items: flex-start;",
+                "  gap: 1rem;",
+                "}",
+                "#fragment-detail-body svg {",
+                "  width: 260px;",
+                "  height: auto;",
+                "  display: block;",
+                "}",
+                ".fragment-detail-meta {",
+                "  font-size: 0.8rem;",
+                "  color: #4b5563;",
+                "  display: flex;",
+                "  flex-direction: column;",
+                "  gap: 0.15rem;",
+                "}",
+                ".control-row {",
+                "  margin-top: 0.75rem;",
+                "  display: flex;",
+                "  align-items: center;",
+                "  gap: 0.5rem;",
+                "  font-size: 0.8rem;",
+                "}",
+                "#topk-frags {",
+                "  flex: 1;",
+                "}",
+                "#topk-frags-value {",
+                "  min-width: 2rem;",
+                "  text-align: right;",
+                "  font-weight: 600;",
+                "}",
+            ].join("\n");
+            head.appendChild(style);
+
+            const card = doc.createElement("div");
+            card.className = "card";
+            body.appendChild(card);
+
+            const titleEl = doc.createElement("h1");
+            titleEl.textContent = "Mirror plot preview";
+            card.appendChild(titleEl);
+
+            const subtitle = doc.createElement("div");
+            subtitle.className = "subtitle";
+            subtitle.innerHTML =
+                "Formula: <strong>" + (formula || "") + "</strong> &nbsp;·&nbsp; " +
+                "Adduct: <strong>" + (adduct || "") + "</strong><br>" +
+                "SMILES: <span style=\"font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Courier New', monospace;\">" +
+                (smiles || "") + "</span>";
+            card.appendChild(subtitle);
+
+            const ceLabelEl = doc.createElement("label");
+            ceLabelEl.setAttribute("for", "ce-select");
+            ceLabelEl.textContent = "Collision energy / merged mode";
+            card.appendChild(ceLabelEl);
+
+            const ceSelect = doc.createElement("select");
+            ceSelect.id = "ce-select";
+            card.appendChild(ceSelect);
+
+            const topKRow = doc.createElement("div");
+            topKRow.className = "control-row";
+
+            const topKLabel = doc.createElement("label");
+            topKLabel.htmlFor = "topk-frags";
+            topKLabel.textContent = "Number of top predicted fragments to visualize:";
+            topKLabel.style.marginRight = "0.5rem";
+
+            const DEFAULT_TOPK = 5;            // default when window opens
+            const topKInput = doc.createElement("input");
+            topKInput.type = "range";
+            topKInput.id = "topk-frags";
+            topKInput.min = "0";
+            topKInput.max = "20"; // safe static upper bound; actual shown = min(k, available)
+            topKInput.value = String(DEFAULT_TOPK);
+
+            const topKValue = doc.createElement("span");
+            topKValue.id = "topk-frags-value";
+            topKValue.textContent = String(DEFAULT_TOPK);
+
+            topKRow.appendChild(topKLabel);
+            topKRow.appendChild(topKInput);
+            topKRow.appendChild(topKValue);
+            card.appendChild(topKRow);
+
+            topKInput.addEventListener("input", () => {
+                const v = parseInt(topKInput.value, 10);
+                currentTopK = Number.isFinite(v) && v >= 0 ? v : 0;
+                topKValue.textContent = String(currentTopK);
+
+                // If a plot is already drawn, rebuild only the overlays for current entry
+                if (currentEntry && currentOverlayContainer) {
+                    // Fire-and-forget; buildFragmentOverlays is async
+                    buildFragmentOverlays(currentEntry, currentOverlayContainer);
+                }
+            });
+
+            const statusEl = doc.createElement("div");
+            statusEl.id = "status";
+            card.appendChild(statusEl);
+
+            const plotArea = doc.createElement("div");
+            plotArea.id = "plot-area";
+            card.appendChild(plotArea);
+
+            const legendEl = doc.createElement("div");
+            legendEl.id = "legend";
+            legendEl.textContent = "Predicted spectrum (top) · Experimental spectrum (bottom). Hover/click a predicted peak to focus its fragment overlay.";
+            card.appendChild(legendEl);
+
+            const fragDetailPanel = doc.createElement("div");
+            fragDetailPanel.id = "fragment-detail-panel";
+            fragDetailPanel.className = "fragment-detail-panel";
+            card.appendChild(fragDetailPanel);
+
+            const fragDetailTitle = doc.createElement("div");
+            fragDetailTitle.id = "fragment-detail-title";
+            fragDetailTitle.className = "fragment-detail-title";
+            fragDetailTitle.textContent = "Fragment detail";
+            fragDetailPanel.appendChild(fragDetailTitle);
+
+            const fragDetailBody = doc.createElement("div");
+            fragDetailBody.id = "fragment-detail-body";
+            fragDetailBody.textContent = "Click a fragment annotation (or annotated peak) to view it here.";
+            fragDetailPanel.appendChild(fragDetailBody);
+
+            // ---------------- CE select population ----------------
+            function populateCeSelect() {
+                ceSelect.innerHTML = "";
+                if (!Array.isArray(ceEntries) || !ceEntries.length) return;
+
+                let mergedIndex = -1;
+
+                ceEntries.forEach((entry, idx) => {
+                    const ceList = Array.isArray(entry.ceEvList) ? entry.ceEvList : [];
+                    const opt = doc.createElement("option");
+
+                    opt.value = ceList.map(v => v.toFixed(0)).join(",");
+
+                    let label = entry.ceLabel;
+                    if (!label) {
+                        if (ceList.length === 1) {
+                            label = `${ceList[0].toFixed(0)} eV`;
+                        } else if (ceList.length > 1) {
+                            label = `Merged (${ceList.map(v => v.toFixed(0)).join(" / ")} eV)`;
+                        } else {
+                            label = "Unknown CE";
+                        }
+                    }
+                    opt.textContent = label;
+
+                    if (mergedIndex === -1 && ceList.length > 1) {
+                        mergedIndex = idx;
+                    }
+
+                    ceSelect.appendChild(opt);
+                });
+
+                if (ceEntries.length > 0) {
+                    const defaultIndex = mergedIndex !== -1 ? mergedIndex : 0;
+                    ceSelect.selectedIndex = defaultIndex;
+                }
+            }
+
+            populateCeSelect();
+
+            // ---------------- Fragment helpers & mirror plot ----------------
+
+            const MAX_TOPK_CACHE = 50;         // we won't ever need more than this ranked list
+            let currentTopK = DEFAULT_TOPK;    // current user selection
+            const fragCache = new Map();       // frag_id -> SVG
+
+            // Track the currently displayed entry + overlay container so the slider
+            // can re-build overlays without re-drawing the whole SVG
+            let currentEntry = null;
+            let currentOverlayContainer = null;
+
+            function normalizeAndFilter(peaks, keepFragId) {
+                const arr = peaks
+                    .map(p => {
+                        const mz = Number(p.mz ?? p[0]);
+                        const inten = Number(p.inten ?? p[1]);
+                        const fragId = keepFragId ? (("frag_id" in p) ? p.frag_id : null) : null;
+                        return [mz, inten, fragId];
+                    })
+                    .filter(p => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+
+                if (!arr.length) return [];
+
+                const maxI = Math.max(...arr.map(p => p[1]));
+                if (maxI <= 0) return [];
+
+                return arr
+                    .map(p => ({
+                        mz: p[0],
+                        inten: p[1] / maxI,
+                        frag_id: p[2],
+                    }))
+                    .filter(p => p.inten > 0.0001)
+                    .sort((a, b) => a.mz - b.mz);
+            }
+
+            function computeFragmentRanking(entry) {
+                // Cache a ranked list of unique fragments per entry
+                if (entry._sortedFragAnnots) return entry._sortedFragAnnots;
+
+                const peaks = (entry.pred && Array.isArray(entry.pred.peaks)) ? entry.pred.peaks : [];
+                const enriched = peaks
+                    .filter(p => p && p.frag_id != null && p.inten != null && p.inten > 0)
+                    .map(p => ({
+                        mz: Number(p.mz),
+                        inten: Number(p.inten),   // predicted intensity
+                        frag_id: p.frag_id,
+                    }));
+
+                // Sort by predicted intensity descending
+                enriched.sort((a, b) => b.inten - a.inten);
+
+                // De-duplicate by frag_id, keeping the highest-intensity representative
+                const uniqueByFrag = [];
+                const seenFrag = new Set();
+                for (const p of enriched) {
+                    const key = String(p.frag_id);
+                    if (seenFrag.has(key)) continue;
+                    seenFrag.add(key);
+                    uniqueByFrag.push(p);
+
+                    if (uniqueByFrag.length >= MAX_TOPK_CACHE) break;
+                }
+
+                entry._sortedFragAnnots = uniqueByFrag;
+                return uniqueByFrag;
+            }
+
+            function getAnnotsForCurrentTopK(entry) {
+                const ranked = computeFragmentRanking(entry);
+                if (!ranked.length) return [];
+
+                // If slider hasn't been moved yet, fall back to DEFAULT_TOPK.
+                const rawK = (currentTopK === undefined || currentTopK === null)
+                    ? DEFAULT_TOPK
+                    : currentTopK;
+
+                // Clamp between 0 and ranked.length; 0 means "no fragments"
+                const k = Math.max(
+                    0,
+                    Math.min(rawK, ranked.length)
+                );
+
+                if (k === 0) {
+                    return [];
+                }
+                return ranked.slice(0, k);
+            }
+
+            async function fetchFragmentSvgCached(fragId) {
+                const key = String(fragId);
+                if (fragCache.has(key)) {
+                    return fragCache.get(key);
+                }
+
+                const resp = await fetch("/fragment_svg", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        smiles: smiles,
+                        frag_id: parseInt(key, 10),
+                    }),
+                });
+
+                if (!resp.ok) {
+                    const errJson = await resp.json().catch(() => null);
+                    const msg = errJson && errJson.error ? errJson.error : `HTTP ${resp.status}`;
+                    throw new Error(msg);
+                }
+
+                const data = await resp.json();
+                if (!data.svg) {
+                    throw new Error("No SVG returned from fragment endpoint.");
+                }
+
+                let svg = String(data.svg);
+
+                // 1) Remove any rects (backgrounds) – self-closing or not
+                svg = svg.replace(/<rect[^>]*\/?>/gi, "");
+
+                // 2) Strip RDKit highlight “blob” shapes:
+                //    any paths/ellipses whose style fill is #FF7F7F
+                //    (this is the pill/shadow you’re seeing)
+                svg = svg.replace(
+                    /<path([^>]*?)style="([^"]*?)fill:\s*#ff7f7f([^"]*?)"([^>]*)>[\s\S]*?<\/path>/gi,
+                    ""
+                );
+                svg = svg.replace(
+                    /<ellipse([^>]*?)style="([^"]*?)fill:\s*#ff7f7f([^"]*?)"[^>]*\/>/gi,
+                    ""
+                );
+
+                // 3) Just in case any strokes are left in that color, neutralize them
+                svg = svg.replace(/stroke:\s*#ff7f7f/gi, "stroke:none");
+
+                fragCache.set(key, svg);
+                return svg;
+            }
+
+            function highlightOverlay(fragIdStr, active) {
+                const overlays = plotArea.querySelectorAll(".fragment-overlay[data-frag-id]");
+                overlays.forEach(ov => {
+                    if (ov.getAttribute("data-frag-id") === fragIdStr) {
+                        if (active) {
+                            ov.classList.add("active");
+                        } else {
+                            ov.classList.remove("active");
+                        }
+                    } else if (active) {
+                        ov.classList.remove("active");
+                    }
+                });
+            }
+
+            async function showFragmentDetail(fragIdStr, mzStr) {
+                if (!fragIdStr) return;
+
+                const panel = doc.getElementById("fragment-detail-panel");
+                const bodyEl = doc.getElementById("fragment-detail-body");
+                if (!panel || !bodyEl) return;
+
+                let svg;
+                try {
+                    svg = await fetchFragmentSvgCached(fragIdStr);
+                } catch (err) {
+                    console.error("Failed to fetch fragment SVG for detail view:", err);
+                    bodyEl.textContent = "Failed to load fragment view.";
+                    panel.style.display = "block";
+                    return;
+                }
+
+                // Main SVG block (larger; exact size controlled by CSS)
+                let inner = `<div class="fragment-detail-svg">${svg}</div>`;
+
+                // Optional metadata (m/z + fragment id + intensities)
+                if (mzStr) {
+                    const mzNum = Number(mzStr);
+                    const mzDisplay = Number.isFinite(mzNum) ? mzNum.toFixed(4) : String(mzStr);
+
+                    let predIntenStr = null;
+                    let expIntenStr = null;
+
+                    // Try to compute normalized predicted/experimental intensities
+                    if (Number.isFinite(mzNum) && currentEntry) {
+                        // 20 ppm window, same order of magnitude as mirror plot
+                        const PPM = 20;
+
+                        const expPeaksRaw = (currentEntry.exp && Array.isArray(currentEntry.exp.peaks))
+                            ? currentEntry.exp.peaks
+                            : [];
+                        const predPeaksRaw = (currentEntry.pred && Array.isArray(currentEntry.pred.peaks))
+                            ? currentEntry.pred.peaks
+                            : [];
+
+                        const expPeaksNorm = normalizeAndFilter(expPeaksRaw, false);
+                        const predPeaksNorm = normalizeAndFilter(predPeaksRaw, true);
+
+                        function findClosestPeak(peaks, useFragFilter) {
+                            if (!Array.isArray(peaks) || !peaks.length) return null;
+
+                            let candidates = peaks;
+                            if (useFragFilter && fragIdStr) {
+                                const fragIdInt = parseInt(fragIdStr, 10);
+                                if (Number.isFinite(fragIdInt)) {
+                                    const filtered = peaks.filter(p => p.frag_id === fragIdInt);
+                                    if (filtered.length) {
+                                        candidates = filtered;
+                                    }
+                                }
+                            }
+
+                            let best = null;
+                            let bestRel = null;
+                            for (const p of candidates) {
+                                const mz2 = p.mz;
+                                if (!Number.isFinite(mz2) || mz2 === 0) continue;
+                                const rel = Math.abs(mz2 - mzNum) / mz2;
+                                if (rel <= PPM * 1e-6) {
+                                    if (!best || rel < bestRel) {
+                                        best = p;
+                                        bestRel = rel;
+                                    }
+                                }
+                            }
+                            return best;
+                        }
+
+                        const predPeak = findClosestPeak(predPeaksNorm, true);
+                        const expPeak = findClosestPeak(expPeaksNorm, false);
+
+                        if (predPeak && Number.isFinite(predPeak.inten)) {
+                            predIntenStr = predPeak.inten.toFixed(3);  // normalized 0–1
+                        }
+                        if (expPeak && Number.isFinite(expPeak.inten)) {
+                            expIntenStr = expPeak.inten.toFixed(3);    // normalized 0–1
+                        }
+                    }
+
+                    // Build metadata block
+                    let metaHtml = `
+                        <div class="fragment-detail-meta">
+                            <div><strong>Fragment ID:</strong> ${fragIdStr}</div>
+                            <div><strong>m/z:</strong> ${mzDisplay}</div>
+                    `;
+
+                    // Only show intensity section if we found at least one of them
+                    if (predIntenStr !== null || expIntenStr !== null) {
+                        metaHtml += `<div><strong>Predicted vs experimental intensity (relative):</strong></div>`;
+                        metaHtml += `<div>Predicted: ${predIntenStr !== null ? predIntenStr : "–"}</div>`;
+                        metaHtml += `<div>Experimental: ${expIntenStr !== null ? expIntenStr : "–"}</div>`;
+                    }
+
+                    metaHtml += `</div>`;
+                    inner += metaHtml;
+                }
+
+                bodyEl.innerHTML = inner;
+                panel.style.display = "block";
+            }
+
+            function buildMirrorSvgForEntry(entry) {
+                const PPM = 20;
+
+                const expPeaksRaw = (entry.exp && Array.isArray(entry.exp.peaks)) ? entry.exp.peaks : [];
+                const predPeaksRaw = (entry.pred && Array.isArray(entry.pred.peaks)) ? entry.pred.peaks : [];
+
+                if (!expPeaksRaw.length && !predPeaksRaw.length) {
+                    return "<p>No peaks available for this selection.</p>";
+                }
+
+                const expPeaks = normalizeAndFilter(expPeaksRaw, false);
+                const predPeaks = normalizeAndFilter(predPeaksRaw, true);
+
+                if (!expPeaks.length && !predPeaks.length) {
+                    return "<p>No peaks above intensity threshold.</p>";
+                }
+
+                const allMz = [...expPeaks.map(p => p.mz), ...predPeaks.map(p => p.mz)];
+                const maxMz = Math.max(...allMz);
+                const mzMaxWithMargin = maxMz * 1.05;
+
+                const width = 800;
+                const height = 400;
+                const marginLeft = 60;
+                const marginRight = 20;
+                const marginTop = 20;
+                const marginBottom = 40;
+
+                const usableWidth = width - marginLeft - marginRight;
+                const usableHeight = height - marginTop - marginBottom;
+                const midY = height / 2;
+                const amp = usableHeight / 2 * 0.9;
+
+                function xForMz(mz) {
+                    return marginLeft + (mz / mzMaxWithMargin) * usableWidth;
+                }
+
+                function yForIntensity(intNorm, upperHalf) {
+                    if (upperHalf) {
+                        return midY - intNorm * amp;
+                    } else {
+                        return midY + intNorm * amp;
+                    }
+                }
+
+                function hasMatch(mz, otherPeaks) {
+                    for (const p of otherPeaks) {
+                        const mz2 = p.mz;
+                        if (mz2 === 0) continue;
+                        const rel = Math.abs(mz - mz2) / mz2;
+                        if (rel <= 1e-6 * PPM) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+
+                const matchedColor = "#7C9D97";
+                const spec1Color = "#58595B"; // predicted
+                const spec2Color = "#58595B"; // experimental
+
+                const defaultAnnots = Array.isArray(entry._sortedFragAnnots) ? entry._sortedFragAnnots : [];
+
+                // Use numeric m/z’s from the default annotated fragments
+                const annotatedMzs = defaultAnnots
+                    .map(a => Number(a.mz))
+                    .filter(v => Number.isFinite(v));
+
+                function isAnnotatedMz(mz) {
+                    if (!annotatedMzs.length) return false;
+                    // annotate experimental peaks that are close (in ppm) to any annotated fragment m/z
+                    for (const target of annotatedMzs) {
+                        if (target === 0) continue;
+                        const rel = Math.abs(mz - target) / target;
+                        if (rel <= 1e-6 * PPM) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+
+                let svg = "";
+                svg += `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`;
+
+                // Baseline
+                svg += `<line x1="${marginLeft}" y1="${midY}" x2="${width - marginRight}" y2="${midY}" stroke="#000" stroke-width="0.4" />`;
+
+                // X-axis label
+                svg += `<text x="${width / 2}" y="${height - 10}" text-anchor="middle" font-size="14">m/z</text>`;
+
+                // Y-axis labels
+                svg += `<text x="${marginLeft - 15}" y="${midY - amp}" text-anchor="end" font-size="14">1</text>`;
+                svg += `<text x="${marginLeft - 15}" y="${midY + 3}" text-anchor="end" font-size="14">0</text>`;
+                svg += `<text x="${marginLeft - 15}" y="${midY + amp}" text-anchor="end" font-size="14">1</text>`;
+
+                const spec1Name = "Predicted";
+                const spec2Name = "Experimental";
+
+                svg += `<text x="${marginLeft - 35}" y="${midY - amp * 0.6}" text-anchor="middle" font-size="14" transform="rotate(-90 ${marginLeft - 35},${midY - amp * 0.6})">${spec1Name}</text>`;
+                svg += `<text x="${marginLeft - 35}" y="${midY + amp * 0.6}" text-anchor="middle" font-size="14" transform="rotate(-90 ${marginLeft - 35},${midY + amp * 0.6})">${spec2Name}</text>`;
+
+                if (entry.ceLabel) {
+                    svg += `<text x="${marginLeft}" y="${marginTop + 10}" font-size="14" fill="#4b5563">${entry.ceLabel}</text>`;
+                }
+
+                // Predicted (upper) with m/z labels for annotated peaks
+                for (const p of predPeaks) {
+                    const mz = p.mz;
+                    const inten = p.inten;
+                    const x = xForMz(mz);
+                    const y1 = midY;
+                    const y2 = yForIntensity(inten, true);
+                    const matched = hasMatch(mz, expPeaks);
+                    const color = matched ? matchedColor : spec1Color;
+                    const title = `Predicted · m/z=${mz.toFixed(4)}, rel.int=${inten.toFixed(2)}${matched ? " (matched)" : ""}`;
+                    const fragId = p.frag_id;
+                    const fragAttr = (fragId !== null && fragId !== undefined)
+                        ? ` data-frag-id="${fragId}"`
+                        : "";
+                    const mzStr = mz.toFixed(4);
+
+                    svg += `<line x1="${x}" y1="${y1}" x2="${x}" y2="${y2}" stroke="${color}" stroke-width="1"${fragAttr} data-mz="${mzStr}" data-inten="${inten.toFixed(2)}">` +
+                           `<title>${title}</title>` +
+                           `</line>`;
+                }
+
+
+                // Experimental (lower)
+                for (const p of expPeaks) {
+                    const mz = p.mz;
+                    const inten = p.inten;
+                    const x = xForMz(mz);
+                    const y1 = midY;
+                    const y2 = yForIntensity(inten, false);
+                    const matched = hasMatch(mz, predPeaks);
+                    const color = matched ? matchedColor : spec2Color;
+                    const title = `Experimental · m/z=${mz.toFixed(4)}, rel.int=${inten.toFixed(2)}${matched ? " (matched)" : ""}`;
+                    const mzStr = mz.toFixed(4);
+
+                    svg += `<line x1="${x}" y1="${y1}" x2="${x}" y2="${y2}" stroke="${color}" stroke-width="1" data-mz="${mzStr}" data-inten="${inten.toFixed(2)}">` +
+                           `<title>${title}</title>` +
+                           `</line>`;
+
+                    // Add m/z annotation for experimental peaks intensity > 0.18
+                    if (inten > 0.18) {
+                        const labelY = y2 + 10; // a bit below the tip of the lower peak
+                        svg += `<text x="${x}" y="${labelY}" font-size="11" text-anchor="middle" fill="#111827">${mzStr}</text>`;
+                    }
+                }
+
+                svg += "</svg>";
+                return svg;
+            }
+
+            function positionOverlayForPeak(overlay, mz, fragIdStr) {
+                const svgEl = plotArea.querySelector("svg");
+                if (!svgEl) return;
+
+                const plotRect = plotArea.getBoundingClientRect();
+                const lines = svgEl.querySelectorAll(`line[data-frag-id="${fragIdStr}"]`);
+                if (!lines.length) return;
+
+                let targetLine = lines[0];
+                let bestDelta = Infinity;
+                const targetMz = Number(mz) || 0;
+
+                lines.forEach(line => {
+                    const mzStr = line.getAttribute("data-mz");
+                    const v = mzStr ? parseFloat(mzStr) : NaN;
+                    const d = Math.abs(v - targetMz);
+                    if (Number.isFinite(d) && d < bestDelta) {
+                        bestDelta = d;
+                        targetLine = line;
+                    }
+                });
+
+                const lineRect = targetLine.getBoundingClientRect();
+                const overlayRect = overlay.getBoundingClientRect();
+                const margin = 8;
+
+                let left = lineRect.left - plotRect.left - overlayRect.width / 2;
+                if (left < 0) left = 0;
+                if (left + overlayRect.width > plotRect.width) {
+                    left = plotRect.width - overlayRect.width;
+                }
+
+                // Vertical placement: always ABOVE the peak, constrained to upper half
+                const centerY = plotRect.height / 2;  // approximate x-axis for mirror plot
+
+                let top = lineRect.top - plotRect.top - overlayRect.height - margin;
+
+                // Do not let the overlay extend below the middle (upper half only)
+                const maxTop = centerY - overlayRect.height - margin;
+                if (top > maxTop) {
+                    top = maxTop;
+                }
+
+                // Clamp to the top edge
+                if (top < 0) {
+                    top = 0;
+                }
+
+                overlay.style.left = left + "px";
+                overlay.style.top = top + "px";
+            }
+
+            async function buildFragmentOverlays(entry, overlayContainer) {
+                currentEntry = entry;
+                currentOverlayContainer = overlayContainer;
+
+                overlayContainer.innerHTML = "";
+
+                const annots = getAnnotsForCurrentTopK(entry);
+                if (!annots.length) {
+                    if (currentTopK === 0) {
+                        statusEl.textContent = "No fragments selected. Increase the slider to show fragment annotations.";
+                    } else {
+                        statusEl.textContent = "No fragment annotations available for this spectrum.";
+                    }
+                    return;
+                }
+
+                for (const a of annots) {
+                    const fragIdStr = String(a.frag_id);
+                    const mzStr = (Number(a.mz) || 0).toFixed(4);
+                    let svg = null;
+
+                    try {
+                        svg = await fetchFragmentSvgCached(fragIdStr);
+                    } catch (err) {
+                        console.error("Failed to fetch fragment SVG:", err);
+                    }
+
+                    const overlay = doc.createElement("div");
+                    overlay.className = "fragment-overlay";
+                    overlay.setAttribute("data-frag-id", fragIdStr);
+                    overlay.setAttribute("data-mz", mzStr);
+
+                    const labelEl = doc.createElement("div");
+                    labelEl.className = "fragment-overlay-label";
+                    labelEl.textContent = `${mzStr}`;
+                    overlay.appendChild(labelEl);
+
+                    if (svg) {
+                        const svgContainer = doc.createElement("div");
+                        svgContainer.innerHTML = svg;
+                        overlay.appendChild(svgContainer);
+                    } else {
+                        const errEl = doc.createElement("div");
+                        errEl.textContent = "Failed to load fragment.";
+                        errEl.style.fontSize = "0.75rem";
+                        errEl.style.textAlign = "center";
+                        overlay.appendChild(errEl);
+                    }
+
+                    overlayContainer.appendChild(overlay);
+
+                    // Place overlay near corresponding peak
+                    positionOverlayForPeak(overlay, a.mz, fragIdStr);
+
+                    overlay.addEventListener("mouseenter", () => {
+                        highlightOverlay(fragIdStr, true);
+                    });
+                    overlay.addEventListener("mouseleave", () => {
+                        highlightOverlay(fragIdStr, false);
+                    });
+
+                    overlay.addEventListener("click", () => {
+                        highlightOverlay(fragIdStr, true);
+                        showFragmentDetail(fragIdStr, mzStr);
+                    });
+                }
+
+                statusEl.textContent =
+                    `Overlayed ${annots.length} fragment(s) (top ${currentTopK}) on the mirror plot.`;
+            }
+
+            function attachPeakHandlers(entry) {
+                const svgEl = plotArea.querySelector("svg");
+                if (!svgEl) return;
+
+                const lines = svgEl.querySelectorAll("line[data-frag-id]");
+                lines.forEach(line => {
+                    const fragIdStr = line.getAttribute("data-frag-id");
+                    if (!fragIdStr) return;
+
+                    line.style.cursor = "pointer";
+
+                    line.addEventListener("mouseenter", () => {
+                        highlightOverlay(fragIdStr, true);
+                    });
+
+                    line.addEventListener("mouseleave", () => {
+                        highlightOverlay(fragIdStr, false);
+                    });
+
+                    line.addEventListener("click", () => {
+                        highlightOverlay(fragIdStr, true);
+                        const mzStr = line.getAttribute("data-mz") || "";
+                        showFragmentDetail(fragIdStr, mzStr);
+                    });
+                });
+            }
+
+            function generatePlot() {
+                if (!ceEntries.length) {
+                    win.alert("No collision energies available.");
+                    return;
+                }
+
+                const val = ceSelect.value || "";
+                const ceList = val
+                    .split(",")
+                    .map(s => parseFloat(s.trim()))
+                    .filter(v => Number.isFinite(v));
+
+                if (!ceList.length) {
+                    win.alert("Internal error: no collision energies parsed from selection.");
+                    return;
+                }
+
+                const entry = ceEntries.find(e => {
+                    const arr = Array.isArray(e.ceEvList) ? e.ceEvList : [];
+                    if (arr.length !== ceList.length) return false;
+                    for (let i = 0; i < arr.length; i++) {
+                        if (Math.abs(arr[i] - ceList[i]) > 1e-6) return false;
+                    }
+                    return true;
+                }) || ceEntries[0];
+
+                getAnnotsForCurrentTopK(entry);
+                statusEl.textContent = "Drawing mirror plot and fragment overlays…";
+
+                try {
+                    const svgMarkup = buildMirrorSvgForEntry(entry);
+                    plotArea.innerHTML = "";
+
+                    const svgContainer = doc.createElement("div");
+                    svgContainer.className = "plot-svg-container";
+                    svgContainer.innerHTML = svgMarkup;
+                    plotArea.appendChild(svgContainer);
+
+                    const overlayContainer = doc.createElement("div");
+                    overlayContainer.className = "fragment-overlay-container";
+                    plotArea.appendChild(overlayContainer);
+
+                    currentEntry = entry;
+                    currentOverlayContainer = overlayContainer;
+
+                    attachPeakHandlers(entry);
+                    // Build overlays asynchronously but tied to this plot
+                    buildFragmentOverlays(entry, overlayContainer);
+
+                    statusEl.textContent = entry.ceLabel
+                        ? `Mirror plot generated for ${entry.ceLabel}.`
+                        : "Mirror plot generated.";
+                } catch (err) {
+                    console.error(err);
+                    statusEl.textContent = "Error while drawing plot: " + err.message;
+                }
+            }
+
+            ceSelect.addEventListener("change", generatePlot)
+
+            // Draw default plot immediately (prefer merged if available)
+            if (ceEntries.length > 0) {
+                generatePlot();
+            }
+        }
+
+    document.addEventListener("DOMContentLoaded", function () {
+        // ---- Serialize stepped NCE selections before submit ----
+               const queryForm = document.getElementById("query-form");
+        const loadingOverlay = document.getElementById("loading-overlay");
+
+        if (queryForm) {
+            queryForm.addEventListener("submit", function () {
+                // 1) Serialize stepped NCE selections
+                const blocks = queryForm.querySelectorAll(".spectrum-block");
+                blocks.forEach((block) => {
+                    const modeSelect = block.querySelector('select[name="spectrum_mode"]');
+                    const hiddenStepped = block.querySelector('input[name="spectrum_stepped_nces"]');
+                    if (!modeSelect || !hiddenStepped) return;
+
+                    const mode = modeSelect.value;
+                    if (mode === "stepped") {
+                        const checks = block.querySelectorAll(".stepped-nce-checkbox:checked");
+                        const vals = Array.from(checks).map((c) => c.value.trim()).filter(Boolean);
+                        hiddenStepped.value = vals.join(",");
+                    } else {
+                        hiddenStepped.value = "";
+                    }
+                });
+
+                // 2) Show loading overlay & disable submit button
+                if (loadingOverlay) {
+                    loadingOverlay.style.display = "flex";
+                }
+                const submitBtn = queryForm.querySelector('button[type="submit"]');
+                if (submitBtn) {
+                    submitBtn.disabled = true;
+                    submitBtn.textContent = "Running…";
+                }
+            });
+        }
+
+        // ---- .ms upload → call /upload_ms ----
+        const msInput = document.getElementById("ms-file-input");
+        if (msInput) {
+            msInput.addEventListener("change", function () {
+                const file = msInput.files[0];
+                if (!file) {
+                    return;
+                }
+                const formData = new FormData();
+                formData.append("ms_file", file);
+
+                fetch("/upload_ms", {
+                    method: "POST",
+                    body: formData,
+                })
+                    .then(resp => resp.json())
+                    .then(data => {
+                        if (data.error) {
+                            alert("Error: " + data.error);
+                            return;
+                        }
+                        if (!data.spectra || !data.spectra.length) {
+                            alert("No spectra found in the .ms file.");
+                            return;
+                        }
+                        // One spectrum block per MS spectrum
+                        populateSpectraFromUpload(data.spectra);
+                    })
+                    .catch(err => {
+                        console.error(err);
+                        alert("Failed to parse .ms file: " + err.message);
+                    });
+            });
+        }
+
+        // ---- structure preview + pin logic (only if results table exists) ----
+        const rows = document.querySelectorAll("tbody tr[data-smiles]");
+        const img = document.getElementById("mol-preview-img");
+        const caption = document.getElementById("mol-preview-caption");
+        const previewCard = document.getElementById("preview-card");
+        const tbody = document.getElementById("results-body");
+        const layout = document.querySelector(".results-layout");
+
+        if (!previewCard || !tbody || !layout || !rows.length) {
+            return;  // nothing to do if there are no results
+        }
+
+        previewCard.style.display = "none";
+
+        let pinned = false;
+        let pinnedRow = null;
+
+        function showPreviewForRow(row) {
+            const smiles = row.getAttribute("data-smiles");
+            if (!smiles) return;
+
+            const layoutRect = layout.getBoundingClientRect();
+            const rowRect = row.getBoundingClientRect();
+            const top = rowRect.top - layoutRect.top;
+
+            previewCard.style.top = `${Math.max(top, 10)}px`;
+            previewCard.style.display = "block";
+
+            img.src = "/mol_png?smiles=" + encodeURIComponent(smiles);
+            img.style.display = "block";
+            caption.textContent = smiles;
+        }
+
+        function clearPinnedHighlight() {
+            if (pinnedRow) {
+                pinnedRow.classList.remove("row-pinned");
+            }
+        }
+
+        rows.forEach(row => {
+            row.addEventListener("mouseenter", () => {
+                if (pinned && row !== pinnedRow) {
+                    return;
+                }
+                showPreviewForRow(row);
+            });
+
+            row.addEventListener("click", (e) => {
+                e.stopPropagation();
+                if (pinned && pinnedRow === row) {
+                    pinned = false;
+                    clearPinnedHighlight();
+                } else {
+                    pinned = true;
+                    clearPinnedHighlight();
+                    pinnedRow = row;
+                    pinnedRow.classList.add("row-pinned");
+                    showPreviewForRow(row);
+                }
+            });
+        });
+
+        tbody.addEventListener("mouseleave", () => {
+            if (pinned) return;
+            previewCard.style.display = "none";
+            img.style.display = "none";
+            caption.textContent = "";
+        });
+
+        document.addEventListener("click", (e) => {
+            if (!pinned) return;
+
+            const clickInsideTable = tbody.contains(e.target);
+            const clickInsidePreview = previewCard.contains(e.target);
+
+            if (!clickInsideTable && !clickInsidePreview) {
+                pinned = false;
+                clearPinnedHighlight();
+                previewCard.style.display = "none";
+                img.style.display = "none";
+                caption.textContent = "";
+            }
+        });
+
+        // ---- Right-click to copy SMILES (keeps left-click for row pinning) ----
+        const smilesCells = document.querySelectorAll(".smiles-cell");
+        const copyToast = document.getElementById("copy-toast");
+        let copyToastTimeout = null;
+
+        function showCopyToast(message) {
+            if (!copyToast) return;
+            copyToast.textContent = message;
+            copyToast.classList.add("show");
+            if (copyToastTimeout) {
+                clearTimeout(copyToastTimeout);
+            }
+            copyToastTimeout = setTimeout(() => {
+                copyToast.classList.remove("show");
+            }, 1200);
+        }
+
+        smilesCells.forEach((cell) => {
+            cell.addEventListener("contextmenu", (e) => {
+                // Use right-click for copy, don't show browser context menu
+                e.preventDefault();
+                e.stopPropagation();  // don’t toggle row pin
+
+                const smiles = cell.getAttribute("data-smiles") || cell.textContent.trim();
+                if (!smiles) return;
+
+                const ok = window.confirm("Copy this SMILES?\n\n" + smiles);
+                if (!ok) return;
+
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard
+                        .writeText(smiles)
+                        .then(() => {
+                            showCopyToast("SMILES copied");
+                        })
+                        .catch(() => {
+                            showCopyToast("Copy failed");
+                        });
+                } else {
+                    // Very old browser fallback
+                    const textarea = document.createElement("textarea");
+                    textarea.value = smiles;
+                    textarea.style.position = "fixed";
+                    textarea.style.left = "-9999px";
+                    document.body.appendChild(textarea);
+                    textarea.focus();
+                    textarea.select();
+                    try {
+                        document.execCommand("copy");
+                        showCopyToast("SMILES copied");
+                    } catch (err) {
+                        showCopyToast("Copy failed");
+                    }
+                    document.body.removeChild(textarea);
+                }
+            });
+        });
+    });
+    </script>
+    {% if retrieval_data %}
+    <script>
+        // Per-request retrieval snapshot: processed experimental spectra +
+        // per-hit predicted spectra. Used to drive mirror plots without
+        // reloading .mgf or re-processing input on the backend.
+        window.RETRIEVAL_DATA = {{ retrieval_data | tojson | safe }};
+    </script>
+    {% else %}
+    <script>
+        window.RETRIEVAL_DATA = null;
+    </script>
+    {% endif %}
+</head>
+<body>
+<header>
+    <div class="header-inner">
+        <h1 class="header-title">ICEBERG Spectrum Retrieval (PubChem Atlas)</h1>
+        Under development. Please report any issues to runzhong@mit.edu
+    </div>
+</header>
+
+<main>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="card">
+          {% for category, message in messages %}
+            <div class="flash flash-{{ category }}">{{ message }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    <div class="card">
+        <h2>Query spectra</h2>
+        <form id="query-form" method="post" action="{{ url_for('index') }}" enctype="multipart/form-data">
+            <div class="row">
+                <div>
+                    <label for="formula">Chemical formula</label>
+                    <input type="text" id="formula" name="formula" required
+                           placeholder="e.g. CH9N3O9S4"
+                           value="{{ formula|default('') }}">
+                </div>
+                <div>
+                    <label for="adduct">Adduct</label>
+                    <select id="adduct" name="adduct">
+                        <option value="[M+H]+" {% if adduct == "[M+H]+" %}selected{% endif %}>[M+H]+</option>
+                        <!-- extend here with other adducts if needed -->
+                    </select>
+                </div>
+            </div>
+
+            <p style="margin-top:0.75rem; font-size:0.85rem; color:#6b7280;">
+                Paste one or more MS/MS spectra below. For multiple collision energies,
+                click “Add another spectrum” and select the corresponding NCE (10–50%).
+                The NCE will be converted to absolute eV using the precursor m/z
+                computed from the formula and adduct.
+            </p>
+
+            <div class="row" style="margin-top:0.75rem;">
+                <div>
+                    <label for="ms-file-input">Upload SIRIUS .ms file</label>
+                    <input type="file" id="ms-file-input" accept=".ms">
+                    <p style="font-size:0.8rem; color:#6b7280; margin-top:0.25rem;">
+                        If provided, spectra in the .ms file (one block per collision energy) will be parsed
+                        and used as query spectra. You can still edit the collision energy and peaks below.
+                    </p>
+                </div>
+            </div>
+
+            <div id="spectra-container">
+                {% if preloaded_spectra and preloaded_spectra|length > 0 %}
+                    {% for sp in preloaded_spectra %}
+                    <div class="spectrum-block">
+                        <div class="spectrum-header">
+                            <span>Spectrum {{ loop.index }}</span>
+                            <button type="button"
+                                    class="btn btn-secondary"
+                                    onclick="removeSpectrumBlock(this)">
+                                Remove
+                            </button>
+                        </div>
+
+                        {% set mode = sp.mode|default('single') %}
+
+                        <div class="row">
+                            <div>
+                                <label>Acquisition mode</label>
+                                <select name="spectrum_mode"
+                                        class="acq-mode-select"
+                                        onchange="onAcquisitionModeChange(this)">
+                                    <option value="single" {% if mode == 'single' %}selected{% endif %}>Single NCE</option>
+                                    <option value="stepped" {% if mode == 'stepped' %}selected{% endif %}>Stepped NCE</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Single-NCE controls -->
+                        <div class="single-nce-row" {% if mode == 'stepped' %}style="display:none;"{% endif %}>
+                            <div class="row">
+                                <div>
+                                    <label>Collision energy (NCE, %)</label>
+                                    <select name="spectrum_nce">
+                                        {% for nce in [10, 20, 30, 40, 50] %}
+                                            <option value="{{ nce }}" {% if sp.nce_guess == nce %}selected{% endif %}>
+                                                {{ nce }}
+                                            </option>
+                                        {% endfor %}
+                                    </select>
+
+                                    <!-- persist exact CE / NCE -->
+                                    <input type="hidden" name="spectrum_ev"
+                                           value="{{ sp.ev if sp.ev is not none }}">
+                                    <input type="hidden" name="spectrum_nce_cont"
+                                           value="{{ sp.nce_cont if sp.nce_cont is not none }}">
+
+                                    {% if sp.ev is not none and sp.nce_cont is not none %}
+                                        <div style="font-size:0.75rem; color:#6b7280; margin-top:0.25rem;">
+                                            Detected CE ≈ {{ "%.0f"|format(sp.ev) }} eV |
+                                            NCE ≈ {{ "%.0f"|format(sp.nce_cont) }} % (from .ms)
+                                        </div>
+                                    {% elif sp.ev is not none %}
+                                        <div style="font-size:0.75rem; color:#6b7280; margin-top:0.25rem;">
+                                            Detected CE ≈ {{ "%.0f"|format(sp.ev) }} eV
+                                        </div>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Stepped-NCE controls -->
+                        <div class="stepped-nce-row" {% if mode != 'stepped' %}style="display:none;"{% endif %} style="margin-top:0.5rem;">
+                            <label>Stepped collision energies (NCE, %)</label>
+                            <div class="stepped-nce-options" style="font-size:0.8rem; color:#4b5563; display:flex; gap:0.5rem; flex-wrap:wrap;">
+                                {% set stepped_vals = (sp.stepped_nces|default('') or '') %}
+                                {% set stepped_list = stepped_vals.split(',') if stepped_vals else [] %}
+                                {% for nce in [10, 20, 30, 40, 50] %}
+                                    <label>
+                                        <input type="checkbox"
+                                               class="stepped-nce-checkbox"
+                                               value="{{ nce }}"
+                                               {% if nce|string in stepped_list %}checked{% endif %}>
+                                        {{ nce }}
+                                    </label>
+                                {% endfor %}
+                            </div>
+                            <input type="hidden" name="spectrum_stepped_nces"
+                                   value="{{ stepped_vals }}">
+                            <div style="font-size:0.75rem; color:#6b7280; margin-top:0.25rem;">
+                                Select one or more stepped NCEs, e.g. 20/30/50.
+                            </div>
+                        </div>
+
+                        <label style="margin-top:0.5rem;">Spectrum (m/z intensity per line)</label>
+                        <textarea name="spectrum_text">{{ sp.text }}</textarea>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <!-- Fallback: original single empty block -->
+                    <div class="spectrum-block">
+                        <div class="spectrum-header">
+                            <span>Spectrum 1</span>
+                        </div>
+
+                        <div class="row">
+                            <div>
+                                <label>Acquisition mode</label>
+                                <select name="spectrum_mode"
+                                        class="acq-mode-select"
+                                        onchange="onAcquisitionModeChange(this)">
+                                    <option value="single" selected>Single NCE</option>
+                                    <option value="stepped">Stepped NCE</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Single-NCE controls -->
+                        <div class="single-nce-row">
+                            <div class="row">
+                                <div>
+                                    <label>Collision energy (NCE, %)</label>
+                                    <select name="spectrum_nce">
+                                        <option value="10">10</option>
+                                        <option value="20">20</option>
+                                        <option value="30" selected>30</option>
+                                        <option value="40">40</option>
+                                        <option value="50">50</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Stepped-NCE controls (hidden by default) -->
+                        <div class="stepped-nce-row" style="display:none; margin-top:0.5rem;">
+                            <label>Stepped collision energies (NCE, %)</label>
+                            <div class="stepped-nce-options" style="font-size:0.8rem; color:#4b5563; display:flex; gap:0.5rem; flex-wrap:wrap;">
+                                <label><input type="checkbox" class="stepped-nce-checkbox" value="10"> 10</label>
+                                <label><input type="checkbox" class="stepped-nce-checkbox" value="20"> 20</label>
+                                <label><input type="checkbox" class="stepped-nce-checkbox" value="30"> 30</label>
+                                <label><input type="checkbox" class="stepped-nce-checkbox" value="40"> 40</label>
+                                <label><input type="checkbox" class="stepped-nce-checkbox" value="50"> 50</label>
+                            </div>
+                            <!-- This gets filled with e.g. "20,30,50" before submit -->
+                            <input type="hidden" name="spectrum_stepped_nces" value="">
+                            <div style="font-size:0.75rem; color:#6b7280; margin-top:0.25rem;">
+                                Select one or more stepped NCEs, e.g. 20/30/50.
+                            </div>
+                        </div>
+
+                        <label style="margin-top:0.5rem;">Spectrum (m/z intensity per line)</label>
+                        <textarea name="spectrum_text"
+                                  placeholder="59.9664 0.0967&#10;60.9743 0.0679&#10;62.9899 0.0450&#10;63.9852 0.0437&#10;64.9930 0.0458&#10;65.0056 0.2008&#10;..."></textarea>
+                    </div>
+                {% endif %}
+            </div>
+
+            <div style="margin-top:0.75rem;">
+                <button type="button" class="btn btn-secondary" onclick="addSpectrumBlock()">Add another spectrum</button>
+            </div>
+
+            <div style="margin-top:1rem;">
+                <label style="display:flex; align-items:center; gap:0.3rem;">
+                    <input type="checkbox" id="ignore_precursor" name="ignore_precursor" checked>
+                    Ignore precursor peak
+                </label>
+            </div>
+
+            <div style="margin-top:0.5rem;">
+                <label style="display:flex; align-items:center; gap:0.3rem;">
+                    <input type="checkbox" id="apply_denoise" name="apply_denoise" checked>
+                    Apply electronic denoising to experimental spectra
+                </label>
+                <div style="font-size:0.8rem; color:#6b7280; margin-left:1.4rem;">
+                    Helps remove electronic noise before computing entropy similarity.
+                </div>
+            </div>
+
+            <div style="margin-top:1rem;">
+                <button type="submit" class="btn btn-primary">Run retrieval</button>
+            </div>
+        </form>
+    </div>
+
+    <div class="card">
+        <h2>Download predicted spectra (.mgf / .msp)</h2>
+        <p style="font-size:0.85rem; color:#6b7280;">
+            Download ICEBERG-predicted spectra for a specific PubChem formula from the local atlas.
+            You can either download the raw MGF only, or download MGF and a converted MSP file.<br>
+            All NIST structures are excluded to avoid license conflict. You can import the predicted
+            library into your NIST MS Search software.
+        </p>
+        <p style="font-size:0.85rem; color:#6b7280; margin-top:0.3rem;">
+            The current ICEBERG PubChem atlas contains <strong>91,424,208</strong> unique structures from PubChem.
+        </p>
+        <form id="download-form" class="row" onsubmit="return false;">
+            <div>
+                <label for="download-formula">Chemical formula</label>
+                <input type="text" id="download-formula" name="formula" placeholder="e.g. CH9N3O9S4">
+            </div>
+            <div style="align-self:flex-end; display:flex; gap:0.5rem; flex-wrap:wrap;">
+                <button type="button"
+                        class="btn btn-secondary"
+                        onclick="downloadMgfOnly('{{ url_for('download_mgf') }}')">
+                    Download .mgf
+                </button>
+                <button type="button"
+                        class="btn btn-secondary"
+                        onclick="downloadMgfAndMsp('{{ url_for('download_mgf') }}')">
+                    Download .mgf & .msp (local)
+                </button>
+            </div>
+        </form>
+    </div>
+
+    {% if results and results|length > 0 %}
+        <div class="card">
+            <h2>Retrieved candidates</h2>
+            <p style="font-size:0.85rem; color:#6b7280;">
+                Ranked by entropy similarity (1.0 = identical). Only spectra with
+                matching collision energies (in eV) are shown. Hover over a row to
+                view the predicted chemical structure.
+                Click a row to pin/unpin the preview.<br>
+                All NIST structures are excluded to avoid license conflict.
+            </p>
+
+            <div class="results-layout">
+                <div class="results-layout-table">
+                    <div style="margin-bottom:0.75rem;">
+                        <button type="button"
+                                class="btn btn-secondary"
+                                onclick="exportResultsCsv()">
+                            Export as CSV
+                        </button>
+                    </div>
+
+                    <div style="overflow-x:auto;">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>Similarity</th>
+                                    <th>Mirror plot</th>
+                                    <th>SMILES</th>
+                                    <th>2D InChIKey</th>
+                                    <th>Formula</th>
+                                    <th>Adduct</th>
+                                    <th>Collision energy (eV)</th>
+                                    <th>Description</th>
+                                </tr>
+                            </thead>
+                            <tbody id="results-body">
+                            {% for res in results %}
+                                <tr data-smiles="{{ res.smiles }}">
+                                    <td>{{ loop.index }}</td>
+                                    <td class="similarity">{{ "%.4f"|format(res.similarity) }}</td>
+                                    <td>
+                                        <button type="button"
+                                              class="btn btn-secondary"
+                                              onclick="viewMirrorPlot(this)"
+                                              data-smiles="{{ res.smiles }}"
+                                              data-ce="{{ res.collision_energy }}">
+                                            Show
+                                        </button>
+                                    </td>
+                                    <td class="smiles-cell"
+                                        style="max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+                                        data-smiles="{{ res.smiles }}"
+                                        title="right-click to copy: {{ res.smiles }}">
+                                        {{ res.smiles }}
+                                    </td>
+                                    {% if res.inchikey %}
+                                        {% set inchikey_parts = res.inchikey.split('-') %}
+                                        {% set inchikey2d = inchikey_parts[0] %}
+                                        <td style="max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+                                            data-inchikey="{{ inchikey }}"
+                                            title="search {{ inchikey2d }} in PubChem">
+                                            <a href="https://pubchem.ncbi.nlm.nih.gov/#query={{ inchikey2d | urlencode }}"
+                                               target="_blank"
+                                               rel="noopener noreferrer"
+                                               onclick="event.stopPropagation();">
+                                                {{ inchikey2d }}
+                                            </a>
+                                        </td>
+                                    {% else %}
+                                        <td>—</td>
+                                    {% endif %}
+                                    <td>{{ res.formula }}</td>
+                                    <td><span class="badge">{{ res.adduct }}</span></td>
+                                    <td>{{ res.collision_energy }}</td>
+                                    <td>{{ res.meta.get("DESCRIPTION", "") }}</td>
+                                </tr>
+                            {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Floating overlay preview -->
+                <div class="preview-card" id="preview-card">
+                    <h3>Structure preview</h3>
+                    <div class="preview-img-wrapper">
+                        <img id="mol-preview-img" src="" alt="Molecule preview" style="display:none;">
+                    </div>
+                    <div id="mol-preview-caption" class="preview-caption"></div>
+                    <div class="preview-helper">
+                        Hover rows to inspect; click a row to pin/unpin this view.
+                    </div>
+                </div>
+            </div>
+        </div>
+    {% endif %}
+
+    <div class="footer">
+        <div class="footer-top">
+            <p>
+                Please cite:
+                <br>
+                <strong>Neural Spectral Prediction for Structure Elucidation with Tandem Mass Spectrometry.</strong><br>
+                Runzhong Wang, Mrunali Manjrekar, Babak Mahjour, Julian Avila-Pacheco, Joules Provenzano, Erin Reynolds,
+                Magdalena Lederbauer, Eivgeni Mashin, Samuel Goldman, Mingxun Wang, Jing-Ke Weng, Desirée L. Plata,
+                Clary B. Clish, Connor W. Coley. bioRxiv 2025.
+                <br>
+                <a href="https://www.biorxiv.org/content/10.1101/2025.05.28.656653" target="_blank" rel="noopener noreferrer">
+                    View the bioRxiv preprint
+                </a>
+            </p>
+            <p>
+                ICEBERG code:
+                <a href="https://github.com/coleygroup/ms-pred" target="_blank" rel="noopener noreferrer">
+                    https://github.com/coleygroup/ms-pred
+                </a>
+            </p>
+        </div>
+        <div class="footer-bottom">
+            <a href="https://coley.mit.edu/" target="_blank" rel="noopener noreferrer">
+                <img src="https://coley.mit.edu/images/logopic/Logo_ColeyLabmini.svg"
+                     alt="Coley Lab logo">
+            </a>
+            <span>
+                MIT Coley Group:
+                <a href="https://coley.mit.edu/" target="_blank" rel="noopener noreferrer">
+                    https://coley.mit.edu/
+                </a>
+            </span>
+        </div>
+    </div>
+</main>
+<div id="copy-toast">Copied!</div>
+<div id="loading-overlay" class="loading-overlay">
+    <div class="loading-box">
+        <div class="loading-spinner"></div>
+        <div>Running retrieval, please wait…</div>
+    </div>
+</div>
+</body>
+</html>
