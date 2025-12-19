@@ -672,7 +672,7 @@ class PredSpecDB:
         else:
             self.h5datasets = None
 
-    def write(self, name, spec: MassSpec):
+    def write(self, name, spec: MassSpec, replace_name_by_formula=False):
         """write one spectrum"""
         key_dict = {
             "probs": spec.has_probs,
@@ -684,6 +684,9 @@ class PredSpecDB:
             "frags": spec.has_frags,
             "pulled_atoms": spec.has_pulled_atoms,
         }
+        if replace_name_by_formula and spec.root_canonical_smiles is not None:
+            name = chem_utils.form_from_smi(spec.root_canonical_smiles)
+
         h5_dataset = self._get_h5_dataset(name)
         full_name  = self._get_full_name(name, spec.collision_energy, spec.remark)
 

@@ -1,29 +1,29 @@
 """chem_utils.py"""
 
 import re
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from functools import reduce
 from typing import List
 import logging
+
+import rdkit.sping
 import torch
 from rdkit import Chem
 from rdkit.Chem import Atom
 from rdkit.Chem.rdMolDescriptors import CalcMolFormula
 from rdkit.Chem.Descriptors import ExactMolWt
+from functools import lru_cache
+from platformdirs import user_cache_dir
+
 try:
     from rdkit.Chem.MolStandardize.tautomer import TautomerCanonicalizer, TautomerTransform
     _RD_TAUTOMER_CANONICALIZER = 'v1'
-    _TAUTOMER_TRANSFORMS = (
-        TautomerTransform('1,3 heteroatom H shift',
-                          '[#7,S,O,Se,Te;!H0]-[#7X2,#6,#15]=[#7,#16,#8,Se,Te]'),
-        TautomerTransform('1,3 (thio)keto/enol r', '[O,S,Se,Te;X2!H0]-[C]=[C]'),
-    )
-    _TAUT_CANON = TautomerCanonicalizer(transforms=_TAUTOMER_TRANSFORMS)
 except ModuleNotFoundError:
     from rdkit.Chem.MolStandardize.rdMolStandardize import TautomerEnumerator  # newer rdkit
     _RD_TAUTOMER_CANONICALIZER = 'v2'
-    _TAUT_ENUM = TautomerEnumerator()
 
 P_TBL = Chem.GetPeriodicTable()
 
@@ -246,6 +246,44 @@ instrument2onehot_pos = {
     "Orbitrap": 0,
     "QTOF": 1, # Streamline upstream preprocessing to make QToF count here too 
 }
+
+
+@lru_cache(maxsize=1)
+def _get_tautomer_canonicalizer():
+    from rdkit.Chem.MolStandardize.tautomer import (
+        TautomerCanonicalizer, TautomerTransform
+    )
+
+    transforms = (
+        TautomerTransform(
+            '1,3 heteroatom H shift',
+            '[#7,S,O,Se,Te;!H0]-[#7X2,#6,#15]=[#7,#16,#8,Se,Te]'
+        ),
+        TautomerTransform(
+            '1,3 (thio)keto/enol r',
+            '[O,S,Se,Te;X2!H0]-[C]=[C]'
+        ),
+    )
+    return TautomerCanonicalizer(transforms=transforms)
+
+
+@lru_cache(maxsize=1)
+def _get_tautomer_enumerator():
+    from rdkit.Chem.MolStandardize.rdMolStandardize import TautomerEnumerator, CleanupParameters
+    tautomer_transform_path = Path(user_cache_dir(f"ms-pred/tautomer_transform_rdkit{rdkit.sping.version}.txt"))
+    if not tautomer_transform_path.exists():
+        tautomer_transform_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(tautomer_transform_path, 'w') as f:
+            f.write(
+                "// Name SMARTS Bonds Charges\n"
+                "1,3 hetero atom H shift\t[#7,S,O,Se,Te;!H0]-[#7X2,#6,#15]=[#7,#16,#8,Se,Te]\n"
+                "1,3 (thio)keto/enol r\t[O,S,Se,Te;X2!H0]-[C]=[C]\n"
+            )
+
+    p = CleanupParameters()
+    p.tautomerTransformsFile = tautomer_transform_path
+
+    return TautomerEnumerator(p)
 
 
 def is_positive_adduct(adduct_str: str) -> bool:
@@ -476,10 +514,12 @@ def canonical_mol_from_inchi(inchi):
     mol = Chem.MolFromInchi(inchi)
     if mol is None:
         return None
-    if _RD_TAUTOMER_CANONICALIZER == 'v1':
-        mol = _TAUT_CANON.canonicalize(mol)
+    if _RD_TAUTOMER_CANONICALIZER == "v1":
+        canon = _get_tautomer_canonicalizer()
+        mol = canon.canonicalize(mol)
     else:
-        mol = _TAUT_ENUM.Canonicalize(mol)
+        enum = _get_tautomer_enumerator()
+        mol = enum.Canonicalize(mol)
     return mol
 
 
@@ -724,14 +764,28 @@ def sanitize(mol_list: List[Chem.Mol], mol_type='mol', return_indices=False, can
             if mol is None:
                 continue
             if canonicalize: # avoids weird tautomers, time-consuming
-                inchi = Chem.MolToInchi(mol)
-                mol = canonical_mol_from_inchi(inchi)
+                if _RD_TAUTOMER_CANONICALIZER == "v1":
+                    canon = _get_tautomer_canonicalizer()
+                    mol = canon.canonicalize(mol)
+                else:
+                    enum = _get_tautomer_enumerator()
+                    mol = enum.Canonicalize(mol)
+                if mol is None:
+                    continue
 
             # block weird compounds such as [FeH6] and [SH6]
-            blocked_atoms = {"Fe", "S"}
-            atoms = {a.GetSymbol() for a in mol.GetAtoms()}
-            if atoms.issubset(blocked_atoms.union({"H"})):
-                continue
+            atoms = mol.GetAtoms()
+            if len(atoms) > 1:
+                first = atoms[0].GetSymbol()
+                if first in ("Fe", "S"):
+                    for idx, a in enumerate(atoms):
+                        if idx == 0:
+                            continue
+                        if a.GetSymbol() != "H":
+                            break
+                    else:
+                        # all remaining atoms are H → FeHₙ or SHₙ
+                        continue
 
             if mol is not None:
                 new_mol_list.append(mol)

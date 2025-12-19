@@ -60,6 +60,7 @@ def chunked_parallel(
     max_cpu=16,
     output_func=None,
     task_name="",
+    unordered=False,
     **kwargs,
 ):
     """chunked_parallel.
@@ -70,6 +71,7 @@ def chunked_parallel(
         chunks: number of chunks
         max_cpu: Max num cpus
         output_func: an output function that writes function output to the disk
+        unordered: if True, use uimap; otherwise, use imap
     """
     # Adding it here fixes somessetting disrupted elsewhere
 
@@ -96,7 +98,8 @@ def chunked_parallel(
     from pathos import multiprocessing as mp
     cpus = min(mp.cpu_count(), max_cpu)
     with mp.ProcessPool(processes=cpus, **kwargs) as pool:
-        iter_outputs = tqdm(pool.imap(batch_func, chunked_list), total=len(chunked_list), desc=task_name)
+        pool_func = pool.uimap if unordered else pool.imap
+        iter_outputs = tqdm(pool_func(batch_func, chunked_list), total=len(chunked_list), desc=task_name)
         if output_func is None:
             list_outputs = list(iter_outputs)
             # Unroll

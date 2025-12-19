@@ -11,11 +11,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from rdkit import Chem
+from rdkit.Chem.Descriptors import ExactMolWt
 from rdkit.Chem import Draw
-from rdkit.Chem.Draw import IPythonConsole
 import pubchempy as pcp
 import pickle
-import copy
 from typing import List, Tuple
 import pygmtools as pygm
 import yaml
@@ -23,7 +22,6 @@ import socket
 from collections.abc import Iterable
 
 import ms_pred.common as common
-from ms_pred.retrieval.retrieval_benchmark import dist_bin
 
 
 def load_global_config(path_to_config='configs/iceberg/iceberg_elucidation.yaml', hostname=None):
@@ -87,22 +85,52 @@ def candidates_from_pubchem(
     return sanitize_smiles(smiles, formula)
 
 
-def sanitize_smiles(smiles:List[str], formula:str, canonicalize=True):
+def sanitize_smiles(smiles: List[str], formula: str, canonicalize: bool = True) -> List[str]:
     target_mass = common.formula_mass(formula)
+    tol = 0.01
 
-    # remove stereo chemistry, mass mismatch (due to isotopes) and duplicates
-    smiles = [smi for smi in smiles if '.' not in smi]  # rm mixtures
-    smiles = common.sanitize(smiles, 'smi', canonicalize=canonicalize)  # sanitize (remove weired structures)
-    smiles = [common.rm_stereo(smi) for smi in smiles]  # rm stereo chemistry information
-    smiles = [smi for smi in smiles if smi is not None]
-    smiles = [smi for smi in smiles if np.abs(common.mass_from_smi(smi) - target_mass) < 0.01]  # rm mass mismatch (usually due to isotopes)
-    smiles = np.array(smiles)
-    charge = np.array([Chem.GetFormalCharge(Chem.MolFromSmiles(smi)) for smi in smiles])
-    smiles = smiles[charge == 0]
-    inchikey = [common.inchikey_from_smiles(smi) for smi in smiles]
+    # 1) rm mixtures (cheap)
+    smiles = [s for s in smiles if s and '.' not in s]
+    if not smiles:
+        return []
+
+    # 2) Remove stereo, compute mass/charge/key from mol; dedupe in one pass
+    out_smiles = []
+    seen = set()
+
+    for s in smiles:
+        mol = Chem.MolFromSmiles(s)
+        if mol is None:
+            continue
+
+        # remove stereo
+        Chem.RemoveStereochemistry(mol)
+
+        # neutral charge
+        if Chem.GetFormalCharge(mol) != 0:
+            continue
+
+        # mass filter
+        if abs(ExactMolWt(mol) - target_mass) >= tol:
+            continue
+
+        # dedupe by InChIKey
+        ikey = Chem.MolToInchiKey(mol)
+        if ikey in seen:
+            continue
+        seen.add(ikey)
+
+        out_smiles.append(s)
+
+    # 3) sanitize/canonicalize
+    out_smiles = common.sanitize(out_smiles, "smi", canonicalize=canonicalize)
+    if not out_smiles:
+        return []
+
+    inchikey = [common.inchikey_from_smiles(smi) for smi in out_smiles]
     _, unique_ids = np.unique(inchikey, return_index=True)
-    smiles = smiles[unique_ids]
-    return smiles.tolist()
+    out_smiles = np.array(out_smiles)[unique_ids]
+    return out_smiles.tolist()
 
 
 def iceberg_prediction(
