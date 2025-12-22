@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-import os
 from io import BytesIO
 from pathlib import Path
-from typing import List, Tuple, Dict, Any
-from werkzeug.datastructures import FileStorage
+from typing import List, Dict, Any, Sequence, Tuple
+import threading
+import time
+import uuid
+import os
+import json
+from dataclasses import dataclass, field
 
 from flask import Flask, render_template, request, send_file, flash, redirect, url_for, abort, jsonify
 import numpy as np
-
-import matplotlib
-matplotlib.use("Agg")  # non-interactive backend for server
-import matplotlib.pyplot as plt
 
 from ms_pred import common
 from ms_pred.common import MassSpec, CompositeMassSpec
@@ -49,25 +49,6 @@ def get_mgf_path_for_formula(formula: str) -> Path:
     subdir = get_formula_subdir(formula)
     mgf_path = subdir / f"{formula}.mgf"
     return mgf_path
-
-
-def parse_ms_upload(ms_file: "FileStorage"):
-    """
-    Parse an uploaded SIRIUS .ms file using common.parse_spectra.
-
-    Returns:
-        meta_ms: dict metadata (includes 'parentmass' if present)
-        cms: CompositeMassSpec
-    """
-    if ms_file is None or ms_file.filename == "":
-        return None, None
-
-    # Read file content as text lines
-    content = ms_file.read().decode("utf-8", errors="ignore")
-    lines = content.splitlines()
-
-    meta_ms, cms = common.parse_spectra(lines)
-    return meta_ms, cms
 
 
 def parse_user_spectrum(text: str) -> np.ndarray:
@@ -167,6 +148,7 @@ def _structure_key(meta: Dict[str, Any]) -> str:
 
 def load_library_spectra_grouped(
     mgf_path: Path,
+    progress_cb=None,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Load predicted spectra from an .mgf file and group them by structure.
@@ -182,10 +164,13 @@ def load_library_spectra_grouped(
         raise FileNotFoundError(f"MGF file not found: {mgf_path.stem}")
 
     parsed = common.parse_spectra_mgf(str(mgf_path))
+    if progress_cb:
+        progress_cb("load_mgf", 20, "Loading predicted spectra (.mgf)")
 
     grouped: Dict[str, Dict[str, Any]] = {}
+    total = max(1, len(parsed))
 
-    for meta, peaks in parsed:
+    for idx, (meta, peaks) in enumerate(parsed, start=1):
         if len(peaks) == 0:
             continue
 
@@ -247,6 +232,10 @@ def load_library_spectra_grouped(
 
         grouped[key]["spectra"].append(ms)
 
+        if progress_cb and (idx % 25 == 0 or idx == total):
+            pct = int(idx / total * 80 + 20)
+            progress_cb("load_mgf", pct, f"Translating ICEBERG spectra ({idx}/{total})")
+
     # build CompositeMassSpec objects
     for v in grouped.values():
         if len(v['spectra']) > 0:
@@ -255,11 +244,7 @@ def load_library_spectra_grouped(
     return grouped
 
 
-def match_ev(ev_user: float, ev_lib: float, tol: float = EV_TOLERANCE) -> bool:
-    return abs(ev_user - ev_lib) <= tol
-
-
-def _massspec_to_peak_objects(ms: MassSpec) -> List[Dict[str, Any]]:
+def _massspec_to_peak_objects(ms: MassSpec) -> List[Tuple]:
     """
     Convert a MassSpec into a list of simple peak objects suitable for JSON.
 
@@ -282,7 +267,7 @@ def _massspec_to_peak_objects(ms: MassSpec) -> List[Dict[str, Any]]:
         except Exception:
             int_frags = None
 
-    peaks: List[Dict[str, Any]] = []
+    peaks: List[Tuple] = []
     for i in range(mzs.size):
         frag_id = None
         if int_frags is not None:
@@ -291,11 +276,11 @@ def _massspec_to_peak_objects(ms: MassSpec) -> List[Dict[str, Any]]:
             except Exception:
                 frag_id = None
         peaks.append(
-            {
-                "mz": float(mzs[i]),
-                "inten": float(intens[i]),
-                "frag_id": frag_id,
-            }
+            (
+                float(mzs[i]),
+                float(intens[i]),
+                frag_id,
+            )
         )
     return peaks
 
@@ -374,7 +359,7 @@ def serialize_user_specs_for_frontend(
                 nce_val = None
 
         peaks = [
-            {"mz": float(mzs[i]), "inten": float(intens[i])}
+            (float(mzs[i]), float(intens[i]))
             for i in range(mzs.size)
         ]
 
@@ -403,261 +388,6 @@ def serialize_user_specs_for_frontend(
     return out
 
 
-def build_mirror_entries_for_hit(
-    user_specs: Any,
-    lib_specs: CompositeMassSpec,
-    ce_keys: List[str],
-    stepped_mode: bool,
-) -> List[Dict[str, Any]]:
-    """
-    Build mirror-plot CE entries for a (experimental, library) pair.
-
-    Each entry has the structure:
-
-        {
-          "ceEvList": [float, ...],   # list of CE values in eV
-          "ceLabel": str,             # human-readable label for the tab
-          "exp": {
-              "collision_energy_ev": float or None,
-              "nce": float or None,
-              "peaks": [ {mz, inten}, ... ],
-          },
-          "pred": {
-              "collision_energy_ev": float or None,
-              "peaks": [ {mz, inten, frag_id}, ... ],
-          },
-        }
-
-    All merging is done on the backend using:
-      - MassSpec.merged_spec for per-CE spectra
-      - CompositeMassSpec.merge_spectra for multi-CE merges
-    """
-    entries: List[Dict[str, Any]] = []
-
-    # Normalize CE keys to a unique, sorted list of strings
-    ce_keys_unique = sorted({str(k) for k in ce_keys}, key=lambda x: float(x))
-    if not ce_keys_unique:
-        return entries
-
-    # Helper: safe float conversion
-    def _to_float(x):
-        try:
-            return float(x)
-        except Exception:
-            return None
-
-    if stepped_mode:
-        # ---------------------------------------------------------
-        # Stepped mode:
-        #   - Experimental: single stepped spectrum
-        #   - Library: merged across the requested stepped energies
-        # ---------------------------------------------------------
-        if not isinstance(user_specs, MassSpec):
-            # Defensive: stepped mode should be MassSpec on the experimental side
-            return entries
-
-        # Experimental: merge within the stepped MassSpec
-        try:
-            exp_ms_merged = user_specs.merged_spec()
-        except Exception:
-            exp_ms_merged = user_specs
-
-        exp_peaks = [
-            {"mz": float(m), "inten": float(i)}
-            for m, i in zip(exp_ms_merged.masses, exp_ms_merged.intens)
-        ]
-
-        # Library: merge all requested CEs for this structure
-        try:
-            pred_ms_merged = lib_specs.merge_spectra(energies=ce_keys_unique)
-        except Exception:
-            # If merging fails, fall back to a best-effort single CE (first in list)
-            try:
-                pred_ms_merged = lib_specs[ce_keys_unique[0]]
-            except Exception:
-                pred_ms_merged = None
-
-        pred_peaks = _massspec_to_peak_objects(pred_ms_merged) if pred_ms_merged else []
-
-        if not exp_peaks or not pred_peaks:
-            return entries
-
-        ce_ev_list = [ev for ev in (_to_float(k) for k in ce_keys_unique) if ev is not None]
-        ce_ev_list_sorted = sorted(ce_ev_list)
-
-        # Experimental NCE (one stepped value)
-        nce_val = None
-        if hasattr(user_specs, "nce"):
-            try:
-                nce_val = float(user_specs.nce)
-            except Exception:
-                nce_val = None
-
-        ce_ev_str = ", ".join(f"{ev:.0f} eV" for ev in ce_ev_list_sorted)
-        if nce_val is not None:
-            ce_label = f"Stepped CE (eV): {ce_ev_str} | Stepped NCE ≈ {nce_val:.0f}%"
-        else:
-            ce_label = f"Stepped CE (eV): {ce_ev_str}"
-
-        entries.append(
-            {
-                "ceEvList": ce_ev_list_sorted,
-                "ceLabel": ce_label,
-                "exp": {
-                    "collision_energy_ev": _to_float(getattr(user_specs, "collision_energy", None)),
-                    "nce": nce_val,
-                    "peaks": exp_peaks,
-                },
-                "pred": {
-                    "collision_energy_ev": None,
-                    "peaks": pred_peaks,
-                },
-            }
-        )
-        return entries
-
-    # -------------------------------------------------------------
-    # Non-stepped mode:
-    #   user_specs is CompositeMassSpec with one MS per CE bucket.
-    #   We build:
-    #     - one entry per CE
-    #     - one "merged" entry across all shared CEs (if >1)
-    # -------------------------------------------------------------
-    if not isinstance(user_specs, CompositeMassSpec):
-        return entries
-
-    # Per-CE entries
-    per_entries: List[Dict[str, Any]] = []
-    ce_ev_by_key: Dict[str, float] = {}
-    for k in ce_keys_unique:
-        ev = _to_float(k)
-        if ev is None:
-            continue
-        ce_ev_by_key[k] = ev
-
-    for ce_key, ev in sorted(ce_ev_by_key.items(), key=lambda kv: kv[1]):
-        try:
-            exp_ms_raw = user_specs[ce_key]
-            pred_ms_raw = lib_specs[ce_key]
-        except Exception:
-            continue
-
-        # Merge within each MassSpec using MassSpec.merged_spec
-        try:
-            exp_ms = exp_ms_raw.merged_spec()
-        except Exception:
-            exp_ms = exp_ms_raw
-
-        try:
-            pred_ms = pred_ms_raw.merged_spec()
-        except Exception:
-            pred_ms = pred_ms_raw
-
-        exp_peaks = [
-            {"mz": float(m), "inten": float(i)}
-            for m, i in zip(exp_ms.masses, exp_ms.intens)
-        ]
-        pred_peaks = _massspec_to_peak_objects(pred_ms)
-
-        if not exp_peaks or not pred_peaks:
-            continue
-
-        # Experimental NCE for this CE, if available
-        nce_val = None
-        if hasattr(exp_ms_raw, "nce"):
-            try:
-                nce_val = float(exp_ms_raw.nce)
-            except Exception:
-                nce_val = None
-
-        label = f"CE {ev:.0f} eV"
-        if nce_val is not None:
-            label += f" | NCE ≈ {nce_val:.0f}%"
-
-        per_entries.append(
-            {
-                "ceEvList": [ev],
-                "ceLabel": label,
-                "exp": {
-                    "collision_energy_ev": ev,
-                    "nce": nce_val,
-                    "peaks": exp_peaks,
-                },
-                "pred": {
-                    "collision_energy_ev": ev,
-                    "peaks": pred_peaks,
-                },
-            }
-        )
-
-    entries.extend(per_entries)
-
-    # Multi-CE merged entry (if >1 CE)
-    if len(ce_keys_unique) > 1 and per_entries:
-        try:
-            exp_merged_ms = user_specs.merge_spectra(energies=ce_keys_unique)
-        except Exception:
-            exp_merged_ms = None
-        try:
-            pred_merged_ms = lib_specs.merge_spectra(energies=ce_keys_unique)
-        except Exception:
-            pred_merged_ms = None
-
-        exp_merged_peaks = (
-            [
-                {"mz": float(m), "inten": float(i)}
-                for m, i in zip(exp_merged_ms.masses, exp_merged_ms.intens)
-            ]
-            if exp_merged_ms is not None
-            else []
-        )
-        pred_merged_peaks = (
-            _massspec_to_peak_objects(pred_merged_ms) if pred_merged_ms is not None else []
-        )
-
-        if exp_merged_peaks and pred_merged_peaks:
-            # Average NCE across all contributing CEs (if available)
-            nces: List[float] = []
-            for ce_key in ce_keys_unique:
-                try:
-                    nce_val = getattr(user_specs[ce_key], "nce", None)
-                except Exception:
-                    nce_val = None
-                if nce_val is not None:
-                    try:
-                        nces.append(float(nce_val))
-                    except Exception:
-                        pass
-            nce_str = "/".join(f"{nce:.0f}%" for nce in nces) if nces else None
-
-            ce_ev_list = [ev for ev in (_to_float(k) for k in ce_keys_unique) if ev is not None]
-            ce_ev_list_sorted = sorted(ce_ev_list)
-            ce_ev_str = "/".join(f"{ev:.0f}" for ev in ce_ev_list_sorted)
-
-            if nce_str is not None:
-                label = f"Merged CE {ce_ev_str} eV | NCE ≈ {nce_str}"
-            else:
-                label = f"Merged CE {ce_ev_str} eV"
-
-            entries.append(
-                {
-                    "ceEvList": ce_ev_list_sorted,
-                    "ceLabel": label,
-                    "exp": {
-                        "collision_energy_ev": None,
-                        "nce": None,
-                        "peaks": exp_merged_peaks,
-                    },
-                    "pred": {
-                        "collision_energy_ev": None,
-                        "peaks": pred_merged_peaks,
-                    },
-                }
-            )
-
-    return entries
-
-
 def retrieve_candidates(
     formula: str,
     adduct: str,
@@ -667,17 +397,26 @@ def retrieve_candidates(
     top_k: int = 50,
     stepped_mode: bool = False,
     stepped_ces: List[str] | None = None,
+    progress_cb=None,
 ) -> List[Dict[str, Any]]:
     """
     Perform spectrum retrieval for a given formula and user spectra.
-    ...
     """
+    if progress_cb:
+        progress_cb("load_mgf", 2, "Loading predicted spectra (.mgf)")
+
     mgf_path = get_mgf_path_for_formula(formula)
-    lib_grouped = load_library_spectra_grouped(mgf_path)
+    lib_grouped = load_library_spectra_grouped(mgf_path, progress_cb)
+
+    if progress_cb:
+        progress_cb("load_mgf", 100, f"Loaded {len(lib_grouped)} candidate structures")
 
     # Precursor m/z for ignoring precursor peak if requested
     precursor_mz = common.formula_mass(formula) + common.ion2mass[adduct]
     ignore_mass_val = precursor_mz - 1 if ignore_precursor else None
+
+    if progress_cb:
+        progress_cb("preprocess", 10, "Pre-processing experimental spectrum")
 
     # Process the experimental spectra
     if isinstance(user_specs, CompositeMassSpec) or isinstance(user_specs, MassSpec):
@@ -687,9 +426,15 @@ def retrieve_candidates(
             f"user_specs must be CompositeMassSpec or MassSpec, got {type(user_specs)}"
         )
 
-    results: List[Dict[str, Any]] = []
+    if progress_cb:
+        progress_cb("preprocess", 100, "Experimental spectrum processed")
 
-    for struct_key, info in lib_grouped.items():
+    results: List[Dict[str, Any]] = []
+    total = max(1, len(lib_grouped))
+    if progress_cb:
+        progress_cb("rank", 0, "Ranking candidates")
+
+    for idx, (struct_key, info) in enumerate(lib_grouped.items(), start=1):
         meta_struct = info["meta"]
         lib_specs: CompositeMassSpec = info["spectra"]
 
@@ -744,9 +489,250 @@ def retrieve_candidates(
             }
         )
 
+        if progress_cb and (idx % 25 == 0 or idx == total):
+            pct = int(idx / total * 100)
+            progress_cb("rank", pct, f"Ranking candidates ({idx}/{total})")
+
+    if progress_cb:
+        progress_cb("postprocess", 30, "Post-processing results")
+
     # Sort by similarity descending and take top_k
     results.sort(key=lambda x: x["similarity"], reverse=True)
-    return results[:top_k]
+    out = results[:top_k]
+
+    if progress_cb:
+        progress_cb("postprocess", 100, f"Finishing...")
+
+    return out
+
+
+def build_preloaded_spectra_from_form_lists(
+    spectrum_texts: Sequence[str],
+    spectrum_nces: Sequence[str],
+    spectrum_evs: Sequence[str],
+    spectrum_nce_conts: Sequence[str],
+    spectrum_modes: Sequence[str],
+    spectrum_stepped_nces: Sequence[str],
+) -> list[Dict[str, Any]]:
+    """
+    Normalize the spectra fields coming from the HTML form into the structure
+    expected by index.html (sp.text, sp.ev, sp.nce_cont, sp.mode, sp.stepped_nces).
+
+    This is deliberately dumb: it just trusts the hidden fields that were
+    already computed on the client or previous request, instead of trying to
+    recompute NCE/eV relationships.
+    """
+    preloaded: list[Dict[str, Any]] = []
+    n = len(spectrum_texts)
+
+    for i in range(n):
+        raw_text = spectrum_texts[i] or ""
+        text = raw_text.strip()
+        if not text:
+            continue
+
+        # NCE guess
+        nce_guess = None
+        if i < len(spectrum_nces) and spectrum_nces[i]:
+            try:
+                nce_guess = int(float(spectrum_nces[i]))
+            except ValueError:
+                nce_guess = None
+
+        # Continuous NCE (if available)
+        nce_cont = None
+        if i < len(spectrum_nce_conts) and spectrum_nce_conts[i]:
+            try:
+                nce_cont = float(spectrum_nce_conts[i])
+            except ValueError:
+                nce_cont = None
+
+        # EV (if available)
+        ev = None
+        if i < len(spectrum_evs) and spectrum_evs[i]:
+            try:
+                ev = float(spectrum_evs[i])
+            except ValueError:
+                ev = None
+
+        mode = spectrum_modes[i] if i < len(spectrum_modes) and spectrum_modes[i] else "single"
+        stepped_str = (
+            spectrum_stepped_nces[i]
+            if i < len(spectrum_stepped_nces) and spectrum_stepped_nces[i]
+            else ""
+        )
+
+        preloaded.append(
+            {
+                "text": text,
+                "nce_guess": nce_guess,
+                "nce_cont": nce_cont,
+                "ev": ev,
+                "mode": mode,
+                "stepped_nces": stepped_str,
+            }
+        )
+
+    return preloaded
+
+
+# -----------------------------
+# Retrieval job state (file-backed, multi-process safe)
+# -----------------------------
+
+JOB_STORE_DIR = Path(os.environ.get("MSPRED_JOB_DIR", "/tmp/ms_pred_jobs"))
+_JOB_FILE_LOCK = threading.Lock()  # intra-process guard for writes
+
+
+def _ensure_job_store_dir() -> None:
+    try:
+        JOB_STORE_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        # If we cannot create the directory, later operations will fail
+        # and surface a clear error to the caller.
+        pass
+
+
+@dataclass
+class JobState:
+    created_at: float = field(default_factory=time.time)
+    status: str = "queued"   # queued | running | done | error
+    message: str = ""
+    # progress in [0, 100]
+    progress: dict = field(
+        default_factory=lambda: {
+            "load_mgf": 0,
+            "preprocess": 0,
+            "rank": 0,
+            "postprocess": 0,
+        }
+    )
+    result_context: dict | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "created_at": self.created_at,
+            "status": self.status,
+            "message": self.message,
+            "progress": self.progress,
+            "result_context": self.result_context,
+            "error": self.error,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "JobState":
+        js = cls()
+        js.created_at = float(data.get("created_at", time.time()))
+        js.status = data.get("status", "queued")
+        js.message = data.get("message", "")
+        js.progress = data.get(
+            "progress",
+            {
+                "load_mgf": 0,
+                "preprocess": 0,
+                "rank": 0,
+                "postprocess": 0,
+            },
+        )
+        js.result_context = data.get("result_context")
+        js.error = data.get("error")
+        return js
+
+
+def _job_path(job_id: str) -> Path:
+    _ensure_job_store_dir()
+    return JOB_STORE_DIR / f"{job_id}.json"
+
+
+def _job_save(job_id: str, state: JobState) -> None:
+    """
+    Atomically write job state to disk so that multiple processes can
+    read it safely. We write to a temporary file and then rename.
+    """
+    path = _job_path(job_id)
+    tmp_path = path.with_suffix(".json.tmp")
+    payload = state.to_dict()
+
+    with _JOB_FILE_LOCK:
+        tmp_path.parent.mkdir(parents=True, exist_ok=True)
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+
+
+def _job_load(job_id: str) -> JobState | None:
+    """
+    Read job state from disk. Returns None if the job does not exist
+    or if the file is unreadable/corrupt.
+    """
+    path = _job_path(job_id)
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return JobState.from_dict(data)
+    except FileNotFoundError:
+        return None
+    except Exception:
+        # Corrupted/partial file – treat as missing
+        return None
+
+
+def _job_create(job_id: str, **kwargs) -> JobState:
+    js = JobState(**kwargs)
+    _job_save(job_id, js)
+    return js
+
+
+def _job_set(job_id: str, **kwargs) -> None:
+    js = _job_load(job_id)
+    if not js:
+        return
+    for k, v in kwargs.items():
+        setattr(js, k, v)
+    _job_save(job_id, js)
+
+
+def _job_update_progress(
+    job_id: str, key: str, value: int, message: str | None = None
+) -> None:
+    value = int(max(0, min(100, value)))
+    js = _job_load(job_id)
+    if not js:
+        return
+    js.progress[key] = value
+    if message is not None:
+        js.message = message
+    _job_save(job_id, js)
+
+
+def _job_get(job_id: str) -> JobState | None:
+    return _job_load(job_id)
+
+
+def _cleanup_old_jobs(ttl_seconds: int = 3600) -> None:
+    """
+    Best-effort cleanup of old job files based on modification time.
+    This is safe across processes because we're only deleting files.
+    """
+    _ensure_job_store_dir()
+    now = time.time()
+    try:
+        for path in JOB_STORE_DIR.glob("*.json"):
+            try:
+                st = path.stat()
+            except FileNotFoundError:
+                continue
+            if now - st.st_mtime > ttl_seconds:
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+    except Exception:
+        # Cleanup is non-critical; ignore errors here.
+        pass
 
 
 # -----------------------------------------------------------------------------
@@ -764,112 +750,110 @@ def index():
     preloaded_spectra = []  # for rendering spectrum blocks from form data
     retrieval_data = None
 
-    if request.method == "POST":
-        formula = request.form.get("formula", "").strip()
-        adduct = request.form.get("adduct", "[M+H]+").strip()
+    return render_template(
+        "index.html",
+        results=results,
+        formula=formula,
+        adduct=adduct,
+        preloaded_spectra=preloaded_spectra,
+        retrieval_data=retrieval_data,
+    )
 
-        spectrum_texts = request.form.getlist("spectrum_text")
-        spectrum_nces = request.form.getlist("spectrum_nce")
-        spectrum_evs = request.form.getlist("spectrum_ev")
-        spectrum_nce_conts = request.form.getlist("spectrum_nce_cont")
-        spectrum_modes = request.form.getlist("spectrum_mode")              # "single" or "stepped"
-        spectrum_stepped_nces = request.form.getlist("spectrum_stepped_nces")  # e.g. "20,30,50" or ""
 
-        ignore_precursor = request.form.get("ignore_precursor") == "on"
-        apply_denoise = request.form.get("apply_denoise") == "on"
+@app.route("/upload_ms", methods=["POST"])
+def upload_ms():
+    """
+    Parse an uploaded .ms (SIRIUS format) file and return spectra as JSON
+    so the frontend can populate spectrum blocks.
+    """
+    file = request.files.get("ms_file")
+    if not file or file.filename == "":
+        return jsonify({"error": "No file uploaded"}), 400
 
-        ms_file = request.files.get("ms_file")
+    # Read file lines
+    raw = file.read().decode("utf-8", errors="ignore").splitlines()
+    meta, comp_ms = common.parse_spectra(raw)  # returns metadata, CompositeMassSpec
 
-        # -------------------------------------------------------------
-        # (A) Build preloaded_spectra from whatever the user submitted
-        #     so the blocks stay on the page after "Run retrieval".
-        # -------------------------------------------------------------
-        precursor_mz = None
-        if formula and adduct in common.ion2mass:
-            try:
-                precursor_mz = common.formula_mass(formula) + common.ion2mass[adduct]
-            except Exception:
-                precursor_mz = None
+    # Try to get parentmass (precursor m/z) from metadata
+    parentmass = None
+    if meta is not None and "parentmass" in meta:
+        try:
+            parentmass = float(meta["parentmass"])
+        except Exception:
+            parentmass = None
 
-        preloaded_spectra = []
+    spectra_payload = []
 
-        num_blocks = max(
-            len(spectrum_texts),
-            len(spectrum_nces),
-            len(spectrum_evs),
-            len(spectrum_nce_conts),
-            len(spectrum_modes),
-            len(spectrum_stepped_nces),
+    # comp_ms.ce_to_ms is a dict; iterating .items() exactly once
+    for ce_key, ms_obj in comp_ms.items():
+        # assume the labels are nce
+        if parentmass is not None:
+            ms_obj.nce_to_ev(parentmass)
+
+        # ms_obj.collision_energy has already been normalized to a float-like
+        ce_val = float(ms_obj.collision_energy)
+
+        spec = ms_obj.spec  # (N, 2) array of [m/z, intensity]
+        if spec is None or len(spec) == 0:
+            continue
+
+        spec_text = "\n".join(f"{mz:.4f} {inten:.4f}" for mz, inten in spec)
+
+        # Derive NCE directly from the collision-energy label (ce_key),
+        # which we assume is given in NCE (%). This avoids converting eV
+        # back to NCE and keeps NCE->eV as the single source of truth.
+        nce_guess = None
+        nce_cont = None
+        try:
+            nce_cont = float(ce_key)
+            # Snap to {10, 20, 30, 40, 50}
+            nce_guess = int(round(nce_cont / 10.0) * 10)
+            nce_guess = max(10, min(50, nce_guess))
+        except Exception:
+            nce_guess = None
+            nce_cont = None
+
+        spectra_payload.append(
+            {
+                "collision_energy": ce_val,   # eV
+                "spectrum_text": spec_text,   # "mz intensity" lines
+                "nce_guess": nce_guess,       # bucketed NCE (may be None)
+                "nce_cont": nce_cont,         # estimated NCE (may be None)
+            }
         )
 
-        for i in range(num_blocks):
-            spec_text = (spectrum_texts[i] if i < len(spectrum_texts) else "").strip()
-            if not spec_text:
-                continue
+    return jsonify({"spectra": spectra_payload})
 
-            nce_str = (spectrum_nces[i] if i < len(spectrum_nces) else "").strip()
-            ev_str = (spectrum_evs[i] if i < len(spectrum_evs) else "").strip()
-            nce_cont_str = (spectrum_nce_conts[i] if i < len(spectrum_nce_conts) else "").strip()
 
-            # dropdown bucket (for UI)
-            try:
-                nce_guess = int(round(float(nce_str)))
-            except ValueError:
-                nce_guess = 30
+@app.route("/api/retrieve_start", methods=["POST"])
+def api_retrieve_start():
+    _cleanup_old_jobs()
 
-            # exact NCE (from hidden) if available
-            nce_cont = None
-            if nce_cont_str:
-                try:
-                    nce_cont = float(nce_cont_str)
-                except ValueError:
-                    nce_cont = None
+    # Create job
+    job_id = uuid.uuid4().hex
+    _job_create(job_id, status="queued", message="Queued")
 
-            # exact eV (from hidden) if available
-            ev_val = None
-            if ev_str:
-                try:
-                    ev_val = float(ev_str)
-                except ValueError:
-                    ev_val = None
+    # Capture the request payload (we will re-use your existing parsing logic)
+    # Use request.form and request.files similarly to your current index() POST handler
+    form_data = request.form.to_dict(flat=False)
 
-            # fallback: if ev_val missing but we have nce_cont, recompute
-            if ev_val is None and precursor_mz is not None:
-                try:
-                    base_nce = nce_cont if nce_cont is not None else float(nce_str)
-                    ev_val = float(common.nce_to_ev(base_nce, precursor_mz))
-                except Exception:
-                    ev_val = None
-
-            # We intentionally do NOT recompute NCE from eV here.
-            # If a continuous NCE value is available (e.g. from .ms upload),
-            # it is passed through via the hidden field. Otherwise, NCE
-            # remains unknown and we only display the bucketed dropdown.
-
-            # acquisition mode: "single" or "stepped"
-            mode = (spectrum_modes[i] if i < len(spectrum_modes) else "single").strip() or "single"
-
-            stepped_nces_str = (
-                spectrum_stepped_nces[i] if i < len(spectrum_stepped_nces) else ""
-            )
-            stepped_nces_str = stepped_nces_str.strip()
-
-            preloaded_spectra.append(
-                {
-                    "nce_guess": nce_guess,
-                    "ev": ev_val,
-                    "text": spec_text,
-                    "nce_cont": nce_cont,
-                    "mode": mode,
-                    "stepped_nces": stepped_nces_str,
-                }
-            )
-
-        # -------------------------------------------------------------
-        # (B) Retrieval logic (unchanged, except it now reuses the same
-        #     spectrum_texts / spectrum_nces that we just saved above).
-        # -------------------------------------------------------------
+    def worker():
         try:
+            _job_set(job_id, status="running", message="Starting")
+
+            # Reconstruct key values from form_data
+            formula = (form_data.get("formula", [""])[0] or "").strip()
+            adduct = (form_data.get("adduct", ["[M+H]+"])[0] or "[M+H]+").strip()
+            precursor_mz = None
+
+            spectrum_texts = [s for s in form_data.get("spectrum_text", [])]
+            spectrum_nces = [s for s in form_data.get("spectrum_nce", [])]
+            spectrum_modes = [s for s in form_data.get("spectrum_mode", [])]
+            spectrum_stepped_nces = [s for s in form_data.get("spectrum_stepped_nces", [])]
+
+            ignore_precursor = "ignore_precursor" in form_data
+            apply_denoise = "apply_denoise" in form_data
+
             if not formula:
                 raise ValueError("Chemical formula is required.")
 
@@ -893,10 +877,6 @@ def index():
                 for i, (txt, mode) in enumerate(zip(spectrum_texts, spectrum_modes))
                 if txt.strip() and mode.strip() == "stepped"
             ]
-
-            stepped_mode = False
-            stepped_ces = None
-            user_specs = None
 
             if stepped_indices:
                 # For simplicity, require a single stepped spectrum block
@@ -992,125 +972,112 @@ def index():
                     "No valid user spectra were provided (neither pasted nor from .ms file)."
                 )
 
-            results = retrieve_candidates(
+            def pcb(key, pct, msg):
+                _job_update_progress(job_id, key, pct, msg)
+
+            hits = retrieve_candidates(
                 formula=formula,
                 adduct=adduct,
                 user_specs=user_specs,
                 ignore_precursor=ignore_precursor,
                 apply_denoise=apply_denoise,
+                top_k=50,
                 stepped_mode=stepped_mode,
                 stepped_ces=stepped_ces,
+                progress_cb=pcb,
             )
 
-            # Build a JSON-friendly snapshot of everything needed for mirror plots.
-            # This is per-request state that will be sent to the frontend, so the
-            # backend does NOT need to reload .mgf or re-process the experimental
-            # spectra.
-            if results:
-                exp_spectra_payload = serialize_user_specs_for_frontend(
-                    user_specs=user_specs,
-                    stepped_mode=stepped_mode,
-                )
+            # Build retrieval_data for mirror plots
+            exp_payload = serialize_user_specs_for_frontend(user_specs, stepped_mode=stepped_mode)
+            retrieval_data = {
+                "exp_spectra": exp_payload,
+                "hits": hits,
+                "stepped_mode": stepped_mode,
+                "warning_msg": None,
+            }
 
-                retrieval_data = {
-                    "formula": formula,
-                    "adduct": adduct,
-                    "stepped_mode": bool(stepped_mode),
-                    "exp_spectra": exp_spectra_payload,
-                    "hits": [
-                        {
-                            "formula": r.get("formula", ""),
-                            "adduct": r.get("adduct", ""),
-                            "smiles": r.get("smiles", ""),
-                            "inchikey": r.get("inchikey", ""),
-                            "pred_spectra": r.get("pred_spectra", []),
-                        }
-                        for r in results
-                    ],
-                }
+            # Also store enough to re-render input blocks (preloaded_spectra)
+            spectrum_evs = form_data.get("spectrum_ev", [])
+            spectrum_nce_conts = form_data.get("spectrum_nce_cont", [])
 
-            if not results:
-                flash("No candidates found with matching collision energies.", "warning")
+            if stepped_mode:
+                kept_indices = [i for i, m in enumerate(spectrum_modes) if m == 'stepped']
+                if len(kept_indices) > 1:
+                    kept_indices = [kept_indices[0]]
+                if len(kept_indices) != len(spectrum_modes):
+                    retrieval_data["warning_msg"] = "Redundant single-collision-energy spectra have been ignored."
+            else:
+                kept_indices = [i for i, m in enumerate(spectrum_modes) if m != 'stepped']
 
-        except FileNotFoundError as e:
-            flash(str(e), "danger")
+            preloaded_spectra = build_preloaded_spectra_from_form_lists(
+                [spectrum_texts[i] for i in kept_indices],
+                [spectrum_nces[i] for i in kept_indices],
+                [spectrum_evs[i] for i in kept_indices],
+                [spectrum_nce_conts[i] for i in kept_indices],
+                [spectrum_modes[i] for i in kept_indices],
+                [spectrum_stepped_nces[i] for i in kept_indices],
+            )
+
+            ctx = {
+                "results": hits,
+                "formula": formula,
+                "adduct": adduct,
+                "preloaded_spectra": preloaded_spectra,
+                "retrieval_data": retrieval_data,
+            }
+
+            _job_set(job_id, status="done", message="Done", result_context=ctx)
+
         except Exception as e:
-            flash(f"Error during retrieval: {e}", "danger")
+            _job_set(job_id, status="error", message="Error", error=str(e))
+
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/api/retrieve_progress/<job_id>", methods=["GET"])
+def api_retrieve_progress(job_id: str):
+    js = _job_get(job_id)
+    if not js:
+        return jsonify({"error": "job_not_found"}), 404
+    return jsonify({
+        "status": js.status,
+        "message": js.message,
+        "progress": js.progress,
+        "error": js.error,
+    })
+
+
+@app.route("/result/<job_id>", methods=["GET"])
+def retrieval_result(job_id: str):
+    js = _job_get(job_id)
+    if not js:
+        flash("Result not found (job expired). Please run retrieval again.", "warning")
+        return redirect(url_for("index"))
+
+    if js.status == "error":
+        flash(f"Retrieval failed: {js.error}", "danger")
+        return redirect(url_for("index"))
+
+    if js.status != "done" or not js.result_context:
+        flash("Retrieval is still running. Please wait.", "warning")
+        return redirect(url_for("index"))
+
+    ctx = js.result_context
+
+    if 'warning_msg' in ctx["retrieval_data"] and ctx["retrieval_data"]['warning_msg']:
+        flash(ctx["retrieval_data"]['warning_msg'], "warning")
 
     return render_template(
         "index.html",
-        results=results,
-        formula=formula,
-        adduct=adduct,
-        preloaded_spectra=preloaded_spectra,
-        retrieval_data=retrieval_data,
+        results=ctx["results"],
+        formula=ctx["formula"],
+        adduct=ctx["adduct"],
+        preloaded_spectra=ctx["preloaded_spectra"],
+        retrieval_data=ctx["retrieval_data"],
     )
-
-
-@app.route("/upload_ms", methods=["POST"])
-def upload_ms():
-    """
-    Parse an uploaded .ms (SIRIUS format) file and return spectra as JSON
-    so the frontend can populate spectrum blocks.
-    """
-    file = request.files.get("ms_file")
-    if not file or file.filename == "":
-        return jsonify({"error": "No file uploaded"}), 400
-
-    # Read file lines
-    raw = file.read().decode("utf-8", errors="ignore").splitlines()
-    meta, comp_ms = common.parse_spectra(raw)  # returns metadata, CompositeMassSpec
-
-    # Try to get parentmass (precursor m/z) from metadata
-    parentmass = None
-    if meta is not None and "parentmass" in meta:
-        try:
-            parentmass = float(meta["parentmass"])
-        except Exception:
-            parentmass = None
-
-    spectra_payload = []
-
-    # comp_ms.ce_to_ms is a dict; iterating .items() exactly once
-    for ce_key, ms_obj in comp_ms.items():
-        # assume the labels are nce
-        if parentmass is not None:
-            ms_obj.nce_to_ev(parentmass)
-
-        # ms_obj.collision_energy has already been normalized to a float-like
-        ce_val = float(ms_obj.collision_energy)
-
-        spec = ms_obj.spec  # (N, 2) array of [m/z, intensity]
-        if spec is None or len(spec) == 0:
-            continue
-
-        spec_text = "\n".join(f"{mz:.4f} {inten:.4f}" for mz, inten in spec)
-
-        # Derive NCE directly from the collision-energy label (ce_key),
-        # which we assume is given in NCE (%). This avoids converting eV
-        # back to NCE and keeps NCE->eV as the single source of truth.
-        nce_guess = None
-        nce_cont = None
-        try:
-            nce_cont = float(ce_key)
-            # Snap to {10, 20, 30, 40, 50}
-            nce_guess = int(round(nce_cont / 10.0) * 10)
-            nce_guess = max(10, min(50, nce_guess))
-        except Exception:
-            nce_guess = None
-            nce_cont = None
-
-        spectra_payload.append(
-            {
-                "collision_energy": ce_val,   # eV
-                "spectrum_text": spec_text,   # "mz intensity" lines
-                "nce_guess": nce_guess,       # bucketed NCE (may be None)
-                "nce_cont": nce_cont,         # estimated NCE (may be None)
-            }
-        )
-
-    return jsonify({"spectra": spectra_payload})
-
 
 
 @app.route("/download_mgf")
@@ -1212,4 +1179,4 @@ def fragment_svg():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    app.run(host="0.0.0.0", port=5000, debug=True)
