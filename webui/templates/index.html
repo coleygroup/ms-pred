@@ -5,6 +5,8 @@
     <title>ICEBERG Spectrum Retrieval</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
 
+    <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+
     <style>
         body {
             font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -296,6 +298,33 @@
         .progress-fill{
             height:100%; background:#2563eb; border-radius:999px; transition:width 120ms linear;
             width:0%;
+        }
+        /* --- ICEBERG model description block --- */
+        .iceberg-desc {
+            margin-top: 1rem;
+            padding-top: 1rem;
+            border-top: 1px solid #e5e7eb;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+        .iceberg-desc img {
+            width: 950px;
+            max-width: 100%;
+            height: auto;
+            align-self: center;
+            padding: 0.5rem;
+        }
+        .iceberg-desc h3 {
+            margin: 0;
+            font-size: 0.95rem;
+            color: #6b7280;
+        }
+        .iceberg-desc p {
+            margin: 0.35rem 0 0;
+            font-size: 0.85rem;
+            line-height: 1.35;
+            color: #6b7280;
         }
     </style>
 
@@ -2513,7 +2542,7 @@
 <header>
     <div class="header-inner">
         <h1 class="header-title">ICEBERG Spectrum Retrieval (PubChem Atlas)</h1>
-        Under development. Please report any issues to runzhong@mit.edu
+        Under development. URL might change in the future. Please report any issues to runzhong@mit.edu
     </div>
 </header>
 
@@ -2889,6 +2918,17 @@
                     https://github.com/coleygroup/ms-pred
                 </a>
             </p>
+        </div>
+        <div class="iceberg-desc">
+            <div>
+                <h3>About ICEBERG</h3>
+                <p>
+                    ICEBERG is a neural network model that predicts mass spectra from molecular structures.
+                    It can be used to elucidate unknown structures given mass spec.
+                    </p>
+                <img src="{{ url_for('static', filename='iceberg_illustration.svg') }}"
+               alt="ICEBERG model illustration">
+            </div>
         </div>
         <div class="footer-bottom">
             <a href="https://coley.mit.edu/" target="_blank" rel="noopener noreferrer">
