@@ -17,7 +17,7 @@ from ms_pred.graphormer.graphormer_graph_encoder import GraphormerGraphEncoder
 import torch.nn.functional as F
 import copy
 import ms_pred.common as common
-
+from LinSATNet import linsat_layer, init_constraints
 import math
 
 class FragOnlyModel(pl.LightningModule):
@@ -39,7 +39,10 @@ class FragOnlyModel(pl.LightningModule):
         embed_adduct: bool = False,
         embed_collision: bool = False,
         embed_elem_group: bool = False,
-        mlp_layers: int = 1
+        mlp_layers: int = 1,
+        sk_tau: float = 0.05,
+        linsat_tau: float = 0.01,
+        gamma: float = 2,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -57,6 +60,9 @@ class FragOnlyModel(pl.LightningModule):
         self.embed_collision = embed_collision
         self.embed_elem_group = embed_elem_group
         self.mlp_layers = mlp_layers
+        self.sk_tau = sk_tau
+        self.linsat_tau = linsat_tau
+        self.gamma = gamma
 
         adduct_shift = 0
         if self.embed_adduct:
@@ -130,22 +136,151 @@ class FragOnlyModel(pl.LightningModule):
         #     nhead=self.nhead,
         #     num_layers=3
         # )
-        self.fragment_attention = nn_utils.SlotAttention(
+        self.fragment_attention = nn_utils.MultiHeadSlotAttention(
             dim=hidden_size,
-            num_slots=max_frags-1,
-            iters=3
+            num_slots=max_frags,
+            iters=3,
+            hidden_dim=hidden_size,
+            heads=4,
+            dim_head=hidden_size
         )
-
+        
         self.frag_card_mapper = nn.Linear(hidden_size, fragmentation.FRAGMENT_ENGINE_PARAMS['max_tree_depth']+1)
-
+        # self.frag_logit_mapper = nn_utils.MultiHeadCrossAttentionLogits(self.hidden_size, self.nhead)
         self.softmax = nn.Softmax(dim=-1)
-        self.KLDiv = nn.KLDivLoss(reduction='batchmean')
+        self.sigmoid = nn.Sigmoid()
+        self.bce_loss = nn.BCELoss()
     
-    def cross_entropy(self, preds, targets):
+    def cross_entropy(self, preds, targets, weights=None):
         log_preds = torch.log(preds + 1e-9)
-        cross_entropy = -torch.sum(targets * log_preds, dim=-1)
+        loss = targets * log_preds
+        if weights is not None:
+            loss *= weights
+        cross_entropy = -torch.sum(loss, dim=-1)
         return cross_entropy
+    
+    def node_ranking_loss_simple(self, breakpoint_predicted, breakpoint_targs, num_atoms):
+        return torch.sum((breakpoint_predicted.unsqueeze(2) * (1-breakpoint_targs).unsqueeze(1)) - (breakpoint_predicted.unsqueeze(2) * breakpoint_targs.unsqueeze(1)), dim=-1)
 
+
+    def node_ranking_loss(self, breakpoint_predicted, breakpoint_targs, num_atoms):
+        """
+        Args:
+            breakpoint_predicted: [B, N, N_atom] - predicted probabilities for each atom (N: num_patterns)
+            breakpoint_targs: [B, M, N_atom] - binary mask of true breakpoints (M: num_targets)
+            num_atoms: [B] - number of atoms per molecule
+        Returns:
+            target_sum, non_target_sum: [B, N, M] - sum of prob for target and non-target atoms in top-k
+        """
+        B, N, N_atom = breakpoint_predicted.shape
+        _, M, _ = breakpoint_targs.shape
+        device = breakpoint_predicted.device
+        num_atoms_mask = (torch.arange(N_atom, device=device).unsqueeze(0) < num_atoms.unsqueeze(1))[:, None, :]  # [B, 1, N_atom]
+        breakpoint_predicted = breakpoint_predicted.masked_fill(~num_atoms_mask, 1e9)
+
+        # Compute Sinkhorn probability matrix as in your original code
+        sorted_breakpoint_predicted = torch.sort(breakpoint_predicted, dim=-1)
+        ranking_dist = torch.abs(
+            breakpoint_predicted.unsqueeze(-2) - sorted_breakpoint_predicted.values.unsqueeze(-1)
+        )  # [B, N, N_atom, N_atom]
+        ranking_dist = ranking_dist.reshape(B * N, N_atom, N_atom)
+        prob = pygm.sinkhorn(
+            -ranking_dist,
+            n1=torch.repeat_interleave(num_atoms, repeats=N),
+            n2=torch.repeat_interleave(num_atoms, repeats=N),
+            tau=self.sk_tau,
+            backend='pytorch',
+            max_iter=50,
+        )
+        prob = prob.reshape(B, N, N_atom, N_atom)
+
+        # Mask padded atoms
+        atom_mask = torch.arange(N_atom, device=device).unsqueeze(0) < num_atoms.unsqueeze(1)  # [B, N_atom]
+        atom_mask_prob = atom_mask[:, None, :, None] & atom_mask[:, None, None, :]  # [B, 1, N_atom, N_atom]
+        prob = prob * atom_mask_prob  # zero out padded atoms
+
+        # For each target pattern, get nonzero (target atoms) and zero (non-target atoms) indices
+        target_mask = breakpoint_targs.bool()  # [B, M, N_atom]
+        non_target_mask = ~target_mask  # [B, M, N_atom]
+
+        # For each (b, n), get k = number of nonzero entries in target_mask
+        k = target_mask.sum(dim=-1)  # [B, M]
+        k_expand = k[:, None, :]  # [B, 1, M]
+        max_k = k.max().item()
+        arange_k = torch.arange(N_atom, device=device).view(1, 1, 1, N_atom)  # [1, 1, 1, N_atom]
+        topk_mask = arange_k < k_expand.unsqueeze(-1)  # [B, 1, M, N_atom]
+
+        # Expand for broadcasting
+        prob_for_targets = prob.unsqueeze(2).expand(B, N, M, N_atom, N_atom)  # [B, N, M, N_atom, N_atom]
+        target_mask_expand = target_mask[:, None, :, :].expand(B, N, M, N_atom)  # [B, N, M, N_atom]
+        non_target_mask_expand = non_target_mask[:, None, :, :].expand(B, N, M, N_atom)  # [B, N, M, N_atom]
+        topk_mask_expand = topk_mask.expand(B, N, M, N_atom)  # [B, N, M, N_atom]
+
+        # For target atoms: sum over i (target atoms), sum over j (top-k)
+        target_atom_mask = target_mask_expand.unsqueeze(-1)  # [B, N, M, N_atom, 1]
+        topk_col_mask = topk_mask_expand.unsqueeze(-2)  # [B, N, M, 1, N_atom]
+        mask_targets = target_atom_mask & topk_col_mask  # [B, N, M, N_atom, N_atom]
+        target_sum = (prob_for_targets * mask_targets.float()).sum(dim=(-2, -1))  # [B, N, M]
+
+        # For non-target atoms: sum over i (non-target atoms), sum over j (top-k)
+        non_target_atom_mask = non_target_mask_expand.unsqueeze(-1)  # [B, N, M, N_atom, 1]
+        mask_non_targets = non_target_atom_mask & topk_col_mask  # [B, N, M, N_atom, N_atom]
+        non_target_sum = (prob_for_targets * mask_non_targets.float()).sum(dim=(-2, -1))  # [B, N, M]
+
+        return target_sum, non_target_sum
+    
+    
+    def node_ranking(self, breakpoint_logit, num_atoms):
+        B, N, N_atom = breakpoint_logit.shape
+        n_atom_mask = torch.arange(N_atom, device=breakpoint_logit.device).unsqueeze(0) >= num_atoms.unsqueeze(1)  # [B, N_atom]
+        dummy_val = -1e9
+        breakpoint_logit = breakpoint_logit.masked_fill(n_atom_mask.unsqueeze(1), dummy_val)
+        breakpoint_logit = breakpoint_logit.reshape(B * N, N_atom)
+        E = torch.ones((1, N_atom), device=breakpoint_logit.device)
+        f_1 = torch.ones((1,), device=breakpoint_logit.device)
+        f_2 = torch.full_like(f_1, 2)
+        f_3 = torch.full_like(f_1, 3)
+        output_logit_1 = linsat_layer(breakpoint_logit, E=E, f=f_1, no_warning=True, max_iter=100, tau=self.linsat_tau).reshape(B, N, N_atom)
+        output_logit_2 = linsat_layer(breakpoint_logit, E=E, f=f_2, no_warning=True, max_iter=100, tau=self.linsat_tau).reshape(B, N, N_atom)
+        output_logit_3 = linsat_layer(breakpoint_logit, E=E, f=f_3, no_warning=True, max_iter=100, tau=self.linsat_tau).reshape(B, N, N_atom)
+        logit_0 = torch.zeros_like(output_logit_1)
+        logits = torch.stack([logit_0, output_logit_1, output_logit_2, output_logit_3], dim=-1)
+        # breakpoint_preds = torch.sum(breakpoint_card.unsqueeze(2) * logits, dim=-1)
+        # loss = torch.sum((breakpoint_preds.unsqueeze(2) - breakpoint_targs.unsqueeze(1)) ** 2, dim=-1)
+        # return {"loss":loss, "preds":breakpoint_preds}
+        return logits
+
+    def breakpoint_inference(self, breakpoint_logit, breakpoint_card, num_atoms, debug=False):
+        """
+        Returns a binary tensor of shape [B, N, N_atom] with k positive entries per last axis,
+        where k is the predicted cardinality for each pattern (from breakpoint_card).
+        Batchified implementation.
+        """
+        logits = self.node_ranking(breakpoint_logit, num_atoms)  # [B, N, N_atom, 4]
+        B, N, N_atom, _ = logits.shape
+        k = torch.argmax(breakpoint_card, dim=-1)  # [B, N]
+        breakpoint_preds = torch.gather(logits, index=k[:, :, None, None].expand(B, N, N_atom, 1), dim=-1).squeeze(-1)  # [B, N, N_atom]
+        # Flatten for batch processing
+        flat_preds = breakpoint_preds.reshape(-1, N_atom)  # [(B*N), N_atom]
+        flat_k = k.reshape(-1)  # [(B*N)]
+        patterns = torch.zeros_like(flat_preds, dtype=torch.bool)  # [(B*N), N_atom]
+        if flat_k.max().item() > 0:
+            topk_vals, topk_idx = torch.topk(flat_preds, k=flat_k.max().item(), dim=-1)
+            arange_k = torch.arange(flat_k.max().item(), device=breakpoint_preds.device).unsqueeze(0)  # [1, max_k]
+            valid_mask = arange_k < flat_k.unsqueeze(1)  # [(B*N), max_k]
+            batch_idx = torch.arange(flat_preds.size(0), device=breakpoint_preds.device).unsqueeze(1).expand(-1, flat_k.max().item())  # [(B*N), max_k]
+            patterns[batch_idx[valid_mask], topk_idx[valid_mask]] = True
+        out = patterns.view(B, N, N_atom)
+        return out
+    
+    def gumbel_topk_from_soft(self, x, k):
+        g = -torch.log(-torch.log(torch.rand_like(x)))
+        y = x + g
+        idx = torch.topk(y, k).indices
+
+        hard = torch.zeros_like(x)
+        hard.scatter_(0, idx, 1.0)
+        return hard
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
         scheduler = nn_utils.build_lr_scheduler(
@@ -229,18 +364,14 @@ class FragOnlyModel(pl.LightningModule):
 
         # Prepare fragment query tokens and run decoder
         node_mask = torch.arange(max_nodes, device=device).unsqueeze(0) >= num_atoms.unsqueeze(1)  # [B,max_nodes]
-        frag_mask = F.pad(node_mask, (1, 0, 0, 0), mode="constant", value=0)
+        frag_mask = F.pad(node_mask, (1, 0, 0, 0), mode="constant", value=0).bool()
 
         frag_vec = self.fragment_attention(final_layer_output.transpose(0, 1), key_padding_mask=frag_mask)
-        frag_logits = torch.bmm(frag_vec, node_embeddings.transpose(1, 2))  # [B, max_frags-1, max_nodes]
-        frag_card = self.softmax(self.frag_card_mapper(frag_vec))
-        # frag_card = F.pad(frag_card, (1, 0, 0, 0, 0, 0), mode="constant", value=0)
-
-        atom_mask = torch.arange(max_nodes, device=device).unsqueeze(0) >= num_atoms.unsqueeze(1)  # [B,max_nodes]
-        frag_logits = torch.bmm(frag_vec, node_embeddings.transpose(1, 2))# [B, max_frags-1, max_nodes]
-        frag_logits = frag_logits.masked_fill(atom_mask.unsqueeze(1), -99999)
-        frag_predicted = self.softmax(frag_logits)
-        return {"frag_predicted": frag_predicted, "frag_card": frag_card}
+        frag_card = self.softmax(self.frag_card_mapper(frag_vec))  # [B, max_frags, 4]
+        # frag_logits = self.frag_logit_mapper(frag_vec, node_embeddings, node_mask)
+        frag_logits = torch.bmm(frag_vec, node_embeddings.transpose(1, 2))# [B, max_frags, max_nodes]
+        
+        return {"frag_predicted": frag_logits, "frag_card": frag_card}
     
     def boundary_nodes(self, A: torch.Tensor, subgraph_mask: torch.Tensor) -> torch.Tensor:
         """
@@ -269,11 +400,11 @@ class FragOnlyModel(pl.LightningModule):
         max_boundary_nodes = int(boundary_mask.sum(dim=-1).max().item())
         assert max_boundary_nodes <= 3, max_boundary_nodes
         batch_num = torch.arange(B, device=A.device, dtype=torch.float32)[:, None, None].expand(B, M, 1)
-        boundary_mask_batch_num = torch.cat([boundary_mask, batch_num], dim=-1).reshape(B*M, -1)
+        boundary_mask_batch_num = torch.cat([batch_num, boundary_mask], dim=-1).reshape(B*M, -1)
         boundary_mask_batch_num_unique = torch.unique(boundary_mask_batch_num, dim=0, sorted=True)
-        batch_num_unique = torch.bincount(boundary_mask_batch_num_unique[:, -1].to(torch.int64), minlength=B)
+        batch_num_unique = torch.bincount(boundary_mask_batch_num_unique[:, 0].to(torch.int64), minlength=B)
         boundary_mask = nn_utils.pad_packed_tensor(
-            boundary_mask_batch_num_unique[:, :-1], batch_num_unique, 0
+            boundary_mask_batch_num_unique[:, 1:], batch_num_unique, 0
         )
         return {"boundary_mask": boundary_mask, "unique_boundary_patterns":batch_num_unique}
 
@@ -285,6 +416,7 @@ class FragOnlyModel(pl.LightningModule):
         num_frag_targs: torch.Tensor,
         num_atoms: torch.Tensor,
         adj_matrices: torch.Tensor = None,
+        debug=False,
     ) -> torch.Tensor:
         # frags_predicted: [B, max_frags, max_nodes]
         # frag_targs: packed [sum_frags, max_nodes], num_frag_targs: [B]
@@ -293,33 +425,62 @@ class FragOnlyModel(pl.LightningModule):
         # frag_targs_padded = nn_utils.pad_packed_tensor(
         #     frag_targs, num_frag_targs, False
         # )[:, :-1, :]  # [B, max_targs-1, max_nodes]
-        frag_targs_padded = nn_utils.pad_packed_tensor(
+        frag_targs_padded_original = nn_utils.pad_packed_tensor(
             frag_targs, num_frag_targs, False
         )[:, :, :]  # [B, max_targs-1, max_nodes]
-        boundary_info = self.boundary_nodes(adj_matrices, frag_targs_padded)
-        frag_targs_padded = boundary_info["boundary_mask"][:, 1:, :]
-        num_frag_targs = boundary_info["unique_boundary_patterns"]-1
-        num_frag_targs = torch.where(num_frag_targs > 0, num_frag_targs, torch.ones_like(num_frag_targs))
+        boundary_info = self.boundary_nodes(adj_matrices, frag_targs_padded_original)
+        frag_targs_padded = boundary_info["boundary_mask"]
+        num_frag_targs = boundary_info["unique_boundary_patterns"]
 
+        node_rank = self.node_ranking(frags_predicted, num_atoms)
         frag_cards_targs = F.one_hot(torch.sum(frag_targs_padded, dim=-1).long(), num_classes=fragmentation.FRAGMENT_ENGINE_PARAMS['max_tree_depth']+1)
-        per_pair_cards_cross_entropy = self.cross_entropy(frag_card_predicted.unsqueeze(1), frag_cards_targs.unsqueeze(2))
+        rank_paired = torch.sum(node_rank.unsqueeze(2) * frag_cards_targs[:, None, :, None, :], dim=(-1))
+        frag_targs_expanded = frag_targs_padded.unsqueeze(1).expand(rank_paired.shape)
+        rank_loss = torch.sum((rank_paired-frag_targs_expanded)**2, dim=-1)
+        # rank_loss = torch.sum(self.binary_focal_loss(rank_paired, frag_targs_expanded, num_atoms), dim=-1)
+
+
+        per_pair_cards_cross_entropy = self.cross_entropy(frag_card_predicted.unsqueeze(2), frag_cards_targs.unsqueeze(1))
+
         B, max_targs, _ = frag_targs_padded.shape
         
-        frag_targs_padded = F.normalize(frag_targs_padded.float(), p=1, dim=-1)
-
-        scores_exp = frags_predicted.unsqueeze(1).expand(B, max_targs, max_frags, max_nodes)
-        targs_exp = frag_targs_padded.unsqueeze(2).expand_as(scores_exp)
-        
-        per_pair_cross_entropy = self.cross_entropy(scores_exp, targs_exp)  # [B, max_targs, max_frags, max_nodes]
-        cost = (per_pair_cross_entropy+per_pair_cards_cross_entropy)
-        n2_cols = torch.full_like(num_frag_targs, max_frags)
+        cost = rank_loss+per_pair_cards_cross_entropy
         assign = pygm.hungarian(
-            -cost, backend="pytorch", n1=num_frag_targs, n2=n2_cols
+            -cost, backend="pytorch", n2=num_frag_targs
         )  # [B, max_targs, max_frags]
+        # assert False, (assign.shape, node_rank.shape, frag_cards_targs.shape)
+        node_rank_reshape = node_rank.reshape(B, max_frags, -1)
+        node_rank_assigned = torch.matmul(node_rank_reshape.transpose(1, 2), assign).transpose(1, 2)
+        node_rank_assigned = node_rank_assigned.reshape(B, max_targs, max_nodes, -1)
+        node_rank_assigned = torch.sum(node_rank_assigned*frag_cards_targs.unsqueeze(-2), dim=-1)
+        frag_cards_predicted = torch.matmul(frag_card_predicted.transpose(1, 2), assign).transpose(1, 2)
+        
+        # preds = torch.matmul(preds.transpose(1, 2), assign).transpose(1, 2)
+        
+        loss = torch.sum((node_rank_assigned-frag_targs_padded)**2, dim=-1)+self.cross_entropy(frag_cards_predicted, frag_cards_targs)
+        # loss = torch.sum(self.binary_focal_loss(node_rank_assigned, frag_targs_padded, num_atoms), dim=-1)+self.cross_entropy(frag_cards_predicted, frag_cards_targs)
+        frag_targs_mask = num_frag_targs[:, None] <= torch.arange(max_targs, device=loss.device)[None, :]
 
-        loss_assigned = (cost * assign).sum(dim=(1, 2))/(num_frag_targs*num_atoms)
-        loss_assigned = torch.where(boundary_info["unique_boundary_patterns"] > 1, loss_assigned, torch.zeros_like(loss_assigned))
-        return loss_assigned.mean()
+        loss = loss.masked_fill(frag_targs_mask, 0)
+        return torch.mean(torch.sum(loss, dim=-1)/num_frag_targs)
+
+    def binary_focal_loss(self, pred, targ, num_atoms):
+        if len(pred.shape) == 3:
+            card_targ = torch.sum(targ, dim=-1)
+        else:
+            card_targ = torch.sum(targ[:, 0, :, :], dim=-1)
+        alpha = 1 - card_targ/num_atoms[:, None]
+        if len(pred.shape) >= 3:
+            alpha = alpha.unsqueeze(1)
+        if len(pred.shape) == 4:
+            alpha = alpha.unsqueeze(-1)
+        bce_loss = self.bce_loss(pred, targ)
+        p_t = pred * targ + (1-pred)*(1-targ)
+        focal_weight = (1 - p_t) ** self.gamma
+        loss = focal_weight * bce_loss
+        return loss
+
+
 
     def breakpoints_to_patterns(self, mask, A, num_nodes=None):
         B, M, N = mask.shape
@@ -355,9 +516,9 @@ class FragOnlyModel(pl.LightningModule):
             unique_rows[:, 1:], pattern_counts, 0
         )  # (B, max_patterns, N)
         
-        return padded_pattern[:, 1:, :], pattern_counts
-    
-    def pattern_match_recall(self, pred_mask, targ_mask, num_targs):
+        return padded_pattern, pattern_counts
+
+    def pattern_match_recall(self, pred_mask, targ_mask, num_targs, patterns_count=None):
         """
         Compute recall using Hungarian matching between predicted and target binary patterns.
 
@@ -379,11 +540,13 @@ class FragOnlyModel(pl.LightningModule):
         sim = (pred_exp == targ_exp).all(dim=-1).float()  # (B, T, P)
         valid_targs = torch.arange(T, device=device).unsqueeze(0) < num_targs.unsqueeze(1)  # (B, T)
         sim = sim * valid_targs.unsqueeze(2).float()  # mask out invalid targets
+        valid_patterns = torch.arange(P, device=device).unsqueeze(0) < patterns_count.unsqueeze(1)  # (B, P)
+        sim = sim * valid_patterns.unsqueeze(1).float()
 
 
         # Use Hungarian to find optimal one-to-one matching that maximizes total exact matches
         # pygm.hungarian expects a score matrix (higher better). Provide n1=T (targets), n2=P (preds)
-        assign = pygm.hungarian(sim, backend="pytorch", n1=torch.full((B,), T, dtype=torch.long, device=device), n2=torch.full((B,), P, dtype=torch.long, device=device))
+        assign = pygm.hungarian(sim, backend="pytorch", n1=num_targs, n2=patterns_count)
         # assign is shape (B, T, P) with 1s for selected assignments
         matched_score = sim * assign
         matched_targets = (matched_score.sum(dim=2) > 0).float()  # (B, T)
@@ -427,13 +590,13 @@ class FragOnlyModel(pl.LightningModule):
             step *= 2
 
         # add self-reachability
-        eye = torch.eye(N, dtype=torch.bool, device=device).unsqueeze(0)
-        R = R | eye
+        # eye = torch.eye(N, dtype=torch.bool, device=device).unsqueeze(0)
+        # R = R | eye
 
-        if mask is not None:
-            row_mask = mask.unsqueeze(-1)
-            col_mask = mask.unsqueeze(-2)
-            A = A & ~row_mask & ~col_mask  # zero edges touching removed nodes
+        # if mask is not None:
+        #     row_mask = mask.unsqueeze(-1)
+        #     col_mask = mask.unsqueeze(-2)
+        #     A = A & ~row_mask & ~col_mask  # zero edges touching removed nodes
 
         if num_nodes is not None:
             # mask out rows/cols beyond num_nodes
@@ -453,21 +616,23 @@ class FragOnlyModel(pl.LightningModule):
         loss = self._frag_loss(
             out["frag_predicted"], out["frag_card"], batch["frag_targs"], batch["num_frag_targs"], batch["num_atoms"], batch["adj_matrices"],
         )
+        
         self.log(
             "train_loss", loss.item(), prog_bar=True, on_epoch=True, batch_size=len(batch["names"])
         )
         return {"loss": loss}
+
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int):
         out = self.forward(batch)
         loss = self._frag_loss(
             out["frag_predicted"], out["frag_card"], batch["frag_targs"], batch["num_frag_targs"], batch["num_atoms"], batch["adj_matrices"],
         )
-        breakpoints = self.restore_breakpoint_patterns(out["frag_predicted"], out["frag_card"])
+        breakpoints = self.breakpoint_inference(out["frag_predicted"], out["frag_card"], batch["num_atoms"])
         patterns, patterns_count = self.breakpoints_to_patterns(breakpoints, batch["adj_matrices"], batch["num_atoms"])
         
         frag_targs_padded = nn_utils.pad_packed_tensor(batch["frag_targs"], batch["num_frag_targs"], 0)
-        recall = self.pattern_match_recall(patterns, frag_targs_padded, batch["num_frag_targs"])
+        recall = self.pattern_match_recall(patterns, frag_targs_padded, batch["num_frag_targs"], patterns_count = patterns_count)
         self.log(
             "val_loss", loss.item(), prog_bar=True, on_epoch=True, batch_size=len(batch["names"])
         )
@@ -480,13 +645,15 @@ class FragOnlyModel(pl.LightningModule):
     def test_step(self, batch: Dict[str, Any], batch_idx: int):
         out = self.forward(batch)
         loss = self._frag_loss(
-            out["frag_predicted"], out["frag_card"], batch["frag_targs"], batch["num_frag_targs"], batch["num_atoms"], batch["adj_matrices"],
+            out["frag_predicted"], out["frag_card"], batch["frag_targs"], batch["num_frag_targs"], batch["num_atoms"], batch["adj_matrices"], debug=True
         )
-        breakpoints = self.restore_breakpoint_patterns(out["frag_predicted"], out["frag_card"])
-        patterns, patterns_count = self.breakpoints_to_patterns(breakpoints, batch["adj_matrices"], batch["num_atoms"])
-        patterns = F.pad(patterns, (0, 0, 1, 0, 0, 0), mode="constant", value=1)
+        breakpoints = self.breakpoint_inference(out["frag_predicted"], out["frag_card"], batch["num_atoms"], debug=True)
+
         frag_targs_padded = nn_utils.pad_packed_tensor(batch["frag_targs"], batch["num_frag_targs"], 0)
-        recall = self.pattern_match_recall(patterns, frag_targs_padded, batch["num_frag_targs"])
+        
+        patterns, patterns_count = self.breakpoints_to_patterns(breakpoints, batch["adj_matrices"], batch["num_atoms"])
+        frag_targs_padded = nn_utils.pad_packed_tensor(batch["frag_targs"], batch["num_frag_targs"], 0)
+        recall = self.pattern_match_recall(patterns, frag_targs_padded, batch["num_frag_targs"], patterns_count = patterns_count)
         self.log(
             "test_loss", loss.item(), on_epoch=True, batch_size=len(batch["names"])
         )
