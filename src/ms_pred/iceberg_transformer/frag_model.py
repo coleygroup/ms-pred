@@ -130,20 +130,21 @@ class FragOnlyModel(pl.LightningModule):
             raise ValueError(f"Unsupported root_encode: {root_encode}")
 
         # Fragment query tokens and decoder
-        # self.fragment_decoder = nn_utils.SlotDecoder(
-        #     hidden_dim=hidden_size,
-        #     num_slots=max_frags-1,
-        #     nhead=self.nhead,
-        #     num_layers=3
-        # )
-        self.fragment_attention = nn_utils.MultiHeadSlotAttention(
-            dim=hidden_size,
-            num_slots=max_frags,
-            iters=3,
+        self.fragment_decoder = nn_utils.SlotDecoder(
             hidden_dim=hidden_size,
-            heads=4,
-            dim_head=hidden_size
+            num_slots=max_frags,
+            nhead=self.nhead,
+            num_layers=3,
+            dropout=0.1
         )
+        # self.fragment_attention = nn_utils.MultiHeadSlotAttention(
+        #     dim=hidden_size,
+        #     num_slots=max_frags,
+        #     iters=3,
+        #     hidden_dim=hidden_size,
+        #     heads=4,
+        #     dim_head=hidden_size
+        # )
         
         self.frag_card_mapper = nn.Linear(hidden_size, fragmentation.FRAGMENT_ENGINE_PARAMS['max_tree_depth']+1)
         # self.frag_logit_mapper = nn_utils.MultiHeadCrossAttentionLogits(self.hidden_size, self.nhead)
@@ -240,9 +241,9 @@ class FragOnlyModel(pl.LightningModule):
         f_1 = torch.ones((1,), device=breakpoint_logit.device)
         f_2 = torch.full_like(f_1, 2)
         f_3 = torch.full_like(f_1, 3)
-        output_logit_1 = linsat_layer(breakpoint_logit, E=E, f=f_1, no_warning=True, max_iter=100, tau=self.linsat_tau).reshape(B, N, N_atom)
-        output_logit_2 = linsat_layer(breakpoint_logit, E=E, f=f_2, no_warning=True, max_iter=100, tau=self.linsat_tau).reshape(B, N, N_atom)
-        output_logit_3 = linsat_layer(breakpoint_logit, E=E, f=f_3, no_warning=True, max_iter=100, tau=self.linsat_tau).reshape(B, N, N_atom)
+        output_logit_1 = linsat_layer(breakpoint_logit, E=E, f=f_1, no_warning=True, max_iter=1, tau=self.linsat_tau).reshape(B, N, N_atom)
+        output_logit_2 = linsat_layer(breakpoint_logit, E=E, f=f_2, no_warning=True, max_iter=1, tau=self.linsat_tau).reshape(B, N, N_atom)
+        output_logit_3 = linsat_layer(breakpoint_logit, E=E, f=f_3, no_warning=True, max_iter=1, tau=self.linsat_tau).reshape(B, N, N_atom)
         logit_0 = torch.zeros_like(output_logit_1)
         logits = torch.stack([logit_0, output_logit_1, output_logit_2, output_logit_3], dim=-1)
         # breakpoint_preds = torch.sum(breakpoint_card.unsqueeze(2) * logits, dim=-1)
@@ -366,7 +367,7 @@ class FragOnlyModel(pl.LightningModule):
         node_mask = torch.arange(max_nodes, device=device).unsqueeze(0) >= num_atoms.unsqueeze(1)  # [B,max_nodes]
         frag_mask = F.pad(node_mask, (1, 0, 0, 0), mode="constant", value=0).bool()
 
-        frag_vec = self.fragment_attention(final_layer_output.transpose(0, 1), key_padding_mask=frag_mask)
+        frag_vec = self.fragment_decoder(root_tokens, node_embeddings, memory_key_padding_mask=frag_mask)
         frag_card = self.softmax(self.frag_card_mapper(frag_vec))  # [B, max_frags, 4]
         # frag_logits = self.frag_logit_mapper(frag_vec, node_embeddings, node_mask)
         frag_logits = torch.bmm(frag_vec, node_embeddings.transpose(1, 2))# [B, max_frags, max_nodes]
@@ -436,7 +437,11 @@ class FragOnlyModel(pl.LightningModule):
         frag_cards_targs = F.one_hot(torch.sum(frag_targs_padded, dim=-1).long(), num_classes=fragmentation.FRAGMENT_ENGINE_PARAMS['max_tree_depth']+1)
         rank_paired = torch.sum(node_rank.unsqueeze(2) * frag_cards_targs[:, None, :, None, :], dim=(-1))
         frag_targs_expanded = frag_targs_padded.unsqueeze(1).expand(rank_paired.shape)
-        rank_loss = torch.sum((rank_paired-frag_targs_expanded)**2, dim=-1)
+        rank_paired_normed = F.normalize(rank_paired, p=1, dim=-1)
+        frag_targs_expanded_normed = F.normalize(frag_targs_expanded, p=1, dim=-1)
+        # rank_loss = torch.sum((rank_paired-frag_targs_expanded)**2, dim=-1)
+        rank_loss = self.cross_entropy(rank_paired_normed, frag_targs_expanded_normed)
+
         # rank_loss = torch.sum(self.binary_focal_loss(rank_paired, frag_targs_expanded, num_atoms), dim=-1)
 
 
@@ -457,7 +462,9 @@ class FragOnlyModel(pl.LightningModule):
         
         # preds = torch.matmul(preds.transpose(1, 2), assign).transpose(1, 2)
         
-        loss = torch.sum((node_rank_assigned-frag_targs_padded)**2, dim=-1)+self.cross_entropy(frag_cards_predicted, frag_cards_targs)
+        node_rank_assigned_normed = F.normalize(node_rank_assigned, p=1, dim=-1)
+        frag_targs_padded_normed = F.normalize(frag_targs_padded, p=1, dim=-1)
+        loss = self.cross_entropy(node_rank_assigned_normed, frag_targs_padded_normed)+self.cross_entropy(frag_cards_predicted, frag_cards_targs)
         # loss = torch.sum(self.binary_focal_loss(node_rank_assigned, frag_targs_padded, num_atoms), dim=-1)+self.cross_entropy(frag_cards_predicted, frag_cards_targs)
         frag_targs_mask = num_frag_targs[:, None] <= torch.arange(max_targs, device=loss.device)[None, :]
 

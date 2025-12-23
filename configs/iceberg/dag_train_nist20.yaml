@@ -13,7 +13,7 @@ universal_args:
 
   seed: [1]
   num-workers: [16]
-  batch-size: [1]
+  batch-size: [32]
   max-epochs: [200]
 
   dataset-name: [nist20]

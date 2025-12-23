@@ -713,12 +713,14 @@ class SetTransformerEncoder(nn.Module):
         return feat
     
 class SlotDecoder(nn.Module):
-    def __init__(self, hidden_dim=256, num_slots=40, nhead=8, num_layers=3):
+    def __init__(self, hidden_dim=256, num_slots=40, nhead=8, num_layers=3, dropout=0.1):
         super().__init__()
         self.num_slots = num_slots
 
         # Learnable slot embeddings
         self.slots = nn.Parameter(torch.randn(num_slots, hidden_dim))
+        init.xavier_uniform_(self.slots)
+        self.dropout = dropout
 
         # Transformer decoder layers
         decoder_layer = nn.TransformerDecoderLayer(
@@ -726,7 +728,9 @@ class SlotDecoder(nn.Module):
             nhead=nhead,
             dim_feedforward=hidden_dim * 4,
             batch_first=True,
+            dropout=self.dropout
         )
+        self.hidden_dim=hidden_dim
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
 
     def forward(self, graph_tokens, node_embeddings, memory_key_padding_mask=None):
@@ -735,9 +739,8 @@ class SlotDecoder(nn.Module):
         node_embeddings: [B, N, d]
         """
         B, N, d = node_embeddings.size()
-        slots = self.slots.unsqueeze(0).expand(B, -1, -1)  # [B, K, d]
-
-        # Use both graph token and nodes as memory for decoder
+        slots = self.slots.unsqueeze(0).expand(B, self.num_slots, self.hidden_dim)
+        # # Use both graph token and nodes as memory for decoder
         memory = torch.cat([graph_tokens, node_embeddings], dim=1)  # [B, 1+N, d]
 
         out = self.decoder(tgt=slots, memory=memory, memory_key_padding_mask=memory_key_padding_mask)  # [B, K, d]

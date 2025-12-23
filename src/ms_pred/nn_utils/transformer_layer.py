@@ -11,6 +11,7 @@ from torch import Tensor
 from torch.nn import functional as F
 from torch.nn import Module, LayerNorm, Linear, Dropout, Parameter
 from torch.nn.init import xavier_uniform_, constant_
+import torch.nn as nn
 
 from torch.nn.modules.linear import NonDynamicallyQuantizableLinear
 
@@ -151,6 +152,50 @@ class TransformerEncoderLayer(Module):
         x = self.linear2(self.dropout(self.activation(self.linear1(x))))
         return self.dropout2(x)
 
+class MultiHeadCrossAttentionLogits(nn.Module):
+    def __init__(self, d_model, num_heads):
+        super().__init__()
+        assert d_model % num_heads == 0
+
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_head = d_model // num_heads
+
+        self.Wq = nn.Linear(d_model, d_model, bias=False)
+        self.Wk = nn.Linear(d_model, d_model, bias=False)
+
+    def forward(self, H, G, key_padding_mask=None):
+        """
+        H: (B, N, D)
+        G: (B, M, D)
+        returns: (B, N, M)
+        """
+        B, N, _ = H.shape
+        M = G.shape[1]
+
+        Q = self.Wq(H)  # (B, N, D)
+        K = self.Wk(G)  # (B, M, D)
+
+        # split heads
+        Q = Q.view(B, N, self.num_heads, self.d_head).transpose(1, 2)
+        K = K.view(B, M, self.num_heads, self.d_head).transpose(1, 2)
+
+        # (B, H, N, M)
+        scores = torch.einsum("bhnd,bhmd->bhnm", Q, K)
+
+        # scale
+        scores = scores / math.sqrt(self.d_head)
+
+        # aggregate heads (important choice)
+        if key_padding_mask is not None:
+            # mask shape -> (B, 1, 1, M)
+            scores = scores.masked_fill(
+                key_padding_mask[:, None, None, :],
+                float("-inf")
+            )
+        scores = scores.mean(dim=1)  # (B, N, M)
+
+        return scores
 
 class MultiheadAttention(Module):
     r"""Allows the model to jointly attend to information

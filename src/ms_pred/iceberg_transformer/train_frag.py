@@ -64,6 +64,8 @@ def add_frag_train_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
     parser.add_argument("--multi-hop-max-dist", default=5, type=int)
     parser.add_argument("--num-edge-dis", default=10, type=int)
     parser.add_argument("--sk-tau", default=0.05, type=float)
+    parser.add_argument("--linsat-tau", default=0.01, type=float)
+
     return parser
 
 
@@ -207,12 +209,13 @@ def train_model():
         embed_collision=kwargs["embed_collision"],
         embed_elem_group=kwargs["embed_elem_group"],
         sk_tau=kwargs["sk_tau"],
+        linsat_tau=kwargs["linsat_tau"],
     )
 
     # Trainer
     monitor = "val_loss"
     if kwargs["debug"]:
-        kwargs["max_epochs"] = 2
+        kwargs["max_epochs"] = 5
     if kwargs["debug_overfit"]:
         kwargs["min_epochs"] = 2000
         kwargs["max_epochs"] = None
