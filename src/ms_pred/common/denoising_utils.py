@@ -17,6 +17,12 @@ def electronic_denoising(msms):
     """
     if isinstance(msms, float):
         return np.nan
+    ms_obj_input = False
+    from .misc_utils import MassSpec
+    if isinstance(msms, MassSpec):
+        ms_obj_input = True
+        ms_obj = msms
+        msms = msms.spec
     mass, intensity = msms.T[0], msms.T[1]
     order = np.argsort(intensity)
     mass = mass[order]
@@ -35,7 +41,14 @@ def electronic_denoising(msms):
         mass = mass[0:idx_left]
     if len(mass_confirmed) == 0:
         return np.nan
-    return (sort_spectrum(pack_spectrum(mass_confirmed, intensity_confirmed)))
+
+    new_msms = (sort_spectrum(pack_spectrum(mass_confirmed, intensity_confirmed)))
+    if ms_obj_input:
+        ms_obj.masses = new_msms[:, 0]
+        ms_obj.intens = new_msms[:, 1]
+        return ms_obj
+    else:
+        return new_msms
 
 
 def sort_spectrum(msms):

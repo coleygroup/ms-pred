@@ -8,7 +8,6 @@ import multiprocess.process
 import random
 import math
 import ast
-import json
 from tqdm import tqdm
 from datetime import datetime
 import yaml
@@ -38,13 +37,14 @@ def get_args():
     parser.add_argument("--seed", default=42, action="store", type=int)
     parser.add_argument("--sparse-out", default=False, action="store_true")
     parser.add_argument("--sparse-k", default=100, action="store", type=int)
-    parser.add_argument("--binned-out", default=False, action="store_true")
     parser.add_argument('--adduct-shift',default=False, action="store_true")
     parser.add_argument("--num-gpu-workers", default=0, action="store", type=int)
     parser.add_argument("--num-cpu-workers", default=32, action="store", type=int)
     parser.add_argument("--batch-size", default=64, action="store", type=int)
     date = datetime.now().strftime("%Y_%m_%d")
     parser.add_argument("--save-dir", default=f"results/{date}_ffn_pred/")
+    parser.add_argument("--out-name", default="preds.hdf5")
+    parser.add_argument("--num-h5-chunks", default=1, type=int)
     parser.add_argument(
         "--gen-checkpoint",
         help="name of checkpoint file",
@@ -79,7 +79,7 @@ def predict():
     save_dir = Path(kwargs["save_dir"])
     debug = kwargs["debug"]
     common.setup_logger(save_dir, log_name="joint_pred.log", debug=debug)
-    pl.utilities.seed.seed_everything(kwargs.get("seed"))
+    # pl.utilities.seed.seed_everything(kwargs.get("seed"))
 
     # Dump args
     yaml_args = yaml.dump(kwargs)
@@ -130,7 +130,7 @@ def predict():
     inten_model_obj = inten_model.IntenGNN.load_from_checkpoint(inten_checkpoint) #, map_location="cuda" if gpu else "cpu")
     gen_model_obj = gen_model.FragGNN.load_from_checkpoint(gen_checkpoint) #, map_location="cuda" if gpu else "cpu")
     avail_gpu_num = torch.cuda.device_count()
-    use_gpu = gpu and avail_gpu_num >= 0
+    use_gpu = gpu and avail_gpu_num > 0
 
     # Build joint model class
 
@@ -142,11 +142,13 @@ def predict():
         gen_model_obj=gen_model_obj, inten_model_obj=inten_model_obj
     )
 
+    out_name = kwargs["out_name"]
+    save_path = save_dir / out_name
+    save_dir.mkdir(exist_ok=True)
+
     with torch.no_grad():
         model.eval()
         model.freeze()
-
-        binned_out = kwargs["binned_out"]
 
         def prepare_entry(entry):
             smi = entry["smiles"]
@@ -162,8 +164,7 @@ def predict():
                 colli_eng_val = common.collision_energy_to_float(colli_eng)  # str to float
                 if math.isnan(colli_eng_val):  # skip collision_energy == nan (no collision energy recorded)
                     continue
-                tup_to_process.append((smi, name, colli_eng_val, adduct, precursor_mz,
-                                       f"pred_{name}/ikey {inchikey}/collision {colli_eng}"))
+                tup_to_process.append((smi, f"pred_{name}", colli_eng_val, adduct, precursor_mz, f"ikey {inchikey}"))
             return tup_to_process
 
         all_rows = [j for _, j in df.iterrows()]
@@ -201,64 +202,56 @@ def predict():
             model.to(device)
 
             # for batch in batched_entries:
-            smis, spec_names, colli_eng_vals, adducts, precursor_mzs, h5_names = list(zip(*batch))
-            full_outputs = model.predict_mol(
-                smis,
-                precursor_mz=precursor_mzs,
-                collision_eng=colli_eng_vals,
-                adduct=adducts,
-                threshold=kwargs["threshold"],
-                device=device,
-                max_nodes=kwargs["max_nodes"],
-                binned_out=binned_out,
-                adduct_shift=kwargs["adduct_shift"],
-                canonical_root_smi=True,
-            )
+            smis, spec_names, colli_eng_vals, adducts, precursor_mzs, ikeys = list(zip(*batch))
+            try:
+                full_outputs = model.predict_mol(
+                    smis,
+                    precursor_mz=precursor_mzs,
+                    collision_eng=colli_eng_vals,
+                    adduct=adducts,
+                    threshold=kwargs["threshold"],
+                    device=device,
+                    max_nodes=kwargs["max_nodes"],
+                    adduct_shift=kwargs["adduct_shift"],
+                    canonical_root_smi=True,
+                )
+            except:
+                logging.error(f'Prediction failed, SMILES: {smis}')
+                raise
             return_list = []
-            if binned_out:
-                for output_spec, spec_name, smi, h5_name in \
-                        zip(full_outputs["spec"], spec_names, smis, h5_names):
-                    output_spec = output_spec.cpu().numpy()
-                    if kwargs["sparse_out"]:
-                        sparse_k = kwargs["sparse_k"]
-                        best_inds = np.argsort(output_spec, -1)[::-1][:sparse_k]
-                        best_intens = np.take_along_axis(output_spec, best_inds, -1)
-                        output_spec = np.stack([best_inds, best_intens], -1)
-
-                    inchikey = common.inchikey_from_smiles(smi)
-                    return_list.append((h5_name, spec_name, smi, inchikey, output_spec, None))
-            else:
-                for output_spec, spec_name, smi, h5_name, pred_frag in \
-                        zip(full_outputs["spec"], spec_names, smis, h5_names, full_outputs["frag"]):
-                    assert kwargs["sparse_out"], 'sparse_out must be True for non-binned output'
-                    output_spec = output_spec.cpu().numpy()
-                    pred_frag = pred_frag.cpu().numpy()
-                    sparse_k = kwargs["sparse_k"]
-                    best_inds = np.argsort(output_spec[:, 1], -1)[::-1][:sparse_k]
-                    output_spec = output_spec[best_inds, :]
-                    pred_frag = np.array(pred_frag)[best_inds]
-                    inchikey = common.inchikey_from_smiles(smi)
-                    return_list.append((h5_name, spec_name, smi, inchikey, output_spec, pred_frag))
+            for output_spec, spec_name, smi, ikey, adduct, pred_frag, collision_energy in \
+                    zip(full_outputs["spec"], spec_names, smis, ikeys, adducts, full_outputs["frag"], colli_eng_vals):
+                assert kwargs["sparse_out"], 'sparse_out must be True'
+                output_spec = output_spec.cpu().numpy()
+                pred_frag = pred_frag.cpu().numpy()
+                sparse_k = kwargs["sparse_k"]
+                best_inds = np.argsort(output_spec[:, 1], -1)[::-1][:sparse_k]
+                output_spec = output_spec[best_inds, :]
+                pred_frag = np.array(pred_frag)[best_inds]
+                masses = output_spec[:, 0]
+                intens = output_spec[:, 1]
+                pred_ms = common.MassSpec(
+                    root_canonical_smiles=smi,
+                    adduct=adduct,
+                    collision_energy=collision_energy,
+                    masses=masses,
+                    intens=intens,
+                    frags=pred_frag,
+                    remark=ikey,
+                )
+                return_list.append((spec_name, pred_ms))
             return return_list
-
-        if binned_out:
-            out_name = "binned_preds.hdf5"
-        else:
-            out_name = "preds.hdf5"
-
+        
         def write_h5_func(out_entries):
-            h5 = common.HDF5Dataset(save_dir / out_name, mode='w')
-            h5.attrs['num_bins'] = 15000
-            h5.attrs['upper_limit'] = 1500
-            h5.attrs['sparse_out'] = kwargs["sparse_out"]
+            specdb = common.PredSpecDB(
+                h5_path=save_path, mode='w', num_h5s=kwargs["num_h5_chunks"],
+                has_probs=False, has_brokens=False, has_masses=True, has_masses_no_adduct=False, has_frag_form_vecs=False,
+                has_frags=True, has_intens=True, has_pulled_atoms=False)
             for out_batch in out_entries:
                 for out_item in out_batch:
-                    h5_name, spec_name, smi, inchikey, output_spec, pred_frag = out_item
-                    h5.write_data(h5_name + '/spec', output_spec)
-                    if pred_frag is not None:
-                        h5.write_str(h5_name + '/frag', json.dumps(pred_frag.tolist()))  # save as string avoids overflow
-                    h5.update_attr(h5_name, {'smiles': smi, 'ikey': inchikey, 'spec_name': spec_name})
-            h5.close()
+                    name, spec = out_item
+                    specdb.write(name, spec)
+            specdb.close()
 
         if use_gpu:
             if kwargs["num_gpu_workers"] == 0:

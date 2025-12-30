@@ -5,9 +5,10 @@ import logging
 from pathlib import Path, PosixPath
 import json
 from itertools import groupby, islice
-from typing import Tuple, List
+from typing import Tuple, List, Dict, Union
 import pandas as pd
 import numpy as np
+from numpy.linalg import norm
 from tqdm import tqdm
 import h5py
 import hashlib
@@ -15,7 +16,9 @@ import torch
 import math
 
 import ms_pred.common.chem_utils as chem_utils
+from ms_pred.common.denoising_utils import electronic_denoising
 from ms_pred import nn_utils
+from ms_pred.magma.fragmentation import FragmentEngine
 
 try:
     from pytorch_lightning.loggers import LightningLoggerBase as Logger
@@ -36,29 +39,50 @@ class MassSpec:
     """
     Data structure for a predicted MS/MS spectrum
     """
-    def __init__(self, collision_energy, root_canonical_smiles=None, adduct=None, remark=None,
+    def __init__(self, collision_energy: Union[str, float], root_canonical_smiles=None, adduct=None, remark=None,
                  probs=None, brokens=None, masses=None, masses_no_adduct=None,
-                 frag_form_vecs=None, frags=None, intens=None, pulled_atoms=None,
+                 frag_form_vecs=None, frags=None, intens=None, pulled_atoms=None, int_frags=None,
                  **kwargs):
-        self.collision_energy = collision_energy
+        self._engine = None
+        self._binned_spec = None
+        self._mass_upper_limit = None
+        self._num_bins = None
+
+        if isinstance(collision_energy, str) and 'collision' in collision_energy:
+            self.collision_energy = chem_utils.get_collision_energy(collision_energy)
+        else:
+            self.collision_energy = collision_energy
+        self.collision_energy = float(f'{float(self.collision_energy):.0f}')
         self.root_canonical_smiles = root_canonical_smiles
         self.adduct = adduct
         self.remark = remark
-        def safe_assign(x):
+        def safe_assign(x, dtype):
             if isinstance(x, np.ndarray):
-                return x
+                x_np = x
             elif isinstance(x, torch.Tensor):
-                return x.cpu().numpy()
+                x_np = x.cpu().numpy()
+            elif isinstance(x, list) and len(x) > 0:
+                x_np = np.array(x)
             else:
                 return None
-        self.probs = safe_assign(probs)
-        self.brokens = safe_assign(brokens)
-        self.masses = safe_assign(masses)
-        self.masses_no_adduct = safe_assign(masses_no_adduct)
-        self.frag_form_vecs = safe_assign(frag_form_vecs)
-        self.frags = safe_assign(frags)
-        self.intens = safe_assign(intens)
-        self.pulled_atoms = safe_assign(pulled_atoms)
+            if not np.issubdtype(x_np.dtype, dtype):
+                raise TypeError(f'Input data does not have the correct data type, expected {dtype}, got {x_np.dtype}')
+            return x_np
+        self.probs = safe_assign(probs, np.floating)
+        self.brokens = safe_assign(brokens, np.integer)
+        self.masses = safe_assign(masses, np.floating)
+        self.masses_no_adduct = safe_assign(masses_no_adduct, np.floating)
+        self.frag_form_vecs = safe_assign(frag_form_vecs, np.integer)
+        if frags is None and int_frags is not None:
+            self._engine = FragmentEngine(self.root_canonical_smiles, mol_str_canonicalized=True)
+            bit_lists = [
+                ((x >> np.arange(self._engine.natoms)) & 1).astype(bool)
+                for x in int_frags
+            ]
+            frags = np.vstack(bit_lists)
+        self.frags = safe_assign(frags, bool)
+        self.intens = safe_assign(intens, np.floating)
+        self.pulled_atoms = safe_assign(pulled_atoms, bool)
         self.meta = kwargs
 
     def add_hydrogen_shift(self):
@@ -132,15 +156,37 @@ class MassSpec:
         return info
 
     @property
+    def parent_mass(self):
+        if self.adduct is not None and self.root_canonical_smiles is not None:
+            return chem_utils.ion2mass[self.adduct] + chem_utils.mass_from_smi(self.root_canonical_smiles)
+        else:
+            return None
+
+    @property
+    def inchi(self):
+        return chem_utils.inchi_from_smiles(self.root_canonical_smiles)
+
+    @property
+    def inchikey(self):
+        return chem_utils.inchikey_from_smiles(self.root_canonical_smiles)
+
+    @property
+    def formula(self):
+        return chem_utils.form_from_smi(self.root_canonical_smiles)
+
+    @property
     def int_frags(self):
-        all_frags = []
-        for bin_frag in self.frags:
-            frag = 0
-            for i, b in enumerate(bin_frag):
-                if b:
-                    frag += 2 ** i
-            all_frags.append(frag)
-        return all_frags
+        if self.has_frags:
+            all_frags = []
+            for bin_frag in self.frags:
+                frag = 0
+                for i, b in enumerate(bin_frag):
+                    if b:
+                        frag += 2 ** i
+                all_frags.append(frag)
+            return all_frags
+        else:
+            return None
 
     @property
     def has_probs(self):
@@ -186,6 +232,31 @@ class MassSpec:
         else:
             return None
 
+    def merged_spec(self, merge_method='sum') -> "MassSpec":
+        spec_ar = self.spec
+        if spec_ar is not None:
+            merged_tup = self._merge_spec_to_tup(merge_method=merge_method)
+            return self._merge_tup_to_spec(merged_tup)
+        else:
+            return None
+
+    @property
+    def spec(self):
+        if self.has_masses and self.has_intens:
+            return np.stack((self.masses, self.intens), axis=1)
+        else:
+            return None
+
+    @property
+    def binned_spec(self):
+        if self._binned_spec is None:
+            self.bin_spectrum()  # use default parameters (0.1 bin)
+        return self._binned_spec
+
+    @property
+    def num_peaks(self):
+        return len(self.intens)  # peaks must have intensities
+
     def __repr__(self):
         _repr = f'MassSpec ('
         _repr += ', '.join([f'{k}={v}' for k, v in self.info.items()])
@@ -205,6 +276,336 @@ class MassSpec:
     def __contains__(self, item):
         return hasattr(self, item)
 
+    def _merge_spec_to_tup(self, spec_tup_to_merge: dict=None, merge_method='sum'):
+        if not spec_tup_to_merge:
+            spec_tup_to_merge = {}
+        if not self.has_masses or not self.has_intens:
+            raise ValueError('both masses and intens must be non-empty')
+        for idx in range(self.num_peaks):
+            mz, inten = self.masses[idx], self.intens[idx]
+            if self.has_frags:
+                frag = self.frags[idx]
+                frag_int = self.int_frags[idx]
+            else:
+                frag = None
+                frag_int = 0
+            mz_frag = f'{mz:.4f}_{frag_int}'
+            cur_tup = spec_tup_to_merge.get(mz_frag)
+            if cur_tup is None:
+                spec_tup_to_merge[mz_frag] = [mz, inten, frag]
+            else:
+                if merge_method == 'sum':
+                    cur_tup[1] += inten
+                elif merge_method == 'max':
+                    cur_tup[1] = max(inten, cur_tup[1])
+                else:
+                    raise ValueError(f'Unknown merge_method {merge_method}')
+        return spec_tup_to_merge
+
+    def _merge_tup_to_spec(self, spec_tup_to_merge: dict):
+        merged_mz, merged_inten, merged_frag = [], [], []
+        for tup in spec_tup_to_merge.values():
+            merged_mz.append(tup[0])
+            merged_inten.append(tup[1])
+            merged_frag.append(tup[2])
+        merged_mz = np.array(merged_mz)
+        merged_inten = np.array(merged_inten)
+        merged_frag = np.array(merged_frag)
+        merged_inten = merged_inten / merged_inten.max()
+
+        merged_spec = MassSpec(
+            collision_energy='nan',
+            root_canonical_smiles=self.root_canonical_smiles,
+            masses=merged_mz,
+            intens=merged_inten,
+            frags=merged_frag if merged_frag[0] is not None else None,
+            **self.meta
+        )
+
+        return merged_spec
+
+    def inten_thresh(self, thresh=0.0001) -> "MassSpec":
+        if not self.has_intens:
+            raise ValueError('spectrum must have intensities!')
+
+        new_masses, new_masses_no_adduct, new_probs, new_frags, new_frag_form_vecs = [], [], [], [], []
+        new_brokens, new_pulled_atoms, new_intens = [], [], []
+        for i in range(self.num_peaks):
+            if self.intens[i] >= thresh:
+                if self.has_masses:           new_masses.append(self.masses[i])
+                if self.has_masses_no_adduct: new_masses_no_adduct.append(self.masses_no_adduct[i])
+                if self.has_probs:            new_probs.append(self.probs[i])
+                if self.has_frags:            new_frags.append(self.frags[i])
+                if self.has_frag_form_vecs:   new_frag_form_vecs.append(self.frag_form_vecs[i])
+                if self.has_brokens:          new_brokens.append(self.brokens[i])
+                if self.has_pulled_atoms:     new_pulled_atoms.append(self.pulled_atoms[i])
+                new_intens.append(self.intens[i])
+
+        return MassSpec(
+            collision_energy=self.collision_energy,
+            root_canonical_smiles=self.root_canonical_smiles,
+            adduct=self.adduct,
+            remark=self.remark,
+            probs=new_probs,
+            brokens=new_brokens,
+            masses=new_masses,
+            masses_no_adduct=new_masses_no_adduct,
+            frag_form_vecs=new_frag_form_vecs,
+            frags=new_frags,
+            intens=new_intens,
+            pulled_atoms=new_pulled_atoms,
+            **self.meta
+        )
+
+    def sort_peaks_by_mz(self):
+        if not self.has_masses:
+            raise ValueError('spectrum must have masses!')
+        sortind = np.argsort(self.masses)
+
+        self.masses = self.masses[sortind]
+        if self.has_masses_no_adduct: self.masses_no_adduct = self.masses_no_adduct[sortind]
+        if self.has_probs:            self.probs = self.probs[sortind]
+        if self.has_frags:            self.frags = self.frags[sortind]
+        if self.has_frag_form_vecs:   self.frag_form_vecs = self.frag_form_vecs[sortind]
+        if self.has_brokens:          self.brokens = self.brokens[sortind]
+        if self.has_pulled_atoms:     self.pulled_atoms = self.pulled_atoms[sortind]
+        if self.has_intens:           self.intens = self.intens[sortind]
+
+    @staticmethod
+    def _standardize_ce(ce):
+        return CompositeMassSpec._standardize_ce(ce)
+
+    def nce_to_ev(self, parentmass=None):
+        """Change NCE energies to eV"""
+        if parentmass is None:
+            parentmass = self.parent_mass
+        assert parentmass is not None
+        self.collision_energy = nce_to_ev(self.collision_energy, parentmass)
+
+    def process_spec_file(self, parentmass=None, denoise=False, max_num_inten=20, inten_thresh=0.05):
+        if parentmass is not None:
+            meta = {'parentmass': parentmass}
+        elif self.parent_mass is not None:
+            meta = {'parentmass': self.parent_mass}
+        else:
+            meta = {}
+        ce_key = self._standardize_ce(self.collision_energy)
+        new_spec = process_spec_file(meta, [(ce_key, self.spec)], merge_specs=False)[ce_key]
+        self.masses, self.intens = new_spec[:, 0], new_spec[:, 1]
+
+        if denoise: self.denoise(max_num_inten, inten_thresh)
+
+        return self
+
+    def denoise(self, max_num_inten=20, inten_thresh=0.05):
+        """"""
+        if self.has_masses and self.has_intens:
+            new_spec = max_inten_spec(self.spec, max_num_inten=max_num_inten, inten_thresh=inten_thresh)
+            self.masses, self.intens = new_spec[:, 0], new_spec[:, 1]
+            return electronic_denoising(self)
+        else:
+            raise ValueError('Spectrum object should have both masses and intens')
+
+    def bin_spectrum(self, mass_upper_limit=1500, num_bins=15000, pool_fn='add'):
+        """turn spectrum into binned vectors, and store the binned spectrum (accessible via self.binned_spec)"""
+        if self.has_masses and self.has_intens:
+            binned_spec = bin_spectra([self], upper_limit=mass_upper_limit, num_bins=num_bins, pool_fn=pool_fn)[0]
+            self._binned_spec = binned_spec  # changes the output of self.binned_spec
+            self._mass_upper_limit = mass_upper_limit
+            self._num_bins = num_bins
+            return binned_spec
+        else:
+            raise ValueError('Spectrum object should have both masses and intens')
+
+    def similarity(self, other, ignore_mass=None, metric='entropy'):
+        if metric == 'entropy':
+            return self.entr_sim(other, ignore_mass)
+        elif metric == 'cosine':
+            return self.cos_sim(other, ignore_mass)
+        else:
+            raise ValueError(f'Unknown metric {metric}')
+
+    def cos_sim(self, other, ignore_mass=None):
+        """
+        Compute cosine similarity between two MassSpec object
+
+        Args:
+            other: compared MassSpec object
+            ignore_mass: any peaks with a larger mass will be ignored
+        """
+        self_spec = copy.deepcopy(self.binned_spec)
+        other_spec = copy.deepcopy(other.binned_spec)
+        if ignore_mass is not None:
+            self_spec[int(ignore_mass * (self._num_bins / self._mass_upper_limit)):] = 0
+            other_spec[int(ignore_mass * (self._num_bins / self._mass_upper_limit)):] = 0
+
+        norm_self = norm(self_spec, axis=-1) + 1e-22
+        norm_other = norm(other_spec, axis=-1) + 1e-22
+
+        return np.dot(self_spec, norm_other) / (norm_self * norm_other)
+
+    def entr_sim(self, other, ignore_mass=None):
+        """
+        Compute entropy similarity between two MassSpec object
+
+        Args:
+            other: compared MassSpec object
+            ignore_mass: any peaks with a larger mass will be ignored
+        """
+        self_spec = copy.deepcopy(self.binned_spec)
+        other_spec = copy.deepcopy(other.binned_spec)
+        if ignore_mass is not None:
+            self_spec[int(ignore_mass * (self._num_bins / self._mass_upper_limit)):] = 0
+            other_spec[int(ignore_mass * (self._num_bins / self._mass_upper_limit)):] = 0
+
+        def norm_peaks(prob):
+            return prob / (prob.sum(axis=-1, keepdims=True) + 1e-22)
+        def entropy(prob):
+            return -np.sum(prob * np.log(prob + 1e-22), axis=-1)
+
+        norm_self = norm_peaks(self_spec)
+        norm_other = norm_peaks(other_spec)
+
+        entropy_self = entropy(norm_self)
+        entropy_other = entropy(norm_other)
+        entropy_mix = entropy((norm_self + norm_other) / 2)
+        return 1 - (2 * entropy_mix - entropy_self - entropy_other) / np.log(4)
+
+
+class CompositeMassSpec:
+    """
+    Multiple mass spectra corresponding to the same molecule (e.g., different collision energies)
+    """
+    def __init__(self, mass_spec_list: Union[List[MassSpec], Dict[str, MassSpec]]):
+        self.ce_to_ms = {}
+        self.ce_to_merged_ms = {}
+        self.root_canonical_smiles = None
+        if isinstance(mass_spec_list, dict):
+            mass_spec_list = mass_spec_list.values()
+        for ms_obj in mass_spec_list:
+            ce = ms_obj.collision_energy
+            self.ce_to_ms[self._standardize_ce(ce)] = ms_obj
+            if self.root_canonical_smiles is None:
+                self.root_canonical_smiles = ms_obj.root_canonical_smiles
+            else:
+                assert self.root_canonical_smiles == ms_obj.root_canonical_smiles
+
+    @staticmethod
+    def _standardize_ce(ce: Union[str, float]):
+        if isinstance(ce, str) and 'collision' in ce:
+            ce = chem_utils.get_collision_energy(ce)
+        ce_key = f'{float(ce):.0f}'
+        return ce_key
+
+    def keys(self):
+        return self.ce_to_ms.keys()
+
+    def values(self):
+        return self.ce_to_ms.values()
+
+    def items(self):
+        return self.ce_to_ms.items()
+
+    def __getitem__(self, item):
+        return self.ce_to_ms[self._standardize_ce(item)]
+
+    def process_spec_file(self, parentmass=None, denoise=False, max_num_inten=20, inten_thresh=0.05):
+        self.ce_to_merged_ms = {}
+        for k, v in self.ce_to_ms.items():
+            self.ce_to_ms[k] = v.process_spec_file(parentmass, denoise, max_num_inten, inten_thresh)
+
+    def bin_spectrum(self, mass_upper_limit=1500, num_bins=15000, pool_fn='add'):
+        for v in self.ce_to_ms.values():
+            v.bin_spectrum(mass_upper_limit, num_bins, pool_fn)
+
+    def nce_to_ev(self, parentmass=None):
+        self.ce_to_merged_ms = {}
+        new_ce_to_ms = {}
+        for v in self.ce_to_ms.values():
+            v.nce_to_ev(parentmass)
+            new_ce_to_ms[self._standardize_ce(v.collision_energy)] = v
+        self.ce_to_ms = new_ce_to_ms
+
+    def merge_spectra(self, energies: list=None, merge_method='sum') -> MassSpec:
+        if energies is None: # merge all
+            energies = list(self.keys())
+        merged_key = '_'.join(sorted(energies)) + '_' + merge_method
+        if merged_key not in self.ce_to_merged_ms:
+            mz_frag_to_tup = {}
+            for ce in energies:
+                spec_data = self.ce_to_ms[ce]
+                mz_frag_to_tup = spec_data._merge_spec_to_tup(mz_frag_to_tup, merge_method)
+            self.ce_to_merged_ms[merged_key] = spec_data._merge_tup_to_spec(mz_frag_to_tup)
+        return self.ce_to_merged_ms[merged_key]
+
+    def entr_sim(self, *args, **kwargs):
+        return self.similarity(*args, **kwargs, metric='entropy')
+
+    def cos_sim(self, *args, **kwargs):
+        return self.similarity(*args, **kwargs, metric='cosine')
+
+    def similarity(self, other, ignore_mass=None, merge_method='unmerged', stepped_ce=None, metric='entropy',
+                   aggregate='mean', return_ce=False):
+        """
+        merge_method: how ``other`` spectrum is merged, from 'unmerged', 'stepped', 'unknown'.
+            if 'unmerged', ``other`` is CompositeMassSpec, only compare spectra with matched collision energy
+            if 'stepped', ``other`` is MassSpec, means stepped collision energy, merge spectra at energies in ``stepped_ce``
+            if 'unknown', ``other`` is MassSpec, match to all spectra in self and return the best match
+            if 'merged', ``other`` is CompositeMassSpec, merge both spectra and then compare
+        """
+        if aggregate == 'mean' or aggregate == 'avg':
+            agg_func = np.mean
+        elif aggregate == 'sum' or aggregate == 'add':
+            agg_func = np.sum
+        elif aggregate == 'none':
+            agg_func = lambda x: x
+        else:
+            raise ValueError(f'Unknown aggregation method {aggregate}')
+
+        if merge_method == 'unmerged':
+            common_ces = set(other.keys()) & set(self.keys())
+            if len(common_ces) == 0:
+                raise ValueError(f'No matched collision energy self: {", ".join(self.keys())}, other: {", ".join(other.keys())}')
+            sims = []
+            for ce in common_ces:
+                sim = self[ce].similarity(other[ce], ignore_mass, metric)
+                sims.append(sim)
+            if return_ce:
+                return agg_func(sims), [float(_) for _ in common_ces]
+            else:
+                return agg_func(sims)
+        elif merge_method == 'stepped':
+            if stepped_ce is not None:
+                for ce in stepped_ce:
+                    if not ce in self.keys():
+                        raise ValueError(f'Collision energy does not match. Stepped energies: {stepped_ce}, '
+                                         f'compared energies: {self.keys()}')
+            merged_spec = self.merge_spectra(stepped_ce)
+            sim = merged_spec.similarity(other, ignore_mass, metric)
+            if return_ce:
+                return sim, [float(_) for _ in stepped_ce]
+            else:
+                return sim
+        elif merge_method == 'unknown':
+            sims = []
+            for ce in self.keys():
+                sim = self[ce].similarity(other, ignore_mass, metric)
+                sims.append(sim)
+            if return_ce:
+                best_ce = np.array(self.keys())[np.argmax(sims)]
+                return np.max(sims), float(best_ce)
+            else:
+                return np.max(sims)
+        elif merge_method == 'merged':
+            merged_self = self.merge_spectra()
+            merged_other = other.merge_spectra()
+            sim = merged_self.similarity(merged_other, ignore_mass, metric)
+            if return_ce:
+                raise RuntimeWarning('return_ce=True is not supported. No collision energy returned.')
+            return sim
+        else:
+            raise ValueError(f'Unknown merge method {merge_method}')
+
 
 class PredSpecDB:
     """
@@ -214,6 +615,11 @@ class PredSpecDB:
                  has_probs=True, has_brokens=True, has_masses=False, has_masses_no_adduct=True, has_frag_form_vecs=True,
                  has_frags=True, has_intens=False, has_pulled_atoms=False,
                  h5_persistent=None):
+        """
+        Args:
+            h5_persistent: if False, the h5 object(s) will be loaded on-demand
+                           (default: True for write mode, False for read mode)
+        """
         h5_path = Path(h5_path)
         if num_h5s > 1:
             self.all_h5_paths = [h5_path.parent / (h5_path.stem + f'_chunk_{i}' + h5_path.suffix) for i in range(num_h5s)]
@@ -245,7 +651,7 @@ class PredSpecDB:
             h5_dataset_0.update_attr('.', self.root_key_dict)
             if self.h5_persistent is None:
                 self.h5_persistent = True  # default persistent H5 objects for write mode
-        else:
+        elif self.mode == 'r':
             self.root_key_dict = h5_dataset_0.read_attr('.')
             safe_root_key_get = lambda x: self.root_key_dict[x] if x in self.root_key_dict else None
             self.has_probs            = safe_root_key_get('probs')
@@ -257,14 +663,16 @@ class PredSpecDB:
             self.has_frags            = safe_root_key_get('frags')
             self.has_pulled_atoms     = safe_root_key_get('pulled_atoms')
             if self.h5_persistent is None:
-                self.h5_persistent = False  # default non-persistent H5 objects for read mode (for parallel read)
+                self.h5_persistent = False  # default non-persistent H5 objects for read mode (to support parallel read)
+        else:
+            raise ValueError(f'Unknown mode={self.mode}')
 
         if self.h5_persistent:
             self.h5datasets = [h5_dataset_0] + [HDF5Dataset(p, self.mode) for p in self.all_h5_paths[1:]]
         else:
             self.h5datasets = None
 
-    def write(self, name, spec: MassSpec):
+    def write(self, name, spec: MassSpec, replace_name_by_formula=False):
         """write one spectrum"""
         key_dict = {
             "probs": spec.has_probs,
@@ -276,8 +684,15 @@ class PredSpecDB:
             "frags": spec.has_frags,
             "pulled_atoms": spec.has_pulled_atoms,
         }
+        if replace_name_by_formula and spec.root_canonical_smiles is not None:
+            name = chem_utils.form_from_smi(spec.root_canonical_smiles)
+
         h5_dataset = self._get_h5_dataset(name)
         full_name  = self._get_full_name(name, spec.collision_energy, spec.remark)
+
+        if full_name in h5_dataset:
+            logging.warning(f'{full_name} already exists, skipping...')
+            return
 
         float_arrs = []
         if spec.has_probs: float_arrs.append(spec.probs.astype(np.float32))
@@ -320,14 +735,21 @@ class PredSpecDB:
 
         spec_dict = {}
         spec_dict.update(key_dict)
-        fdata = h5_dataset.read_data(full_name + '/f')
+        try:
+            fdata = h5_dataset.read_data(full_name + '/f')
+        except:
+            #case of no f data
+            fdata = None
         cur_idx = 0
         for key in ("probs", "masses", "masses_no_adduct", "intens"):
             if in_key_dict(key):
                 spec_dict[key] = fdata[:, cur_idx]
                 cur_idx += 1
-
-        udata = h5_dataset.read_data(full_name + '/u')
+        try:
+            udata = h5_dataset.read_data(full_name + '/u')
+        except:
+            #case of no u data
+            udata = None
         cur_idx = 0
         if in_key_dict("brokens"):
             spec_dict["brokens"] = udata[:, cur_idx]
@@ -345,20 +767,23 @@ class PredSpecDB:
 
         return MassSpec(**spec_dict)
 
-    def read_all(self, name):
+    def read_from_name(self, name):
         """read all entries with the same name (all remarks, all collision energies)"""
         colli_engs, remarks = self.get_entries(name)
         all_spec_dict = {}
+        has_remark = False
         for c, r in zip(colli_engs, remarks):
             spec_obj = self.read(name, c, r)
             c_key = f'collision {c}'
             if r is None:
                 all_spec_dict[c_key] = spec_obj
+                has_remark = False
             else:
                 if r not in all_spec_dict:
                     all_spec_dict[r] = {}
                 all_spec_dict[r][c_key] = spec_obj
-        return all_spec_dict
+                has_remark = True
+        return all_spec_dict, has_remark
 
     def _get_chunk_index(self, name):
         if len(self.all_h5_paths) == 1:
@@ -400,24 +825,31 @@ class PredSpecDB:
 
     def get_entries(self, name, collision_energy=None):
         """return collision energies and remarks under each name"""
-        def _enumerate_path(obj):  # recursive call
-            if obj.attrs and "override" in obj.attrs:  # reached data group
-                return None
-            else:
-                paths = []
-                for key in obj.keys():
-                    next_paths = _enumerate_path(obj[key])
-                    if next_paths is None:
-                        paths.append(key)
-                    else:
-                        for next_p in next_paths:
-                            paths.append(key + '/' + next_p)
-                return paths
         h5_dataset = self._get_h5_dataset(name)
-        if not name in h5_dataset.h5_obj:  # no entry
+        if name not in h5_dataset.h5_obj:  # no entry
             return [], []
+
         root_obj = h5_dataset.h5_obj[name]
-        all_paths = _enumerate_path(root_obj)
+
+        # Iteratively enumerate all paths that end at groups with attrs["override"]
+        all_paths = []
+        from collections import deque
+        queue = deque()
+
+        # Initialize queue with first layer under root
+        for key in root_obj.keys():
+            queue.append((root_obj[key], key))  # (object, path_str)
+
+        while queue:
+            obj, path = queue.popleft()
+            # If this group is a data group, record the path and don't go deeper
+            if obj.attrs and "override" in obj.attrs:
+                all_paths.append(path)
+            else:
+                # Go one layer deeper
+                for key in obj.keys():
+                    queue.append((obj[key], f"{path}/{key}"))
+
         colli_engs, remarks = [], []
         for path in all_paths:
             keys = path.split('/')
@@ -433,7 +865,27 @@ class PredSpecDB:
                     colli_engs.append(get_ce)
             else:
                 raise ValueError(f'HDF5 path is not accepted: {path}')
+
         return colli_engs, remarks
+
+    def get_all_specs(self) -> Tuple[str, str, CompositeMassSpec]:
+        """return all spectra in the database
+        if the dataset has remarks, it returns (name, remark, {colli_eng: spec})
+        otherwise, if does not have remarks, it returns (name, {colli_eng: spec})
+        """
+        if self.h5_persistent:
+            all_h5s = self.h5datasets
+        else:
+            all_h5s = [HDF5Dataset(p, self.mode) for p in self.all_h5_paths]
+
+        for h5 in all_h5s:
+            for name in h5.h5_obj:
+                spec_dict, has_remark = self.read_from_name(name)
+                if has_remark:
+                    for remark, colli_spec_dict in spec_dict.items():
+                        yield name, remark, CompositeMassSpec(colli_spec_dict)
+                else:
+                    yield name, CompositeMassSpec(spec_dict)
 
     def close(self):
         for ds in self.h5datasets:
@@ -545,7 +997,16 @@ def setup_logger(save_dir, log_name="output.log", debug=False, custom_label=""):
             stream_handler,
             file_handler,
         ],
+        force=True
     )
+
+    # log all uncaught exceptions
+    def log_uncaught_exceptions(exc_type, exc_value, exc_traceback):
+        logging.getLogger().error(
+            "Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback)
+        )
+
+    sys.excepthook = log_uncaught_exceptions
 
     # configure logging at the root level of lightning
     # logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
@@ -602,7 +1063,7 @@ class ConsoleLogger(Logger):
 # Parsing
 
 
-def parse_spectra(spectra_file: [str, list]) -> Tuple[dict, List[Tuple[str, np.ndarray]]]:
+def parse_spectra(spectra_file: [str, list]) -> Tuple[dict, CompositeMassSpec]:
     """parse_spectra.
 
     Parses spectra in the SIRIUS format and returns
@@ -641,8 +1102,8 @@ def parse_spectra(spectra_file: [str, list]) -> Tuple[dict, List[Tuple[str, np.n
             # Check if spectra is empty
             if len(peak_data):
                 peak_data = np.vstack(peak_data)
-                # Add new tuple
-                spectras.append((spectra_header, peak_data))
+                ms_obj = MassSpec(spectra_header, masses=peak_data[:, 0], intens=peak_data[:, 1])
+                spectras.append(ms_obj)
         # Get meta data
         else:
             entries = {}
@@ -666,7 +1127,7 @@ def parse_spectra(spectra_file: [str, list]) -> Tuple[dict, List[Tuple[str, np.n
     if type(spectra_file) is str:
         metadata["_FILE_PATH"] = spectra_file
         metadata["_FILE"] = Path(spectra_file).stem
-    return metadata, spectras
+    return metadata, CompositeMassSpec(spectras)
 
 
 def spec_to_ms_str(
@@ -699,7 +1160,7 @@ def spec_to_ms_str(
 
 def parse_spectra_mgf(
     mgf_file: str, max_num = None
-) -> List[Tuple[dict, List[Tuple[str, np.ndarray]]]]:
+) -> List[Tuple[dict, np.ndarray]]:
     """parse_spectr_mgf.
 
     Parses spectra in the MGF file formate, with
@@ -722,10 +1183,8 @@ def parse_spectra_mgf(
                 continue
 
             meta = dict()
-            spectra = []
             # Note: Sometimes we have multiple scans
             # This mgf has them collapsed
-            cur_spectra_name = "spec"
             cur_spectra = []
             group = list(group)
             for line in group:
@@ -743,72 +1202,11 @@ def parse_spectra_mgf(
 
             if len(cur_spectra) > 0:
                 cur_spectra = np.vstack(cur_spectra)
-                spectra.append((cur_spectra_name, cur_spectra))
-                parsed_spectra.append((meta, spectra))
+                parsed_spectra.append((meta, cur_spectra))
             else:
                 pass
-                # print("no spectra found for group: ", "".join(group))
 
             if max_num is not None and len(parsed_spectra) > max_num:
-                # print("Breaking")
-                break
-        return parsed_spectra
-
-
-def parse_spectra_mgf(
-    mgf_file: str, max_num = None
-) -> List[Tuple[dict, List[Tuple[str, np.ndarray]]]]:
-    """parse_spectr_mgf.
-
-    Parses spectra in the MGF file formate, with
-
-    Args:
-        mgf_file (str) : str
-        max_num (Optional[int]): If set, only parse this many
-    Return:
-        List[Tuple[dict, List[Tuple[str, np.ndarray]]]]: metadata and list of spectra
-            tuples containing name and array
-    """
-
-    key = lambda x: x.strip() == "BEGIN IONS"
-    parsed_spectra = []
-    with open(mgf_file, "r") as fp:
-
-        for (is_header, group) in tqdm(groupby(fp, key)):
-
-            if is_header:
-                continue
-
-            meta = dict()
-            spectra = []
-            # Note: Sometimes we have multiple scans
-            # This mgf has them collapsed
-            cur_spectra_name = "spec"
-            cur_spectra = []
-            group = list(group)
-            for line in group:
-                line = line.strip()
-                if not line:
-                    pass
-                elif line == "END IONS" or line == "BEGIN IONS":
-                    pass
-                elif "=" in line:
-                    k, v = [i.strip() for i in line.split("=", 1)]
-                    meta[k] = v
-                else:
-                    mz, intens = line.split()
-                    cur_spectra.append((float(mz), float(intens)))
-
-            if len(cur_spectra) > 0:
-                cur_spectra = np.vstack(cur_spectra)
-                spectra.append((cur_spectra_name, cur_spectra))
-                parsed_spectra.append((meta, spectra))
-            else:
-                pass
-                # print("no spectra found for group: ", "".join(group))
-
-            if max_num is not None and len(parsed_spectra) > max_num:
-                # print("Breaking")
                 break
         return parsed_spectra
 
@@ -1106,6 +1504,8 @@ def bin_spectra(
     bins = np.linspace(0, upper_limit, num=num_bins)
     binned_spec = np.zeros((len(spectras), len(bins)))
     for spec_index, spec in enumerate(spectras):
+        if isinstance(spec, MassSpec):
+            spec = spec.spec
 
         # Convert to digitized spectra
         digitized_mz = np.digitize(spec[:, 0], bins=bins)
@@ -1234,8 +1634,8 @@ def batches_num_chunks(it, num_chunks: int):
 
 
 def build_mgf_str(
-    meta_spec_list: List[Tuple[dict, List[Tuple[str, np.ndarray]]]],
-    merge_charges=True,
+    meta_spec_list: List[Tuple[dict, np.ndarray]],
+    sort_peaks=True,
     parent_mass_keys=["PEPMASS", "parentmass", "PRECURSOR_MZ"],
 ) -> str:
     """build_mgf_str.
@@ -1247,7 +1647,7 @@ def build_mgf_str(
         str:
     """
     entries = []
-    for meta, spec in tqdm(meta_spec_list):
+    for meta, spec_ar in meta_spec_list:
         str_rows = ["BEGIN IONS"]
 
         for k in ["TITLE", "SEQ"]:
@@ -1266,12 +1666,12 @@ def build_mgf_str(
             if k not in parent_mass_keys:
                 str_rows.append(f"{k.upper().replace(' ', '_')}={v}")
 
-        if merge_charges:
-            spec_ar = np.vstack([i[1] for i in spec])
+        if sort_peaks:
             spec_ar = np.vstack([i for i in sorted(spec_ar, key=lambda x: x[0])])
         else:
-            raise NotImplementedError()
-        str_rows.extend([f"{i} {j}" for i, j in spec_ar])
+            spec_ar = np.array(spec_ar)
+        str_rows.append(f"Num peaks={len(spec_ar)}")
+        str_rows.extend([f"{i:.4f} {j:.4f}" for i, j in spec_ar])
         str_rows.append("END IONS")
 
         str_out = "\n".join(str_rows)

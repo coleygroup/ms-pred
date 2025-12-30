@@ -176,7 +176,7 @@ class JointModel(pl.LightningModule):
                     enumerate(zip(inten_preds["spec"], masses, num_frags)):
                 out_mass = mass[:n].reshape(-1)
                 out_inten = inten_pred.reshape(-1)
-                out_frag = nn_utils.bin2dec(frag_preds['frags'][i, :n]).repeat_interleave(num_shifts)
+                out_frag = frag_preds['frags'][i, :n].repeat_interleave(num_shifts, dim=0)
 
                 # add to output dict
                 out["spec"].append(torch.stack((out_mass, out_inten), dim=1))

@@ -6,8 +6,9 @@ example: # modify example to your hostname
   gen_ckpt: '/path/to/dag_nist20/split_1_rnd1/version_0/best.ckpt'
   inten_ckpt: '/path/to/dag_inten_nist20/split_1_rnd1/version_1/best.ckpt'
   cuda_devices: 0  # == CUDA_VISIBLE_DEVICES, set null if you want to use CPU
-  batch_size: 8
-  num_workers: 6  # adjust batch_size and num_workers to maximize your GPU util within your GPU memory
+  batch_size: 128
+  num_cpu_workers: 16
+  num_gpu_workers: 2  # adjust batch_size and num_workers to maximize your GPU util within your GPU memory
   sparse_k: 100  # number of predicted peaks by ICEBERG-Score
   max_nodes: 100  # number of nodes in fragmentation DAG predicted by ICEBERG-Gen
   threshold: 0.0
@@ -23,7 +24,8 @@ molgpu01:
   inten_ckpt: '/home/runzhong/ms-models/iceberg_results_20250816/dag_inten_nist20/split_1_rnd1/version_1/best.ckpt'
   cuda_devices: [1]
   batch_size: 128
-  num_workers: 2
+  num_cpu_workers: 16
+  num_gpu_workers: 2
   sparse_k: 100
   max_nodes: 100
   threshold: 0.0

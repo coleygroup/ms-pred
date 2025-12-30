@@ -9,6 +9,10 @@ from collections import defaultdict
 from functools import partial
 from typing import Dict, List
 import copy
+import requests, threading
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pygmtools as pygm
 
@@ -37,12 +41,8 @@ def get_args():
         default=False,
         help="If true, ignore the precursor peak",
     )
-    parser.add_argument(
-        "--binned-pred",
-        action="store_true",
-        default=False,
-        help="If true, the spec predictions are binned",
-    )
+    parser.add_argument("--num-bins", default=15000, help="Number of bins for spectra")
+    parser.add_argument("--upper-limit", default=1500, help="Largest m/z value")
     return parser.parse_args()
 
 
@@ -91,7 +91,7 @@ def process_spec_file(spec_name, name_to_colli: dict, spec_dir: Path, num_bins: 
 
 
 def dist_bin(cand_preds_dict: List[Dict], true_spec_dict: dict, sparse=True, ignore_peak=None, func='cos', selected_evs=None, agg=True) -> np.ndarray:
-    """cos_dist for binned spectrum
+    """distance function for binned spectrum
 
     Args:
         cand_preds_dict: List of candidates
@@ -103,7 +103,6 @@ def dist_bin(cand_preds_dict: List[Dict], true_spec_dict: dict, sparse=True, ign
     """
     dist = []
     true_npeaks = []
-    ## sampled_evs = np.random.choice(evs, 3, p = ())
     if selected_evs:
         true_spec_dict = {k: v for k, v in true_spec_dict.items() if str(k) in selected_evs}
 
@@ -173,7 +172,6 @@ def dist_bin(cand_preds_dict: List[Dict], true_spec_dict: dict, sparse=True, ign
 # define cosine/entropy functions
 cos_dist_bin = partial(dist_bin, func='cos')
 entropy_dist_bin = partial(dist_bin, func='entropy')
-emd_dist_bin = partial(dist_bin, func='emd')
 
 
 def cos_dist_hun(cand_preds_dict: List[Dict], true_spec_dict: dict, parent_mass: float, ignore_peak=False) -> np.ndarray:
@@ -235,11 +233,11 @@ def rank_test_entry(
         kwargs:
     """
     if dist_fn == "cos" and binned_pred:
-        dist = cos_dist_bin(cand_preds_dict=cand_preds, true_spec_dict=true_spec, ignore_peak=parent_mass_idx)
+        dist = cos_dist_bin(cand_preds_dict=cand_preds, true_spec_dict=true_spec, sparse=False, ignore_peak=parent_mass_idx)
     elif dist_fn == "cos" and not binned_pred:
         dist = cos_dist_hun(cand_preds_dict=cand_preds, true_spec_dict=true_spec, parent_mass=parent_mass, ignore_peak=parent_mass_idx is not None)
     elif dist_fn == "entropy" and binned_pred:
-        dist = entropy_dist_bin(cand_preds_dict=cand_preds, true_spec_dict=true_spec, ignore_peak=parent_mass_idx)
+        dist = entropy_dist_bin(cand_preds_dict=cand_preds, true_spec_dict=true_spec, sparse=False, ignore_peak=parent_mass_idx)
     elif dist_fn == "random":
         dist = np.random.randn(cand_preds.shape[0])
     else:
@@ -295,13 +293,72 @@ def rank_test_entry(
     }
 
 
+BASE_URL = "https://npclassifier.gnps2.org/classify"
+
+# ---- Thread-safe session factory (one Session per thread) ----
+_tls = threading.local()
+def get_session():
+    if getattr(_tls, "session", None) is None:
+        s = requests.Session()
+        retry = Retry(
+            total=3, backoff_factor=0.3,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods={"GET"},
+        )
+        # Increase pool_maxsize so multiple threads can reuse connections
+        s.mount("https://", HTTPAdapter(max_retries=retry, pool_connections=100, pool_maxsize=100))
+        s.headers.update({"User-Agent": "npclassifier-python-demo/0.2"})
+        _tls.session = s
+    return _tls.session
+
+def classify_smiles(smiles: str, timeout: float = 10.0) -> dict:
+    sess = get_session()
+    resp = sess.get(BASE_URL, params={"smiles": smiles}, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
+def classify_name_to_smi(name_to_smi: dict[str, str], max_workers: int = 16) -> dict[str, dict]:
+    # 1) De-duplicate identical SMILES to avoid paying for repeats
+    unique = {}
+    for name, smi in name_to_smi.items():
+        unique.setdefault(smi, []).append(name)
+
+    # 2) Parallel fetch unique SMILES
+    smi_to_result: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(classify_smiles, smi): smi for smi in unique}
+        for fut in tqdm(as_completed(futures), total=len(futures), desc="Classifying"):
+            smi = futures[fut]
+            try:
+                smi_to_result[smi] = fut.result()
+            except requests.HTTPError as e:
+                smi_to_result[smi] = {"error": f"HTTP {e.response.status_code}", "details": str(e)}
+            except requests.RequestException as e:
+                smi_to_result[smi] = {"error": "request-failed", "details": str(e)}
+
+    # 3) Expand back to name→result (keep only pathway_results if you prefer)
+    name_to_result = {}
+    for smi, names in unique.items():
+        for name in names:
+            name_to_result[name] = smi_to_result[smi]
+    return name_to_result
+
+def name_to_superclass(name_to_smi: dict[str, str], **kwargs) -> dict[str, list[str] | None]:
+    raw = classify_name_to_smi(name_to_smi, **kwargs)
+    return {
+        name: (res.get("superclass_results") if isinstance(res, dict) and "superclass_results" in res else None)
+        for name, res in raw.items()
+    }
+
+
 def main(args):
     """main."""
     dataset = args.dataset
     formula_dir_name = args.formula_dir_name
     dist_fn = args.dist_fn
     ignore_parent_peak = args.ignore_parent_peak
-    binned_pred = args.binned_pred
+    num_bins = args.num_bins
+    upper_limit = args.upper_limit
     data_folder = Path(f"data/spec_datasets/{dataset}")
     form_folder = data_folder / f"subformulae/{formula_dir_name}/"
     data_df = pd.read_csv(data_folder / "labels.tsv", sep="\t")
@@ -310,6 +367,8 @@ def main(args):
     name_to_smi = dict(data_df[["spec", "smiles"]].values)
     name_to_ion = dict(data_df[["spec", "ionization"]].values)
     name_to_colli = dict(data_df[["spec", "collision_energies"]].values)
+    name_to_class = name_to_superclass(name_to_smi, max_workers=16)
+    name_to_class = {name: (cls[0] if len(cls) == 1 else None) for name, cls in name_to_class.items()}
 
     pred_file = Path(args.pred_file)
     outfile = args.outfile
@@ -324,37 +383,28 @@ def main(args):
         outfile_grouped_peak = (
                 pred_file.parent / f"rerank_eval_grouped_npeak_{dist_fn}.tsv"
         )
+        outfile_grouped_class = (
+                pred_file.parent / f"rerank_eval_grouped_class_{dist_fn}.tsv"
+        )
     else:
         outfile = Path(outfile)
         outfile_grouped_ion = outfile.parent / f"{outfile.stem}_grouped_ion.tsv"
         outfile_grouped_mass = outfile.parent / f"{outfile.stem}_grouped_mass.tsv"
         outfile_grouped_peak = outfile.parent / f"{outfile.stem}_grouped_npeak.tsv"
+        outfile_grouped_class = outfile.parent / f"{outfile.stem}_grouped_class.tsv"
 
-    pred_specs = common.HDF5Dataset(pred_file)
-    if binned_pred:
-        upper_limit = pred_specs.attrs["upper_limit"]
-        num_bins = pred_specs.attrs["num_bins"]
-    use_sparse = pred_specs.attrs["sparse_out"]
+    pred_specs = common.PredSpecDB(h5_path=pred_file, mode='r')
 
     pred_spec_ars = []
     pred_ikeys = []
     pred_spec_names = []
-    # iterate over h5 layers
-    for pred_spec_obj in pred_specs.h5_obj.values():
-        for smiles_obj in pred_spec_obj.values():
-            ikey = None
-            spec_dict = {}
-            name = None
-            for collision_eng_key, collision_eng_obj in smiles_obj.items():
-                if name is None:
-                    name = collision_eng_obj.attrs['spec_name']
-                if ikey is None:
-                    ikey = collision_eng_obj.attrs['ikey']
-                collision_eng_key = common.get_collision_energy(collision_eng_key)
-                spec_dict[collision_eng_key] = collision_eng_obj['spec'][:]
-            pred_spec_ars.append(spec_dict)
-            pred_ikeys.append(ikey)
-            pred_spec_names.append(name)
+    for spec_id, cand_ikey, spec_dict in pred_specs.get_all_specs():
+        pred_spec = {}
+        for ce, spec_data in spec_dict.items():
+            pred_spec[common.get_collision_energy(ce)] = spec_data.bin_spectrum()
+        pred_spec_ars.append(pred_spec)
+        pred_ikeys.append(cand_ikey.strip('ikey '))
+        pred_spec_names.append(spec_id.strip('pred_'))
 
     pred_spec_ars = np.array(pred_spec_ars)
     pred_ikeys = np.array(pred_ikeys)
@@ -373,25 +423,15 @@ def main(args):
     for idx in range(len(pred_spec_ars)):  # filter predicted spec
         pred_spec_ars[idx] = {k: v for k, v in pred_spec_ars[idx].items() if 'nan' not in k}
 
-    # Only use sparse valid for now
-    assert use_sparse
+    read_spec = partial(
+        process_spec_file,
+        name_to_colli=name_to_colli,
+        num_bins=num_bins,
+        upper_limit=upper_limit,
+        spec_dir=form_folder,
+        binned_spec=True,  # load binned true spectrum
+    )
 
-    if binned_pred:
-        read_spec = partial(
-            process_spec_file,
-            name_to_colli=name_to_colli,
-            num_bins=num_bins,
-            upper_limit=upper_limit,
-            spec_dir=form_folder,
-            binned_spec=True,  # load binned true spectrum
-        )
-    else:
-        read_spec = partial(
-            process_spec_file,
-            name_to_colli=name_to_colli,
-            spec_dir=form_folder,
-            binned_spec=False,  # load sparse true spectrum
-        )
     true_specs = common.chunked_parallel(
         pred_spec_names_unique,
         read_spec,
@@ -427,7 +467,7 @@ def main(args):
             continue
         all_entries.append(new_entry)
 
-    rank_test_entry_ = partial(rank_test_entry, dist_fn=dist_fn, binned_pred=binned_pred)
+    rank_test_entry_ = partial(rank_test_entry, dist_fn=dist_fn, binned_pred=True)
     all_out = [rank_test_entry_(**test_entry) for test_entry in all_entries]
 
     # Compute avg and individual stats
@@ -455,11 +495,13 @@ def main(args):
 
     for i in output_entries:
         i["ion"] = name_to_ion[i["spec_name"]]
+        i["class"] = name_to_class[i["spec_name"]]
 
     df = pd.DataFrame(output_entries)
 
     for group_key, out_name in zip(
-        ["mass_bin", "ion", "peak_bin_avg"], [outfile_grouped_mass, outfile_grouped_ion, outfile_grouped_peak]
+        ["mass_bin", "ion", "peak_bin_avg", "class"],
+        [outfile_grouped_mass, outfile_grouped_ion, outfile_grouped_peak, outfile_grouped_class]
     ):
         df_grouped = pd.concat(
             [df.groupby(group_key).mean(numeric_only=True), df.groupby(group_key).size()], axis=1

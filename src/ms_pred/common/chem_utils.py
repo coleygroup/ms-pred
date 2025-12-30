@@ -1,11 +1,15 @@
 """chem_utils.py"""
 
 import re
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from functools import reduce
 from typing import List
 import logging
+
+import rdkit.sping
 import torch
 from rdkit import Chem
 from rdkit.Chem import Atom
@@ -14,14 +18,12 @@ from rdkit.Chem.rdchem import HybridizationType, BondType, ChiralType
 
 from rdkit.Chem.rdMolDescriptors import CalcMolFormula
 from rdkit.Chem.Descriptors import ExactMolWt
+from functools import lru_cache
+from platformdirs import user_cache_dir
+
 try:
     from rdkit.Chem.MolStandardize.tautomer import TautomerCanonicalizer, TautomerTransform
     _RD_TAUTOMER_CANONICALIZER = 'v1'
-    _TAUTOMER_TRANSFORMS = (
-        TautomerTransform('1,3 heteroatom H shift',
-                          '[#7,S,O,Se,Te;!H0]-[#7X2,#6,#15]=[#7,#16,#8,Se,Te]'),
-        TautomerTransform('1,3 (thio)keto/enol r', '[O,S,Se,Te;X2!H0]-[C]=[C]'),
-    )
 except ModuleNotFoundError:
     from rdkit.Chem.MolStandardize.rdMolStandardize import TautomerEnumerator  # newer rdkit
     _RD_TAUTOMER_CANONICALIZER = 'v2'
@@ -260,6 +262,44 @@ instrument2onehot_pos = {
 }
 
 
+@lru_cache(maxsize=1)
+def _get_tautomer_canonicalizer():
+    from rdkit.Chem.MolStandardize.tautomer import (
+        TautomerCanonicalizer, TautomerTransform
+    )
+
+    transforms = (
+        TautomerTransform(
+            '1,3 heteroatom H shift',
+            '[#7,S,O,Se,Te;!H0]-[#7X2,#6,#15]=[#7,#16,#8,Se,Te]'
+        ),
+        TautomerTransform(
+            '1,3 (thio)keto/enol r',
+            '[O,S,Se,Te;X2!H0]-[C]=[C]'
+        ),
+    )
+    return TautomerCanonicalizer(transforms=transforms)
+
+
+@lru_cache(maxsize=1)
+def _get_tautomer_enumerator():
+    from rdkit.Chem.MolStandardize.rdMolStandardize import TautomerEnumerator, CleanupParameters
+    tautomer_transform_path = Path(user_cache_dir(f"ms-pred/tautomer_transform_rdkit{rdkit.sping.version}.txt"))
+    if not tautomer_transform_path.exists():
+        tautomer_transform_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(tautomer_transform_path, 'w') as f:
+            f.write(
+                "// Name SMARTS Bonds Charges\n"
+                "1,3 hetero atom H shift\t[#7,S,O,Se,Te;!H0]-[#7X2,#6,#15]=[#7,#16,#8,Se,Te]\n"
+                "1,3 (thio)keto/enol r\t[O,S,Se,Te;X2!H0]-[C]=[C]\n"
+            )
+
+    p = CleanupParameters()
+    p.tautomerTransformsFile = tautomer_transform_path
+
+    return TautomerEnumerator(p)
+
+
 def is_positive_adduct(adduct_str: str) -> bool:
     """Check the adduct string is positive or negative (return True if positive)"""
     return adduct_str[-1] == '+'
@@ -488,12 +528,12 @@ def canonical_mol_from_inchi(inchi):
     mol = Chem.MolFromInchi(inchi)
     if mol is None:
         return None
-    if _RD_TAUTOMER_CANONICALIZER == 'v1':
-        _molvs_t = TautomerCanonicalizer(transforms=_TAUTOMER_TRANSFORMS)
-        mol = _molvs_t.canonicalize(mol)
+    if _RD_TAUTOMER_CANONICALIZER == "v1":
+        canon = _get_tautomer_canonicalizer()
+        mol = canon.canonicalize(mol)
     else:
-        _te = TautomerEnumerator()
-        mol = _te.Canonicalize(mol)
+        enum = _get_tautomer_enumerator()
+        mol = enum.Canonicalize(mol)
     return mol
 
 
@@ -708,7 +748,7 @@ def collision_energy_to_float(colli_eng):
         return float(colli_eng)
 
 
-def sanitize(mol_list: List[Chem.Mol], mol_type='mol', return_indices=False) -> List[Chem.Mol]:
+def sanitize(mol_list: List[Chem.Mol], mol_type='mol', return_indices=False, canonicalize=True) -> List[Chem.Mol]:
     """sanitize a list of mols"""
     new_mol_list = []
     new_idx_list = []
@@ -737,20 +777,66 @@ def sanitize(mol_list: List[Chem.Mol], mol_type='mol', return_indices=False) -> 
             mol = Chem.MolFromSmiles(smiles)
             if mol is None:
                 continue
-            inchi = Chem.MolToInchi(mol)
-            mol = canonical_mol_from_inchi(inchi)
+            if canonicalize: # avoids weird tautomers, time-consuming
+                if _RD_TAUTOMER_CANONICALIZER == "v1":
+                    canon = _get_tautomer_canonicalizer()
+                    mol = canon.canonicalize(mol)
+                else:
+                    enum = _get_tautomer_enumerator()
+                    mol = enum.Canonicalize(mol)
+                if mol is None:
+                    continue
+
+            # block weird compounds such as [FeH6] and [SH6]
+            atoms = mol.GetAtoms()
+            if len(atoms) > 1:
+                first = atoms[0].GetSymbol()
+                if first in ("Fe", "S"):
+                    for idx, a in enumerate(atoms):
+                        if idx == 0:
+                            continue
+                        if a.GetSymbol() != "H":
+                            break
+                    else:
+                        # all remaining atoms are H → FeHₙ or SHₙ
+                        continue
+
             if mol is not None:
                 new_mol_list.append(mol)
                 new_idx_list.append(idx)
         except ValueError:
             logging.warning(f"Bad smiles")
 
-    if mol_type == 'smi':
-        new_mol_list = [Chem.MolToSmiles(mol) for mol in new_mol_list]
-    elif mol_type == 'inchi':
-        new_mol_list = [Chem.MolToInchi(mol) for mol in new_mol_list]
+    if canonicalize:
+        if mol_type == 'smi':
+            new_mol_list = [Chem.MolToSmiles(mol) for mol in new_mol_list]
+        elif mol_type == 'inchi':
+            new_mol_list = [Chem.MolToInchi(mol) for mol in new_mol_list]
+    else:
+        new_mol_list = [mol_list[idx] for idx in new_idx_list]
 
     if return_indices:
         return new_mol_list, new_idx_list
     else:
         return new_mol_list
+
+
+def get_formula_subdir(form):
+    c_path, o_path, h_path = None, None, None
+    for (chem_symbol, num) in re.findall(CHEM_FORMULA_SIZE, form):
+        if chem_symbol == 'C':
+            c_path = f'{chem_symbol}{num}/'
+        if chem_symbol == 'O':
+            o_path = f'{chem_symbol}{num}/'
+        if chem_symbol == 'H':
+            h_path = f'{chem_symbol}{num}/'
+    subdir = ''
+    if c_path is not None:
+        subdir += c_path
+    if o_path is not None:
+        subdir += o_path
+    if h_path is not None:
+        subdir += h_path
+    if len(subdir) == 0:
+        subdir = 'others'
+    return subdir

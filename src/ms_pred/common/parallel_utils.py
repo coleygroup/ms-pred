@@ -60,6 +60,7 @@ def chunked_parallel(
     max_cpu=16,
     output_func=None,
     task_name="",
+    unordered=False,
     **kwargs,
 ):
     """chunked_parallel.
@@ -70,13 +71,18 @@ def chunked_parallel(
         chunks: number of chunks
         max_cpu: Max num cpus
         output_func: an output function that writes function output to the disk
+        unordered: if True, use uimap; otherwise, use imap
     """
     # Adding it here fixes somessetting disrupted elsewhere
 
     def batch_func(list_inputs):
         outputs = []
         for i in list_inputs:
-            outputs.append(function(i))
+            try:
+                outp = function(i)
+            except TypeError: # missing argument
+                outp = function(*i)
+            outputs.append(outp)
         return outputs
 
     list_len = len(input_list)
@@ -92,7 +98,8 @@ def chunked_parallel(
     from pathos import multiprocessing as mp
     cpus = min(mp.cpu_count(), max_cpu)
     with mp.ProcessPool(processes=cpus, **kwargs) as pool:
-        iter_outputs = tqdm(pool.imap(batch_func, chunked_list), total=len(chunked_list), desc=task_name)
+        pool_func = pool.uimap if unordered else pool.imap
+        iter_outputs = tqdm(pool_func(batch_func, chunked_list), total=len(chunked_list), desc=task_name)
         if output_func is None:
             list_outputs = list(iter_outputs)
             # Unroll
@@ -177,7 +184,7 @@ def subprocess_parallel(cmd_list, max_parallel=4, max_parallel_per_gpu=None, gpu
 
             def run_command(cmd, new_env, job_id, gpu_id):
                 if delay_start > 0:
-                    time.sleep(delay_start * job_id)
+                    time.sleep(delay_start * gpu_id)
                 print(f"Running on GPU {gpu_id}: {cmd}\n")
                 env = os.environ.copy()
                 env['CUDA_VISIBLE_DEVICES'] = str(gpu_id)

@@ -82,8 +82,7 @@ def dag_to_spec(dag: dict, max_peaks: int, min_inten: float, precision=4):
         adduct=adduct,
     )
     spec_ar = np.vstack([mz, intens]).transpose(1, 0)
-    spec_obj = [("spec", spec_ar)]
-    return meta, spec_obj
+    return meta, spec_ar
 
 
 def file_to_spec(dag_file: dict, max_peaks: int, min_inten: float):
