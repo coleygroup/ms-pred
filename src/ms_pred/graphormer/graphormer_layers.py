@@ -30,29 +30,23 @@ class GraphNodeFeature(nn.Module):
     """
 
     def __init__(
-        self, num_heads, num_atom_features, num_in_degree, num_out_degree, hidden_dim, n_layers
+        self, num_heads, num_atom_features, num_degree, hidden_dim, n_layers,
     ):
         super(GraphNodeFeature, self).__init__()
         self.num_heads = num_heads
         self.num_atom_features = num_atom_features
-
         # 1 for graph token
         self.atom_encoder = nn.Linear(num_atom_features, hidden_dim)
-
-        self.in_degree_encoder = nn.Embedding(num_in_degree, hidden_dim, padding_idx=0)
-        self.out_degree_encoder = nn.Embedding(
-            num_out_degree, hidden_dim, padding_idx=0
-        )
+        self.degree_encoder = nn.Embedding(num_degree, hidden_dim, padding_idx=0)
 
         self.graph_token = nn.Embedding(1, hidden_dim)
 
         self.apply(lambda module: init_params(module, n_layers=n_layers))
 
     def forward(self, batched_data):
-        x, in_degree, out_degree = (
+        x, degree = (
             batched_data["x"],
-            batched_data["in_degree"],
-            batched_data["out_degree"],
+            batched_data["degree"],
         )
         n_graph, n_node = x.size()[:2]
 
@@ -63,8 +57,7 @@ class GraphNodeFeature(nn.Module):
         #     node_feature += perturb
         node_feature = (
             node_feature
-            + self.in_degree_encoder(in_degree)
-            + self.out_degree_encoder(out_degree)
+            + self.degree_encoder(degree)
         )
 
         graph_token_feature = self.graph_token.weight.unsqueeze(0).repeat(n_graph, 1, 1)
@@ -113,7 +106,6 @@ class GraphAttnBias(nn.Module):
             batched_data["spatial_pos"],
             batched_data["x"],
         )
-        # in_degree, out_degree = batched_data.in_degree, batched_data.in_degree
         edge_input, attn_edge_type = (
             batched_data["edge_input"],
             batched_data["attn_edge_type"],

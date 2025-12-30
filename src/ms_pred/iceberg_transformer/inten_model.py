@@ -16,8 +16,6 @@ import functools
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from ms_pred.graphormer.graphormer_graph_encoder import GraphormerGraphEncoder
-from ms_pred.efficient_attention_transformer.efficient_attention_transformer import EfficientAttentionTransformerEncoder, EfficientAttentionTransformerDecoder
-
 
 import ms_pred.common as common
 import ms_pred.nn_utils as nn_utils
@@ -48,7 +46,6 @@ class IntenModel(pl.LightningModule):
         embed_collision=False,
         embed_elem_group=False,
         encode_forms: bool = False,
-        add_hs: bool = False,
         loss_fn: str = "cosine",
         binned_targs:bool = False,
         sk_tau: float = 0.01,
@@ -78,7 +75,6 @@ class IntenModel(pl.LightningModule):
             embed_collision (bool, optional): _description_. Defaults to False.
             embed_elem_group (bool, optional): _description_. Defaults to False.
             encode_forms (bool, optional): _description_. Defaults to False.
-            add_hs (bool, optional): _description_. Defaults to False.
 
         Raises:
             ValueError: _description_
@@ -93,7 +89,6 @@ class IntenModel(pl.LightningModule):
         self.embed_collision = embed_collision
         self.embed_elem_group = embed_elem_group
         self.encode_forms = encode_forms
-        self.add_hs = add_hs
         self.decoder_layers = decoder_layers
         self.encoder_layers = encoder_layers
         self.binned_targs = binned_targs
@@ -179,8 +174,7 @@ class IntenModel(pl.LightningModule):
             
             self.root_module = GraphormerGraphEncoder(
                 num_atom_features=node_feats+adduct_shift+collision_shift,
-                num_in_degree=8,  # Sufficient for molecular graphs
-                num_out_degree=8,  # Same as in_degree for undirected graphs
+                num_degree=8,  # Sufficient for molecular graphs
                 num_edge_features=edge_feats, 
                 num_spatial=1025,  # spatial_pos_max + 1 for padding
                 num_edge_dis=self.num_edge_dis,  # Edge distance features

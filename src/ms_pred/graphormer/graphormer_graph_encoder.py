@@ -45,8 +45,7 @@ class GraphormerGraphEncoder(nn.Module):
     def __init__(
         self,
         num_atom_features: int,
-        num_in_degree: int,
-        num_out_degree: int,
+        num_degree: int,
         num_edge_features: int,
         num_spatial: int,
         num_edge_dis: int,
@@ -85,8 +84,7 @@ class GraphormerGraphEncoder(nn.Module):
         self.graph_node_feature = GraphNodeFeature(
             num_heads=num_attention_heads,
             num_atom_features=num_atom_features,
-            num_in_degree=num_in_degree,
-            num_out_degree=num_out_degree,
+            num_degree=num_degree,
             hidden_dim=embedding_dim,
             n_layers=num_encoder_layers,
         )

@@ -51,6 +51,7 @@ def add_frag_train_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
     parser.add_argument("--embed-adduct", default=False, action="store_true")
     parser.add_argument("--embed-collision", default=False, action="store_true")
     parser.add_argument("--embed-elem-group", default=False, action="store_true")
+    parser.add_argument("--encode-forms", default=False, action="store_true")
 
     # Model params
     parser.add_argument("--dropout", default=0.2, type=float)
@@ -65,6 +66,8 @@ def add_frag_train_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
     parser.add_argument("--num-edge-dis", default=10, type=int)
     parser.add_argument("--sk-tau", default=0.05, type=float)
     parser.add_argument("--linsat-tau", default=0.01, type=float)
+    parser.add_argument("--include-unassigned", default=False, action="store_true")
+    parser.add_argument("--max-broken-bonds", default=6, type=int)
 
     return parser
 
@@ -200,7 +203,7 @@ def train_model():
         weight_decay=kwargs["weight_decay"],
         warmup=kwargs["warmup"],
         root_encode=kwargs["root_encode"],
-        node_feats=train_dataset.get_node_feats(),
+        node_feats=tree_processor.get_node_feats(),
         edge_feats=tree_processor.get_edge_feats(),
         max_frags=kwargs["max_frags"],
         multi_hop_max_dist=kwargs["multi_hop_max_dist"],
@@ -208,8 +211,10 @@ def train_model():
         embed_adduct=kwargs["embed_adduct"],
         embed_collision=kwargs["embed_collision"],
         embed_elem_group=kwargs["embed_elem_group"],
+        encode_forms=kwargs["encode_forms"],
         sk_tau=kwargs["sk_tau"],
         linsat_tau=kwargs["linsat_tau"],
+        include_unassigned=kwargs["include_unassigned"]
     )
 
     # Trainer

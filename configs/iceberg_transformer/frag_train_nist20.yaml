@@ -26,17 +26,19 @@ universal_args:
   dropout: [0]
   hidden-size: [256]
   layers: [3]
-  max-frags: [60]
-  pe-embed-k: [14]
+  max-frags: [150]
+  pe-embed-k: [0]
+  include-unassigned: [False]
 
   root-encode: [graphormer]
   embed-elem-group: [True]
   embed-adduct: [True]
   embed-collision: [True]
   add-hs: [true]
+  encode-form: [true]
   sk-tau: [0.05]
-  linsat-tau: [20]
-  multi-hop-max-dist: [5]
+  linsat-tau: [15]
+  multi-hop-max-dist: [10]
   num-edge-dis: [10]
 
 iterative_args:

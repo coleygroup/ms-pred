@@ -285,7 +285,7 @@ def train_model():
         filename="best",
         save_weights_only=False,
     )
-    earlystop_callback = EarlyStopping(monitor=monitor, patience=5)
+    earlystop_callback = EarlyStopping(monitor=monitor, patience=3)
     callbacks = [earlystop_callback, checkpoint_callback]
 
     trainer = pl.Trainer(

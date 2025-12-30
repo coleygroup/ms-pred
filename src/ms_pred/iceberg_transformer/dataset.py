@@ -193,7 +193,7 @@ class TreeProcessor:
             atomic_num = atom.GetAtomicNum()
             feats.extend([float(atomic_num == x) for x in common.VALID_ATOM_NUM])
             feats.append(float(atomic_num not in common.VALID_ATOM_NUM))
-            degree = atom.GetTotalDegree()
+            degree = atom.GetTotalDegree()-atom.GetTotalNumHs()
             deg_oh = [float(degree == x) for x in range(common.MAX_COMMON_DEGREE + 1)]
             deg_oh.append(float(degree > common.MAX_COMMON_DEGREE))
             feats.extend(deg_oh)
@@ -347,13 +347,14 @@ class TreeProcessor:
                     bond_ring_counts[key] += 1
 
         node_features = []
+        degrees = []
         for atom_idx in range(num_atoms):
             atom = mol.GetAtomWithIdx(atom_idx)
             feats = []
             atomic_num = atom.GetAtomicNum()
             feats.extend([float(atomic_num == x) for x in common.VALID_ATOM_NUM])
             feats.append(float(atomic_num not in common.VALID_ATOM_NUM))
-            degree = atom.GetTotalDegree()
+            degree = atom.GetTotalDegree()-atom.GetTotalNumHs()
             deg_oh = [float(degree == x) for x in range(common.MAX_COMMON_DEGREE + 1)]
             deg_oh.append(float(degree > common.MAX_COMMON_DEGREE))
             feats.extend(deg_oh)
@@ -397,6 +398,7 @@ class TreeProcessor:
                 charge = 0.0
             feats.append(charge)
             node_features.append(feats)
+            degrees.append(degree)
         x = torch.tensor(node_features, dtype=torch.float32)
         if self.pe_embed_k > 0:
             pe_embeds = self.get_pe_for_tensor(mol, x)
@@ -466,8 +468,7 @@ class TreeProcessor:
         for (i, j), feats in bond_features_dict.items():
             attn_edge_type[i, j] = torch.tensor(feats, dtype=torch.float32)
 
-        in_degree = torch.tensor([atom.GetDegree() for atom in mol.GetAtoms()], dtype=torch.long)
-        out_degree = in_degree.clone()
+        degree = torch.tensor(degrees, dtype=torch.long)
 
         edge_input = torch.zeros([num_atoms, num_atoms, multi_hop_max_dist, bond_feat_dim], dtype=torch.long)
         bond_feat_tensor_long = attn_edge_type.long()
@@ -487,7 +488,7 @@ class TreeProcessor:
                     v = path_nodes[hop + 1]
                     edge_input[src, tgt, hop] = bond_feat_tensor_long[u, v]
 
-        attn_bias = torch.where(spatial_pos >= spatial_pos_max, float("-inf"), 0.0)
+        attn_bias = torch.where(spatial_pos >= spatial_pos_max, -99999, 0.0)
         attn_bias = F.pad(attn_bias, (1, 0, 1, 0), value=0.0)
 
         return {
@@ -495,8 +496,7 @@ class TreeProcessor:
             "attn_bias": attn_bias,
             "attn_edge_type": attn_edge_type,
             "spatial_pos": spatial_pos,
-            "in_degree": in_degree,
-            "out_degree": out_degree,
+            "degree": degree,
             "edge_input": edge_input,
             "num_atoms": num_atoms,
         }
@@ -532,9 +532,6 @@ class IntenDataset(DAGDataset):
         outdict = {"name": name, "adduct": adduct, "precursor": precursor}
         outdict.update(entry)
         return outdict
-
-    def get_node_feats(self) -> int:
-        return self.tree_processor.get_node_feats()
 
     @classmethod
     def get_collate_fn(cls):
@@ -615,8 +612,7 @@ class IntenDataset(DAGDataset):
             attn_bias_batch = torch.full([batch_size, max_nodes_gf + 1, max_nodes_gf + 1], -99999, dtype=torch.float32)
             attn_edge_type_batch = torch.zeros([batch_size, max_nodes_gf, max_nodes_gf, edge_feat_dim], dtype=torch.float32)
             spatial_pos_batch = torch.zeros([batch_size, max_nodes_gf, max_nodes_gf], dtype=torch.long)
-            in_degree_batch = torch.zeros([batch_size, max_nodes_gf], dtype=torch.long)
-            out_degree_batch = torch.zeros([batch_size, max_nodes_gf], dtype=torch.long)
+            degree_batch = torch.zeros([batch_size, max_nodes_gf], dtype=torch.long)
             edge_input_batch = torch.zeros([batch_size, max_nodes_gf, max_nodes_gf, max_dist, edge_feat_dim], dtype=torch.float32)
 
             for i, gf_input in enumerate(graphormer_inputs):
@@ -626,8 +622,7 @@ class IntenDataset(DAGDataset):
                 attn_bias_batch[i, :num_nodes+1, :num_nodes+1] = gf_input['attn_bias']
                 attn_edge_type_batch[i, :num_nodes, :num_nodes] = gf_input['attn_edge_type']
                 spatial_pos_batch[i, :num_nodes, :num_nodes] = gf_input['spatial_pos']
-                in_degree_batch[i, :num_nodes] = gf_input['in_degree']
-                out_degree_batch[i, :num_nodes] = gf_input['out_degree']
+                degree_batch[i, :num_nodes] = gf_input['degree']
                 edge_input_batch[i, :num_nodes, :num_nodes, :edge_dist] = gf_input['edge_input']
 
             graphormer_batch = {
@@ -635,8 +630,7 @@ class IntenDataset(DAGDataset):
                 'attn_bias': attn_bias_batch,
                 'attn_edge_type': attn_edge_type_batch,
                 'spatial_pos': spatial_pos_batch,
-                'in_degree': in_degree_batch,
-                'out_degree': out_degree_batch,
+                'degree': degree_batch,
                 'edge_input': edge_input_batch,
             }
             num_atoms = torch.tensor([gf['num_atoms'] for gf in graphormer_inputs], dtype=torch.long)
@@ -666,50 +660,5 @@ class IntenDataset(DAGDataset):
             "total_hs": total_hs_list,
             "graphormer_input": graphormer_batch,
             "num_atoms": num_atoms,
-        }
-        return output
-    
-class GenDataset(DAGDataset):
-    def __init__(
-        self,
-        df: pd.DataFrame,
-        magma_h5: Path,
-        magma_map: dict,
-        **kwargs,
-    ):
-        super().__init__(df, magma_h5, magma_map, **kwargs)
-        self.read_tree = self.load_tree
-
-    def __getitem__(self, idx: int):
-        name = self.spec_names[idx]
-        adduct = self.name_to_adducts[name]
-        precursor = self.name_to_precursors[name]
-        entry = self.read_fn(name)
-        outdict = {"name": name, "adduct": adduct, "precursor": precursor}
-        outdict.update(entry)
-        return outdict
-
-    @classmethod
-    def get_collate_fn(cls):
-        return GenDataset.collate_fn
-
-    def load_tree(self, x):
-        filekeys = self.name_to_dict[x]["magma_file"]
-        if not type(self.magma_h5) is common.PredSpecDB:
-            self.magma_h5 = common.PredSpecDB(self.magma_h5)
-        spec = self.magma_h5.read(*filekeys)
-        return spec
-
-    @staticmethod
-    def collate_fn(batch):
-        names = [item["name"] for item in batch]
-        smis = [item["root_smiles"] for item in batch]
-        adducts = torch.FloatTensor([item["adduct"] for item in batch])
-        precursor_mzs = torch.FloatTensor([item["precursor"] for item in batch])
-        output = {
-            "smis": smis,
-            "names": names,
-            "adducts": adducts,
-            "precursor_mzs": precursor_mzs,
         }
         return output

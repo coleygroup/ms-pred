@@ -1,4 +1,4 @@
-name: test
+name: ms-gen
 channels:
 - pytorch
 - nvidia
@@ -12,7 +12,7 @@ dependencies:
 - matplotlib=3.10.*
 - rdkit=2025.03.*
 - pytorch-lightning=1.6.*
-- pip=21.2.*
+- pip=25.2
 - ipykernel=6.29.*
 - pytorch=2.4.1
 - pytorch-cuda=11.8
