@@ -79,10 +79,6 @@ def add_inten_train_args(parser):
     parser.add_argument("--decoder-layers", default=6, type=int)
     parser.add_argument("--encoder-layers", default=6, type=int)
     parser.add_argument("--max-broken-bonds", default=6, type=int)
-
-    # Loss weights
-    parser.add_argument("--gen-weight", default=1.0, action="store", type=float)
-    parser.add_argument("--inten-weight", default=1.0, action="store", type=float)
     
     # Other params
     parser.add_argument("--warmup", default=1000, action="store", type=int)
@@ -158,8 +154,6 @@ def train_model():
     tree_processor = TreeProcessor(
         pe_embed_k=pe_embed_k,
         root_encode=root_encode,
-        binned_targs=binned_targs,
-        add_hs=add_hs,
         embed_elem_group=embed_elem_group,
         multi_hop_max_dist=multi_hop_max_dist,
     )
@@ -171,7 +165,6 @@ def train_model():
         magma_map=name_to_keys,
         num_workers=num_workers,
         root_encode=root_encode,
-        binned_targs=binned_targs,
         add_hs=add_hs,
         embed_elem_group=embed_elem_group,
         tree_processor=tree_processor,
@@ -183,7 +176,6 @@ def train_model():
         magma_map=name_to_keys,
         num_workers=num_workers,
         root_encode=root_encode,
-        binned_targs=binned_targs,
         add_hs=add_hs,
         embed_elem_group=embed_elem_group,
         tree_processor=tree_processor,
@@ -195,7 +187,6 @@ def train_model():
         magma_map=name_to_keys,
         num_workers=num_workers,
         root_encode=root_encode,
-        binned_targs=binned_targs,
         add_hs=add_hs,
         embed_elem_group=embed_elem_group,
         tree_processor=tree_processor,

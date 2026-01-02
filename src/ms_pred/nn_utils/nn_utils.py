@@ -747,13 +747,10 @@ class SlotDecoder(nn.Module):
         # # Use both graph token and nodes as memory for decoder
         memory = torch.cat([graph_tokens, node_embeddings], dim=1)  # [B, 1+N, d]
         outs = []
-        # assert False, (slots.device, memory.device, memory_key_padding_mask.device) 
         for decoder_layer in self.decoder_layers:
             slots = decoder_layer(tgt=slots, memory=memory, memory_key_padding_mask=memory_key_padding_mask)  # [B, K, d]
             outs.append(slots)
         return torch.stack(outs, dim=0)
-        # out = self.decoder(tgt=slots, memory=memory, memory_key_padding_mask=memory_key_padding_mask)  # [B, K, d]
-        # return out[:, :-1, :]
     
 class SlotAttention(nn.Module):
     def __init__(self, num_slots, dim, iters = 3, eps = 1e-8, hidden_dim = 128):

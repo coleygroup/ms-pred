@@ -1,26 +1,28 @@
 launcher_args: {experiment_name: iceberg_transformer_nist20,
-  script_name: "src/ms_pred/iceberg_transformer/train_inten.py",
+  script_name: "src/ms_pred/iceberg_transformer/train_contr_inten.py",
   slurm_script: launcher_scripts/generic_slurm.sh, 
   launch_method: local,
-  visible_devices: [3]
+  visible_devices: [2, 3]
 }
 universal_args:
   _slurm_args:
   - {_num_gpu: 1, cpus-per-task: 7, job-name: iceberg_transformer_train, mem-per-cpu: 8G,
     time: '1-18:00:00'}
-  debug: [false]
+  debug: [true]
   gpu: [true]
 
   seed: [1]
-  num-workers: [32]
-  batch-size: [32]
+  num-workers: [64]
+  batch-size: [16]
   max-epochs: [200]
 
   dataset-name: [nist20]
   split-name: [split_1.tsv]
 
-  learning-rate: [0.0003]
+  learning-rate: [0.0001]
   lr-decay-rate: [0.825]
+  num-decoys: [3]
+  num-decoy-h5s: [10]
 
   dropout: [0.1]
   mpnn-type: [GGNN]
@@ -34,6 +36,7 @@ universal_args:
   decoder-layers: [3]
   encoder-layers: [3]
   max-broken-bonds: [6]
+  grad-accumulate: [2]
 
   root-encode: [graphormer]
   inject-early: [False]
@@ -41,14 +44,19 @@ universal_args:
   embed-adduct: [True]
   embed-collision: [True]
   embed-elem-group: [True]
-  add-hs: [true]
   ppm-tol: [20]
   loss-fn: ["cosine"]
+  contr-loss-fn: ["entropy"]
+  contr-weight: [1]
   multi-hop-max-dist: [10]
   num-edge-dis: [10]
+  max-frags: [100]
 
 iterative_args:
   -  split-name: [split_1.tsv]
      save-dir: [split_1_rnd1]
      seed: [1]
      magma-folder: [results/frag_only_nist20/split_1_rnd1/preds_train_100_inten.hdf5]
+     decoy-path: ['results/frag_only_nist20/split_1_rnd1/preds_train_100/decoy_frag_preds/decoy_frag_preds.hdf5']
+     train-checkpoint: [results/iceberg_transformer_nist20/split_1_rnd1/version_81/best.ckpt]
+     

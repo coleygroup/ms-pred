@@ -8,7 +8,7 @@ from collections import Counter, defaultdict
 from hashlib import blake2b
 from typing import Tuple, List
 from rdkit import Chem
-from ms_pred import common
+from ms_pred.common import chem_utils
 
 
 TYPEW = {
@@ -52,13 +52,13 @@ class FragmentEngine(object):
                 raise RuntimeError(f"Invalid molecule encountered. SMILES: {self.smiles}")
             self.inchi = Chem.MolToInchi(self.mol)
             if not mol_str_canonicalized:
-                self.mol = common.canonical_mol_from_inchi(self.inchi)
+                self.mol = chem_utils.canonical_mol_from_inchi(self.inchi)
                 self.smiles = Chem.MolToSmiles(self.mol)  # canonical smiles
                 self.mol = Chem.MolFromSmiles(self.smiles)  # always use canonical smiles for mols
 
         elif mol_str_type == "inchi":
             self.inchi = mol_str
-            self.mol = common.canonical_mol_from_inchi(self.inchi)  # inchi must be canonicalized
+            self.mol = chem_utils.canonical_mol_from_inchi(self.inchi)  # inchi must be canonicalized
             if self.mol is None:
                 raise RuntimeError(f"Invalid molecule encountered. InChI: {self.inchi}")
             self.smiles = Chem.MolToSmiles(self.mol)
@@ -82,12 +82,12 @@ class FragmentEngine(object):
         )
         self.total_hs = self.atom_hs.sum()
         self.atom_weights = np.array(
-            [common.ELEMENT_TO_MASS[sym] if i.GetIsotope() == 0 else
-             common.P_TBL.GetMassForIsotope(i.GetSymbol(), i.GetIsotope())
+            [chem_utils.ELEMENT_TO_MASS[sym] if i.GetIsotope() == 0 else
+             chem_utils.P_TBL.GetMassForIsotope(i.GetSymbol(), i.GetIsotope())
              for sym, i in zip(self.atom_symbols, self.mol.GetAtoms())]
         )
         self.atom_weights_h = (
-            self.atom_hs * common.ELEMENT_TO_MASS["H"] + self.atom_weights
+            self.atom_hs * chem_utils.ELEMENT_TO_MASS["H"] + self.atom_weights
         )
 
         # Get full mol weight
@@ -153,7 +153,7 @@ class FragmentEngine(object):
             np.arange(self.max_broken_bonds * 2 + 1) - self.max_broken_bonds
         )
         self.shift_bucket_inds = np.arange(self.max_broken_bonds * 2 + 1)
-        self.shift_bucket_masses = self.shift_buckets * common.ELEMENT_TO_MASS["H"]
+        self.shift_bucket_masses = self.shift_buckets * chem_utils.ELEMENT_TO_MASS["H"]
 
         # Define exports
         self.frag_to_entry = {}
@@ -184,29 +184,29 @@ class FragmentEngine(object):
 
     def formula_from_frag(self, frag: int, h_shift=0):
         """formula_from_frag"""
-        form_vec = np.zeros(len(common.VALID_ELEMENTS))
-        h_pos = common.element_to_ind["H"]
+        form_vec = np.zeros(len(chem_utils.VALID_ELEMENTS))
+        h_pos = chem_utils.element_to_ind["H"]
         for atom in range(self.natoms):
             if frag & (1 << atom):
-                dense_pos = common.element_to_ind[self.atom_symbols[atom]]
+                dense_pos = chem_utils.element_to_ind[self.atom_symbols[atom]]
                 form_vec[dense_pos] += 1
                 form_vec[h_pos] += self.atom_hs[atom]
 
         # Apply an h shift
         form_vec[h_pos] += h_shift
-        form = common.vec_to_formula(form_vec)
+        form = chem_utils.vec_to_formula(form_vec)
         return form
 
     def formula_from_kept_inds(self, kept_inds):
         """formula_from_kept_inds"""
-        form_vec = np.zeros(len(common.VALID_ELEMENTS))
+        form_vec = np.zeros(len(chem_utils.VALID_ELEMENTS))
         h_count = self.atom_hs[kept_inds].sum()
-        h_pos = common.element_to_ind["H"]
+        h_pos = chem_utils.element_to_ind["H"]
         form_vec[h_pos] = h_count
         atom_cts = Counter(self.atom_symbols_ar[kept_inds])
         for atom_type, atom_ct in atom_cts.items():
-            form_vec[common.element_to_ind[atom_type]] = atom_ct
-        form = common.vec_to_formula(form_vec)
+            form_vec[chem_utils.element_to_ind[atom_type]] = atom_ct
+        form = chem_utils.vec_to_formula(form_vec)
         return form
 
     def atom_pass_stats(self, frag: int, depth: int = None):
@@ -217,16 +217,16 @@ class FragmentEngine(object):
 
         """
         fragment_mass = 0.0
-        form_vec = np.zeros(len(common.VALID_ELEMENTS))
-        h_pos = common.element_to_ind["H"]
+        form_vec = np.zeros(len(chem_utils.VALID_ELEMENTS))
+        h_pos = chem_utils.element_to_ind["H"]
         for atom in range(self.natoms):
             if frag & (1 << atom):
                 fragment_mass += self.atom_weights_h[atom]
 
-                dense_pos = common.element_to_ind[self.atom_symbols[atom]]
+                dense_pos = chem_utils.element_to_ind[self.atom_symbols[atom]]
                 form_vec[dense_pos] += 1
                 form_vec[h_pos] += self.atom_hs[atom]
-        form = common.vec_to_formula(form_vec)
+        form = chem_utils.vec_to_formula(form_vec)
         frag_hs = int(form_vec[h_pos])
 
         max_remove = int(min(frag_hs, self.max_broken_bonds))
@@ -373,7 +373,7 @@ class FragmentEngine(object):
             max_remove, max_add = v["max_remove_hs"], v["max_add_hs"]
             base_mass = v["base_mass"]
             base_form_str = v["form"]
-            base_form_vec = common.formula_to_dense(base_form_str)
+            base_form_vec = chem_utils.formula_to_dense(base_form_str)
 
             for num_shift, shift_ind, shift_mass in zip(
                 self.shift_buckets, self.shift_bucket_inds, self.shift_bucket_masses
@@ -381,7 +381,7 @@ class FragmentEngine(object):
                 if (num_shift >= -max_remove) and (num_shift <= max_add):
                     new_form_vec = (
                         base_form_vec
-                        + num_shift * common.ELEMENT_VECTORS[common.element_to_ind["H"]]
+                        + num_shift * chem_utils.ELEMENT_VECTORS[chem_utils.element_to_ind["H"]]
                     )
                     str_code = str(new_form_vec)
                     if str_code in form_set:

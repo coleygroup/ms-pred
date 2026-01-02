@@ -83,7 +83,7 @@ def train_model():
     kwargs: Dict[str, Any] = args.__dict__
 
     save_dir = kwargs["save_dir"]
-    common.setup_logger(save_dir, log_name="frag_train.log", debug=kwargs["debug"])
+    common.setup_logger(save_dir, log_name="frag_train1.log", debug=kwargs["debug"])
     pl.seed_everything(kwargs.get("seed"))
 
     # Dump args
@@ -118,7 +118,6 @@ def train_model():
     tree_processor = TreeProcessor(
         pe_embed_k=kwargs["pe_embed_k"],
         root_encode=kwargs["root_encode"],
-        binned_targs=False,
         add_hs=kwargs["add_hs"],
         embed_elem_group=kwargs["embed_elem_group"],
         multi_hop_max_dist=kwargs["multi_hop_max_dist"],
@@ -130,11 +129,9 @@ def train_model():
         magma_map=name_to_json,
         num_workers=num_workers,
         root_encode=kwargs["root_encode"],
-        binned_targs=False,
         add_hs=kwargs["add_hs"],
         embed_elem_group=kwargs["embed_elem_group"],
         tree_processor=tree_processor,
-        datatype="HDF5",
     )
     val_dataset = IntenDataset(
         val_df,
@@ -142,11 +139,9 @@ def train_model():
         magma_map=name_to_json,
         num_workers=num_workers,
         root_encode=kwargs["root_encode"],
-        binned_targs=False,
         add_hs=kwargs["add_hs"],
         embed_elem_group=kwargs["embed_elem_group"],
         tree_processor=tree_processor,
-        datatype="HDF5",
     )
     test_dataset = IntenDataset(
         test_df,
@@ -154,11 +149,9 @@ def train_model():
         magma_map=name_to_json,
         num_workers=num_workers,
         root_encode=kwargs["root_encode"],
-        binned_targs=False,
         add_hs=kwargs["add_hs"],
         embed_elem_group=kwargs["embed_elem_group"],
         tree_processor=tree_processor,
-        datatype="HDF5",
     )
 
     # Dataloaders
@@ -214,7 +207,8 @@ def train_model():
         encode_forms=kwargs["encode_forms"],
         sk_tau=kwargs["sk_tau"],
         linsat_tau=kwargs["linsat_tau"],
-        include_unassigned=kwargs["include_unassigned"]
+        include_unassigned=kwargs["include_unassigned"],
+        pe_embed_k=kwargs["pe_embed_k"],
     )
 
     # Trainer
@@ -234,7 +228,7 @@ def train_model():
         filename="best",
         save_weights_only=False,
     )
-    earlystop_callback = EarlyStopping(monitor=monitor, patience=5)
+    earlystop_callback = EarlyStopping(monitor=monitor, patience=3)
     callbacks = [earlystop_callback, checkpoint_callback]
 
     trainer = pl.Trainer(

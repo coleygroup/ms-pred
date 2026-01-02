@@ -13,15 +13,10 @@ import dgl.nn as dgl_nn
 import copy
 import pygmtools as pygm
 import functools
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 from ms_pred.graphormer.graphormer_graph_encoder import GraphormerGraphEncoder
 
 import ms_pred.common as common
 import ms_pred.nn_utils as nn_utils
-import ms_pred.magma.fragmentation as fragmentation
-import ms_pred.magma.run_magma as magma
-from .dataset import TreeProcessor 
 
 class IntenModel(pl.LightningModule):
     def __init__(
@@ -53,6 +48,8 @@ class IntenModel(pl.LightningModule):
         ppm_tol: float = 20,
         multi_hop_max_dist: int = 5,
         num_edge_dis: int = 10,
+        contr_weight: float = 1.0,
+        contr_loss_fn: str = "entropy",
         **kwargs,
     ):
         """__init__ _summary_
@@ -95,7 +92,7 @@ class IntenModel(pl.LightningModule):
         self.max_frags = max_frags
         self.multi_hop_max_dist = multi_hop_max_dist
         self.num_edge_dis = num_edge_dis
-
+        self.contr_weight = contr_weight
 
         self.pool = dgl_nn.AvgPooling()
 
@@ -195,9 +192,6 @@ class IntenModel(pl.LightningModule):
 
         self.nhead = 8
         assert decoder_layers > 0, "Decoder layers must be greater than 0"
-        # self.frag_decoder = EfficientAttentionTransformerDecoder(self.decoder_layers, self.hidden_size, self.nhead, dim_feedforward=self.hidden_size * 4, dropout=self.dropout)
-        # if self.encoder_layers > 0:
-        #     self.inten_trans_layers = EfficientAttentionTransformerEncoder(self.encoder_layers, self.hidden_size, nhead=8, dim_feedforward=self.hidden_size * 4, dropout=self.dropout)
         frag_decoder_layer = nn.TransformerDecoderLayer(self.hidden_size, nhead=self.nhead, batch_first=True, dim_feedforward=self.hidden_size * 4, dropout=self.dropout)
         self.frag_decoder = nn.TransformerDecoder(frag_decoder_layer, self.decoder_layers)
         if self.encoder_layers > 0:
@@ -237,12 +231,21 @@ class IntenModel(pl.LightningModule):
         else:
             raise NotImplementedError()
 
+        if contr_loss_fn == "cosine":
+            self.contr_loss_fn = self.cos_loss
+        elif contr_loss_fn == "entropy":
+            self.contr_loss_fn = self.entropy_loss
+        elif contr_loss_fn == "weighted_entropy":
+            self.contr_loss_fn = functools.partial(self.entropy_loss, weighted=True)
+        else:
+            raise NotImplementedError()
+
     def forward(
         self,
         root_repr,
         collision_engs,
         adducts,
-        weights,
+        masses,
         adduct_mass_shifts,
         root_form_vecs,
         atom_form_vecs,
@@ -260,7 +263,7 @@ class IntenModel(pl.LightningModule):
             root_repr (_type_): _description_
             collision_engs (_type_): _description_
             adducts (_type_): _description_
-            weights (_type_): _description_
+            masses (_type_): _description_
             adduct_mass_shifts (_type_): _description_
             root_form_vecs (_type_): _description_
             atom_form_vecs (_type_): _description_
@@ -448,20 +451,20 @@ class IntenModel(pl.LightningModule):
         # Hydrogen mass shifts vector
         hydrogen_shift = torch.arange(-self.max_broken_bonds, self.max_broken_bonds + 1, device=device) * common.ELEMENT_TO_MASS["H"]
 
-        # Calculate net fragment weights (vectorized)
-        # frag_targs: [N1, N2], weights: [B, N2], num_frag_targs: [B]
-        weights_expanded = weights[frag_to_mol]  # [N1, N2]
+        # Calculate net fragment masses (vectorized)
+        # frag_targs: [N1, N2], masses: [B, N2], num_frag_targs: [B]
+        masses_expanded = masses[frag_to_mol]  # [N1, N2]
         frag_targs_f = frag_targs.float()
-        net_fragment_weight_flat = (weights_expanded * frag_targs_f).sum(dim=-1)  # [N1]
+        net_fragment_mass_flat = (masses_expanded * frag_targs_f).sum(dim=-1)  # [N1]
 
         # Pad back to [B, max_frags]
-        net_fragment_weight = nn_utils.pad_packed_tensor(net_fragment_weight_flat, num_frag_targs, 0)
-        fragment_weight = (
-            net_fragment_weight[:, :, None, None]
+        net_fragment_mass = nn_utils.pad_packed_tensor(net_fragment_mass_flat, num_frag_targs, 0)
+        fragment_mass = (
+            net_fragment_mass[:, :, None, None]
             + hydrogen_shift[None, None, None, :]
             + adduct_mass_shifts[:, None, :, None]
         )
-        fragment_weight = torch.where(fragment_weight > 0, fragment_weight, torch.zeros_like(fragment_weight))
+        fragment_mass = torch.where(fragment_mass > 0, fragment_mass, torch.zeros_like(fragment_mass))
         
         # Build mask for valid hydrogen shifts using max_add and max_remove
         # Similar to the logic in inten_model.py
@@ -477,7 +480,7 @@ class IntenModel(pl.LightningModule):
         valid_pos = torch.logical_and(ub_mask, lb_mask)
         valid_pos = torch.logical_and(valid_pos, ~frag_mask[:, :, None]).unsqueeze(-2)
         valid_pos = valid_pos.expand(batch_size, max_frags, 2, self.output_size).reshape(batch_size, max_frags, -1)
-        masses = fragment_weight.reshape(batch_size, max_frags, -1)
+        masses = fragment_mass.reshape(batch_size, max_frags, -1)
     
         # B x L x Output
         output = self.output_map(hidden)
@@ -534,13 +537,64 @@ class IntenModel(pl.LightningModule):
 
         return {"output_binned": output_binned, "output": output_unbinned_alpha}
 
+    def predict(
+        self,
+        root_repr,
+        collision_engs,
+        adducts,
+        masses,
+        adduct_mass_shifts,
+        root_form_vecs,
+        atom_form_vecs,
+        num_atoms,
+        adj_matrices=None,
+        frag_targs=None,
+        num_frag_targs=None,
+        atom_hs=None,
+        total_hs=None,
+        graphormer_input=None,  # New parameter for Graphormer input format
+        binned_out=False,
+    ):
+        out = self.forward(
+            root_repr,
+            collision_engs,
+            adducts,
+            masses,
+            adduct_mass_shifts,
+            root_form_vecs,
+            atom_form_vecs,
+            num_atoms,
+            adj_matrices=adj_matrices,
+            frag_targs=frag_targs,
+            num_frag_targs=num_frag_targs,
+            atom_hs=atom_hs,
+            total_hs=total_hs,
+            graphormer_input=graphormer_input,
+        )
+        output = out["output"]
+        out_preds_binned = out["output_binned"]
+        out_preds = [
+            pred[:num_frag, :]
+            for pred, num_frag in zip(output, num_frag_targs)
+        ]
+
+        if binned_out:
+            out_dict = {
+                "spec": out_preds_binned,
+            }
+        else:
+            out_dict = {
+                "spec": out_preds,
+            }
+        return out_dict
+
     
     def _common_step(self, batch, name="train"):
         pred_obj = self.forward(
             batch["root_reprs"],
             batch["collision_engs"],
             batch["adducts"],
-            batch["weights"],
+            batch["masses"],
             batch["adduct_mass_shifts"],
             batch["root_form_vecs"],
             batch["atom_form_vecs"],
@@ -563,9 +617,37 @@ class IntenModel(pl.LightningModule):
 
         if name == 'train':
             loss_fn = self.loss_fn
+            decoy_loss_fn = self.contr_loss_fn
         else:
             loss_fn = functools.partial(self.loss_fn, use_hun=True)  # use hungarian in val and test
-        loss = loss_fn(pred_inten, batch["inten_targs"], parent_mass=batch["precursor_mzs"])
+            decoy_loss_fn = functools.partial(self.contr_loss_fn, use_hun=True)
+        if 'is_decoy' in batch and 'mol_num' in batch:  # data with decoys
+            true_data_inds = batch["is_decoy"] == 0
+            spec_loss = loss_fn(pred_inten[true_data_inds], batch["inten_targs"][true_data_inds],
+                               parent_mass=batch["precursor_mzs"][true_data_inds]
+            )['loss']
+
+            # contrastive ranking loss cosine loss to decoys
+            decoy_spec_loss = decoy_loss_fn(pred_inten,
+                                            batch["inten_targs"][true_data_inds].repeat_interleave(batch['mol_num'], dim=0),
+                                            parent_mass=batch["precursor_mzs"]
+                                            )['loss']
+            split_end = torch.cumsum(batch['mol_num'], dim=0)
+            split_start = split_end - batch['mol_num']
+            decoy_spec_loss = [decoy_spec_loss[s:e] for s, e in zip(split_start, split_end)]
+            decoy_spec_loss = torch.nn.utils.rnn.pad_sequence(decoy_spec_loss, batch_first=True, padding_value=1) # cos_loss <=1 by definition
+            decoy_spec_loss_sorted = torch.sort(decoy_spec_loss, dim=-1).values.detach()
+            ranking_dist = torch.abs(decoy_spec_loss[:, :, None] - decoy_spec_loss_sorted[:, None, :])
+            top1_prob = pygm.sinkhorn(-ranking_dist, n1=batch["mol_num"], n2=batch["mol_num"], tau=self.sk_tau, backend='pytorch')[:, 0, 0]
+            contr_loss = torch.relu(-torch.log(top1_prob + 0.5))  # shift & cut ce loss for probs > 0.5
+
+            loss = {
+                "spec_loss": spec_loss,
+                "contr_loss": contr_loss,
+                "loss": spec_loss + contr_loss * self.contr_weight,
+            }
+        else:
+            loss = loss_fn(pred_inten, batch["inten_targs"], parent_mass=batch["precursor_mzs"])
         loss = {k: v.mean() for k, v in loss.items()}
         
         self.log(

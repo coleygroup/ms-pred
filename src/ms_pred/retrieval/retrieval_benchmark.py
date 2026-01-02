@@ -43,6 +43,7 @@ def get_args():
     )
     parser.add_argument("--num-bins", default=15000, help="Number of bins for spectra")
     parser.add_argument("--upper-limit", default=1500, help="Largest m/z value")
+    parser.add_argument("--binned-pred", action="store_true", default=False)
     return parser.parse_args()
 
 
@@ -401,11 +402,10 @@ def main(args):
     for spec_id, cand_ikey, spec_dict in pred_specs.get_all_specs():
         pred_spec = {}
         for ce, spec_data in spec_dict.items():
-            pred_spec[common.get_collision_energy(ce)] = spec_data.bin_spectrum()
+            pred_spec[ce] = spec_data.bin_spectrum()
         pred_spec_ars.append(pred_spec)
         pred_ikeys.append(cand_ikey.strip('ikey '))
         pred_spec_names.append(spec_id.strip('pred_'))
-
     pred_spec_ars = np.array(pred_spec_ars)
     pred_ikeys = np.array(pred_ikeys)
     pred_spec_names = np.array(pred_spec_names)

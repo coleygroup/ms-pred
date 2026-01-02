@@ -18,7 +18,6 @@ import math
 import ms_pred.common.chem_utils as chem_utils
 from ms_pred.common.denoising_utils import electronic_denoising
 from ms_pred import nn_utils
-from ms_pred.magma.fragmentation import FragmentEngine
 
 try:
     from pytorch_lightning.loggers import LightningLoggerBase as Logger
@@ -74,6 +73,7 @@ class MassSpec:
         self.masses_no_adduct = safe_assign(masses_no_adduct, np.floating)
         self.frag_form_vecs = safe_assign(frag_form_vecs, np.integer)
         if frags is None and int_frags is not None:
+            from ms_pred.magma.fragmentation import FragmentEngine
             self._engine = FragmentEngine(self.root_canonical_smiles, mol_str_canonicalized=True)
             bit_lists = [
                 ((x >> np.arange(self._engine.natoms)) & 1).astype(bool)

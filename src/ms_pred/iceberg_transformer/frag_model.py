@@ -20,6 +20,9 @@ import ms_pred.common as common
 from LinSATNet import linsat_layer, init_constraints
 import math
 import numpy as np
+from ms_pred.iceberg_transformer.dataset import TreeProcessor
+import dgl
+from rdkit import Chem  # type: ignore
 
 class FragOnlyModel(pl.LightningModule):
     def __init__(
@@ -47,6 +50,7 @@ class FragOnlyModel(pl.LightningModule):
         gamma: float = 2,
         include_unassigned: bool = False,
         max_broken_bonds: int = 6,
+        pe_embed_k: int = 0,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -71,6 +75,14 @@ class FragOnlyModel(pl.LightningModule):
         self.include_unassigned = include_unassigned
         self.max_broken_bonds = max_broken_bonds
         self.output_size = (self.max_broken_bonds) * 2 + 1
+        self.pe_embed_k = pe_embed_k
+        self.multi_hop_max_dist = multi_hop_max_dist
+        self.tree_processor = TreeProcessor(
+            pe_embed_k=pe_embed_k,
+            root_encode=root_encode,
+            embed_elem_group=embed_elem_group,
+            multi_hop_max_dist=multi_hop_max_dist,
+        )
 
         adduct_shift = 0
         if self.embed_adduct:
@@ -237,15 +249,10 @@ class FragOnlyModel(pl.LightningModule):
         )
         return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "frequency": 1, "interval": "step"}}
 
-    def forward(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-        graphormer_input = batch.get("graphormer_input")
-        num_atoms = batch["num_atoms"]  # [B]
+    def forward(self, graphormer_input, num_atoms, adducts, collision_engs, root_form_vecs, root_reprs=None) -> Dict[str, torch.Tensor]:
         device = num_atoms.device
         batch_size = num_atoms.shape[0]
-        adducts = batch["adducts"]
-        collision_engs = batch["collision_engs"]
         embed_adducts = self.adduct_embedder[adducts.long()]
-        root_form_vecs = batch["root_form_vecs"]
         
         if self.root_encode == "graphormer":
             assert graphormer_input is not None, "graphormer_input required for graphormer root_encode"
@@ -281,15 +288,14 @@ class FragOnlyModel(pl.LightningModule):
             root_tokens = graph_rep.unsqueeze(1)  # [B,1,H]
             max_nodes = node_embeddings.shape[1]
         else:
-            root_graph = batch["root_reprs"]
-            with root_graph.local_scope():
+            with root_reprs.local_scope():
                 if self.embed_adduct:
                     embed_adducts_expand = embed_adducts.repeat_interleave(
-                        root_graph.batch_num_nodes(), 0
+                        root_reprs.batch_num_nodes(), 0
                     )
-                    ndata = root_graph.ndata["h"]
+                    ndata = root_reprs.ndata["h"]
                     ndata = torch.cat([ndata, embed_adducts_expand], -1)
-                    root_graph.ndata["h"] = ndata                    
+                    root_reprs.ndata["h"] = ndata                    
                 if self.embed_collision:                    
                     embed_collision = torch.cat(
                         (torch.sin(collision_engs.unsqueeze(1) / self.collision_embedder_denominators.unsqueeze(0)),
@@ -301,13 +307,13 @@ class FragOnlyModel(pl.LightningModule):
                         torch.isnan(embed_collision), self.collision_embed_merged.unsqueeze(0), embed_collision
                     )   
                     embed_collision_expand = embed_collision.repeat_interleave(
-                        root_graph.batch_num_nodes(), 0
+                        root_reprs.batch_num_nodes(), 0
                     )
-                    ndata = root_graph.ndata["h"]
+                    ndata = root_reprs.ndata["h"]
                     ndata = torch.cat([ndata, embed_collision_expand], -1)
-                    root_graph.ndata["h"] = ndata
-                node_embeddings = self.root_module(root_graph)
-                root_tokens = self.pool(root_graph, node_embeddings).unsqueeze(1)
+                    root_reprs.ndata["h"] = ndata
+                node_embeddings = self.root_module(root_reprs)
+                root_tokens = self.pool(root_reprs, node_embeddings).unsqueeze(1)
             node_embeddings = nn_utils.pad_packed_tensor(node_embeddings, num_atoms, 0)
             max_nodes = node_embeddings.shape[1]
 
@@ -318,12 +324,7 @@ class FragOnlyModel(pl.LightningModule):
             root_tokens = self.formula_mapper(torch.cat((root_tokens, encoded_form), dim=-1))
         frag_vecs = self.fragment_decoder(root_tokens, node_embeddings, memory_key_padding_mask=frag_mask)
         frag_card_logits = self.frag_card_mapper(frag_vecs)  # [num_layers, B, max_frags, 4]
-        # frag_logits = torch.bmm(frag_vec, node_embeddings.transpose(1, 2))# [B, max_frags, max_nodes]
-        # frag_logits = self.frag_logit_mapper(frag_vecs)
-        # node_embeddings_expanded = node_embeddings.unsqueeze(0).expand(3, batch_size, max_nodes, -1)
-        # frag_logits = self.cosine_similarity(frag_vecs.unsqueeze(-2), node_embeddings_expanded.unsqueeze(-3))
         frag_logits = torch.einsum("nbij,bkj->nbik", frag_vecs, node_embeddings)
-        # frag_logits = torch.einsum("nbij,bkj->nbik", frag_logits, node_embeddings)
         return {"frag_logits": frag_logits, "frag_card_logits": frag_card_logits}
     
     def boundary_nodes(self, A: torch.Tensor, subgraph_mask: torch.Tensor) -> torch.Tensor:
@@ -476,6 +477,8 @@ class FragOnlyModel(pl.LightningModule):
 
         # Unique per batch (batch id is part of the row)
         unique_rows, inv = torch.unique(flat_rows, dim=0, return_inverse=True)
+        is_empty = (unique_rows[:, 1:].sum(dim=-1) == 0)
+        unique_rows = unique_rows[~is_empty]
         batch_ids_unique = unique_rows[:, 0]
         pattern_counts = torch.bincount(batch_ids_unique, minlength=B)
         padded_pattern = nn_utils.pad_packed_tensor(
@@ -619,16 +622,18 @@ class FragOnlyModel(pl.LightningModule):
             
 
     def training_step(self, batch: Dict[str, Any], batch_idx: int):
-        out = self.forward(batch)
+        out = self.forward(
+            graphormer_input=batch.get("graphormer_input"),
+            num_atoms=batch["num_atoms"],
+            adducts=batch["adducts"],
+            collision_engs=batch["collision_engs"],
+            root_form_vecs=batch["root_form_vecs"]
+        )
         loss = 0
         for i in range(out["frag_logits"].shape[0]):
             loss += self._frag_loss(
             out["frag_logits"][i], out["frag_card_logits"][i], batch["frag_targs"], batch["num_frag_targs"], batch["num_atoms"], batch["adj_matrices"],
-        )
-        # loss = self._frag_loss(
-        #     out["frag_logits"], out["frag_card_logits"], batch["frag_targs"], batch["num_frag_targs"], batch["num_atoms"], batch["adj_matrices"],
-        # )
-        
+        )    
         self.log(
             "train_loss", loss.item(), prog_bar=True, on_epoch=True, batch_size=len(batch["names"])
         )
@@ -636,7 +641,13 @@ class FragOnlyModel(pl.LightningModule):
 
 
     def validation_step(self, batch: Dict[str, Any], batch_idx: int):
-        out = self.forward(batch)
+        out = self.forward(
+            graphormer_input=batch.get("graphormer_input"),
+            num_atoms=batch["num_atoms"],
+            adducts=batch["adducts"],
+            collision_engs=batch["collision_engs"],
+            root_form_vecs=batch["root_form_vecs"]
+        )
         frag_logits = out["frag_logits"][-1]
         frag_card_logits = out["frag_card_logits"][-1]
         loss = self._frag_loss(
@@ -669,7 +680,13 @@ class FragOnlyModel(pl.LightningModule):
         )
 
     def test_step(self, batch: Dict[str, Any], batch_idx: int):
-        out = self.forward(batch)
+        out = self.forward(
+            graphormer_input=batch.get("graphormer_input"),
+            num_atoms=batch["num_atoms"],
+            adducts=batch["adducts"],
+            collision_engs=batch["collision_engs"],
+            root_form_vecs=batch["root_form_vecs"]
+        )
         frag_logits = out["frag_logits"][-1]
         frag_card_logits = out["frag_card_logits"][-1]
         loss = self._frag_loss(
@@ -734,4 +751,72 @@ class FragOnlyModel(pl.LightningModule):
             patterns_flat[batch_idx[valid_mask], topk_idx[valid_mask]] = True
 
         return patterns
+
+    def predict(self, root_smi: str, collision_eng: float, adduct: str, device: str = "cpu") -> dict[str, torch.Tensor]:
+        root_form = [common.form_from_smi(rsmi) for rsmi in root_smi]
+        root_form_vec = torch.FloatTensor(np.array([common.formula_to_dense(rf) for rf in root_form])).to(device)
+        adducts = torch.LongTensor([common.ion2onehot_pos[a] if type(a) is str else a for a in adduct]).to(device)
+        collision_engs = torch.FloatTensor(collision_eng).to(device)
+        mols = [Chem.MolFromSmiles(rsmi) for rsmi in root_smi]
+        graphormer_inputs = [self.tree_processor.create_graphormer_input(mol=m, multi_hop_max_dist=self.tree_processor.multi_hop_max_dist) for m in mols]
+        num_atoms = torch.tensor([gf['num_atoms'] for gf in graphormer_inputs], dtype=torch.long).to(device)
+        max_nodes_gf = max(gf['x'].shape[0] for gf in graphormer_inputs)
+        max_dist = max(gf['edge_input'].shape[2] for gf in graphormer_inputs)
+        node_feat_dim = graphormer_inputs[0]['x'].shape[1]
+        edge_feat_dim = graphormer_inputs[0]['attn_edge_type'].shape[2]
+        batch_size = len(graphormer_inputs)
+
+        x_batch = torch.zeros([batch_size, max_nodes_gf, node_feat_dim], dtype=torch.float32)
+        attn_bias_batch = torch.full([batch_size, max_nodes_gf + 1, max_nodes_gf + 1], -99999, dtype=torch.float32)
+        attn_edge_type_batch = torch.zeros([batch_size, max_nodes_gf, max_nodes_gf, edge_feat_dim], dtype=torch.float32)
+        spatial_pos_batch = torch.zeros([batch_size, max_nodes_gf, max_nodes_gf], dtype=torch.long)
+        degree_batch = torch.zeros([batch_size, max_nodes_gf], dtype=torch.long)
+        edge_input_batch = torch.zeros([batch_size, max_nodes_gf, max_nodes_gf, max_dist, edge_feat_dim], dtype=torch.float32)
+        adj_matrices = [Chem.rdmolops.GetAdjacencyMatrix(mol, useBO=True) for mol in mols]
+        adj_matrices = [torch.from_numpy(adj_matrix).float() for adj_matrix in adj_matrices]
+        max_nodes = torch.max(num_atoms).item()
+        padded_adj_matrices = []
+        for adj in adj_matrices:
+            if adj.shape[0] < max_nodes:
+                pad_size = max_nodes - adj.shape[0]
+                padded_adj = torch.nn.functional.pad(adj, (0, pad_size, 0, pad_size), value=0)
+            else:
+                padded_adj = adj
+            padded_adj_matrices.append(padded_adj)
+        adj_matrices_batch = torch.stack(padded_adj_matrices, dim=0).to(device)
+
+        for i, gf_input in enumerate(graphormer_inputs):
+            num_nodes = gf_input['x'].shape[0]
+            edge_dist = gf_input['edge_input'].shape[2]
+            x_batch[i, :num_nodes] = gf_input['x']
+            attn_bias_batch[i, :num_nodes+1, :num_nodes+1] = gf_input['attn_bias']
+            attn_edge_type_batch[i, :num_nodes, :num_nodes] = gf_input['attn_edge_type']
+            spatial_pos_batch[i, :num_nodes, :num_nodes] = gf_input['spatial_pos']
+            degree_batch[i, :num_nodes] = gf_input['degree']
+            edge_input_batch[i, :num_nodes, :num_nodes, :edge_dist] = gf_input['edge_input']
+
+        graphormer_batch = {
+            'x': x_batch,
+            'attn_bias': attn_bias_batch,
+            'attn_edge_type': attn_edge_type_batch,
+            'spatial_pos': spatial_pos_batch,
+            'degree': degree_batch,
+            'edge_input': edge_input_batch,
+        }
+        graphormer_batch = {k: v.to(device) for k, v in graphormer_batch.items()}
+        with torch.no_grad():
+            out = self.forward(
+                graphormer_input=graphormer_batch,
+                num_atoms=num_atoms,
+                adducts=adducts,
+                collision_engs=collision_engs,
+                root_form_vecs=root_form_vec
+            )
+            frag_logits = out["frag_logits"][-1]
+            frag_card_logits = out["frag_card_logits"][-1]
+            breakpoints = self.breakpoint_inference(frag_logits, frag_card_logits, num_atoms)
+            patterns, patterns_count = self.breakpoints_to_patterns(breakpoints, adj_matrices_batch, num_atoms)
+        return {"fragment_patterns": patterns.bool(), "patterns_count": patterns_count}
+        
+
 
