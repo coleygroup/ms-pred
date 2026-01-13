@@ -2,7 +2,7 @@ launcher_args: {experiment_name: frag_only_nist20,
   script_name: "src/ms_pred/iceberg_transformer/train_frag.py",
   slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,
-  visible_devices: [3]
+  visible_devices: [0]
 }
 universal_args:
   _slurm_args:
@@ -12,21 +12,21 @@ universal_args:
   gpu: [true]
 
   seed: [1]
-  num-workers: [32]
+  num-workers: [16]
   batch-size: [32]
   max-epochs: [150]
 
   dataset-name: [nist20]
   split-name: [split_1.tsv]
 
-  learning-rate: [0.0002]
-  lr-decay-rate: [0.825]
-  weight-decay: [0.0]
+  learning-rate: [0.0001]
+  lr-decay-rate: [0.9]
+  weight-decay: [0]
 
   dropout: [0]
-  hidden-size: [256]
-  layers: [3]
-  max-frags: [100, 125]
+  hidden-size: [512]
+  layers: [5]
+  max-frags: [100]
   pe-embed-k: [0]
   include-unassigned: [False]
 
@@ -40,6 +40,11 @@ universal_args:
   linsat-tau: [15]
   multi-hop-max-dist: [10]
   num-edge-dis: [10]
+  encoder-layers: [0]
+  decoder-layers: [4]
+  enable-aux-loss: [true]
+  enable-decoder-norm: [false]
+  warmup: [1000]
 
 iterative_args:
   -  split-name: [split_1.tsv]

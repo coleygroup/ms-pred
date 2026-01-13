@@ -60,6 +60,8 @@ def add_frag_train_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
     parser.add_argument("--add-hs", default=True, action="store_true")
     parser.add_argument("--pe-embed-k", default=10, type=int)
     parser.add_argument("--layers", default=6, type=int)
+    parser.add_argument("--encoder-layers", default=0, type=int)
+    parser.add_argument("--decoder-layers", default=3, type=int)
     parser.add_argument("--warmup", default=1000, type=int)
     parser.add_argument("--max-frags", default=100, type=int)
     parser.add_argument("--multi-hop-max-dist", default=5, type=int)
@@ -68,6 +70,8 @@ def add_frag_train_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
     parser.add_argument("--linsat-tau", default=0.01, type=float)
     parser.add_argument("--include-unassigned", default=False, action="store_true")
     parser.add_argument("--max-broken-bonds", default=6, type=int)
+    parser.add_argument("--enable-aux-loss", default=False, action="store_true")
+    parser.add_argument("--enable-decoder-norm", default=False, action="store_true")
 
     return parser
 
@@ -83,7 +87,7 @@ def train_model():
     kwargs: Dict[str, Any] = args.__dict__
 
     save_dir = kwargs["save_dir"]
-    common.setup_logger(save_dir, log_name="frag_train1.log", debug=kwargs["debug"])
+    common.setup_logger(save_dir, log_name="frag_train3.log", debug=kwargs["debug"])
     pl.seed_everything(kwargs.get("seed"))
 
     # Dump args
@@ -118,7 +122,6 @@ def train_model():
     tree_processor = TreeProcessor(
         pe_embed_k=kwargs["pe_embed_k"],
         root_encode=kwargs["root_encode"],
-        add_hs=kwargs["add_hs"],
         embed_elem_group=kwargs["embed_elem_group"],
         multi_hop_max_dist=kwargs["multi_hop_max_dist"],
     )
@@ -129,9 +132,9 @@ def train_model():
         magma_map=name_to_json,
         num_workers=num_workers,
         root_encode=kwargs["root_encode"],
-        add_hs=kwargs["add_hs"],
         embed_elem_group=kwargs["embed_elem_group"],
         tree_processor=tree_processor,
+        datatype="HDF5"
     )
     val_dataset = IntenDataset(
         val_df,
@@ -139,9 +142,9 @@ def train_model():
         magma_map=name_to_json,
         num_workers=num_workers,
         root_encode=kwargs["root_encode"],
-        add_hs=kwargs["add_hs"],
         embed_elem_group=kwargs["embed_elem_group"],
         tree_processor=tree_processor,
+        datatype="HDF5"
     )
     test_dataset = IntenDataset(
         test_df,
@@ -149,9 +152,9 @@ def train_model():
         magma_map=name_to_json,
         num_workers=num_workers,
         root_encode=kwargs["root_encode"],
-        add_hs=kwargs["add_hs"],
         embed_elem_group=kwargs["embed_elem_group"],
         tree_processor=tree_processor,
+        datatype="HDF5"
     )
 
     # Dataloaders
@@ -209,6 +212,10 @@ def train_model():
         linsat_tau=kwargs["linsat_tau"],
         include_unassigned=kwargs["include_unassigned"],
         pe_embed_k=kwargs["pe_embed_k"],
+        encoder_layers=kwargs["encoder_layers"],
+        decoder_layers=kwargs["decoder_layers"],
+        enable_aux_loss=kwargs["enable_aux_loss"],
+        enable_decoder_norm=kwargs["enable_decoder_norm"],
     )
 
     # Trainer
@@ -228,7 +235,7 @@ def train_model():
         filename="best",
         save_weights_only=False,
     )
-    earlystop_callback = EarlyStopping(monitor=monitor, patience=3)
+    earlystop_callback = EarlyStopping(monitor=monitor, patience=5)
     callbacks = [earlystop_callback, checkpoint_callback]
 
     trainer = pl.Trainer(

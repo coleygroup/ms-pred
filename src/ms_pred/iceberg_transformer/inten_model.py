@@ -44,7 +44,6 @@ class IntenModel(pl.LightningModule):
         loss_fn: str = "cosine",
         binned_targs:bool = False,
         sk_tau: float = 0.01,
-        max_frags: int = 100,
         ppm_tol: float = 20,
         multi_hop_max_dist: int = 5,
         num_edge_dis: int = 10,
@@ -89,7 +88,6 @@ class IntenModel(pl.LightningModule):
         self.decoder_layers = decoder_layers
         self.encoder_layers = encoder_layers
         self.binned_targs = binned_targs
-        self.max_frags = max_frags
         self.multi_hop_max_dist = multi_hop_max_dist
         self.num_edge_dis = num_edge_dis
         self.contr_weight = contr_weight
@@ -179,7 +177,7 @@ class IntenModel(pl.LightningModule):
                 multi_hop_max_dist=self.multi_hop_max_dist,  # Maximum distance for multi-hop features
                 num_encoder_layers=self.layers,  # Use layers parameter
                 embedding_dim=self.hidden_size,
-                ffn_embedding_dim=self.hidden_size * 4,
+                ffn_embedding_dim=4*self.hidden_size,
                 num_attention_heads=8,
                 dropout=self.dropout,
                 attention_dropout=self.dropout,
@@ -197,7 +195,7 @@ class IntenModel(pl.LightningModule):
         if self.encoder_layers > 0:
             inten_trans_layer = nn.TransformerEncoderLayer(
                 self.hidden_size,
-                nhead=8,
+                nhead=self.nhead,
                 batch_first=True,
                 dim_feedforward=self.hidden_size * 4,
                 dropout=self.dropout
@@ -320,7 +318,7 @@ class IntenModel(pl.LightningModule):
                 # Prepare adduct and collision embeddings to concatenate with graphormer_input
                 
                 # Start with the existing node features: [B, max_nodes, num_features]
-                node_features = graphormer_input['x']  # [B, max_nodes, num_features]
+                original_node_features = node_features = graphormer_input['x']  # [B, max_nodes, num_features]
                 max_nodes = node_features.shape[1]
                 
                 # Add adduct embeddings if enabled
@@ -359,7 +357,7 @@ class IntenModel(pl.LightningModule):
                 # Remove graph token (first position) and transpose to get node embeddings
                 node_embeddings = final_layer_output[1:].transpose(0, 1)  # [B, T-1, H]
                 root_tokens = graph_rep.unsqueeze(1)
-
+                graphormer_input['x'] = original_node_features
             else:
                 raise ValueError("graphormer_input is required when root_encode='graphormer'")     
         else:
@@ -671,22 +669,31 @@ class IntenModel(pl.LightningModule):
         return self._common_step(batch, name="test")
 
     def configure_optimizers(self):
-        """configure_optimizers."""
-        optimizer = torch.optim.Adam(
-            self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay
+        decay_params, no_decay_params = [], []
+
+        def _is_no_decay_param(name: str, param: torch.nn.Parameter) -> bool:
+            name_l = name.lower()
+            return param.ndim == 1 or name.endswith("bias") or ("norm" in name_l) or ("embed" in name_l)
+
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            if _is_no_decay_param(name, param):
+                no_decay_params.append(param)
+            else:
+                decay_params.append(param)
+
+        optimizer = torch.optim.AdamW(
+            [
+                {"params": decay_params, "weight_decay": self.weight_decay},
+                {"params": no_decay_params, "weight_decay": 0.0},
+            ],
+            lr=self.learning_rate,
         )
-        scheduler = nn_utils.build_lr_scheduler(
-            optimizer=optimizer, lr_decay_rate=self.lr_decay_rate, warmup=self.warmup
-        )
-        ret = {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "frequency": 1,
-                "interval": "step",
-            },
-        }
-        return ret
+        scheduler = nn_utils.build_lr_scheduler(optimizer=optimizer, 
+                    lr_decay_rate=self.lr_decay_rate, warmup=self.warmup)
+        return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "frequency": 1, "interval": "step"}}
+
     
     def cos_loss(self, pred, targ, parent_mass=None, use_hun=False):
         """cos_loss.

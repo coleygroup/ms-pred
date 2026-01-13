@@ -713,7 +713,7 @@ class SetTransformerEncoder(nn.Module):
         return feat
     
 class SlotDecoder(nn.Module):
-    def __init__(self, hidden_dim=256, num_slots=40, nhead=8, num_layers=3, dropout=0.1):
+    def __init__(self, hidden_dim=256, num_slots=40, nhead=8, num_layers=3, dropout=0.1, enable_norm=False):
         super().__init__()
         self.num_slots = num_slots
 
@@ -734,6 +734,8 @@ class SlotDecoder(nn.Module):
         )
         self.hidden_dim=hidden_dim
         self.num_layers = num_layers
+        self.enable_norm = enable_norm
+        self.decoder_norm = nn.LayerNorm(hidden_dim) if self.enable_norm else None
         self.decoder_layers = get_clones(decoder_layer, self.num_layers)
         # self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
 
@@ -749,7 +751,10 @@ class SlotDecoder(nn.Module):
         outs = []
         for decoder_layer in self.decoder_layers:
             slots = decoder_layer(tgt=slots, memory=memory, memory_key_padding_mask=memory_key_padding_mask)  # [B, K, d]
-            outs.append(slots)
+            if self.enable_norm:
+                outs.append(self.decoder_norm(slots))
+            else:
+                outs.append(slots)
         return torch.stack(outs, dim=0)
     
 class SlotAttention(nn.Module):

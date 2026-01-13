@@ -88,7 +88,7 @@ class TreeProcessor:
                 mask = np.zeros((len(total_atom_masses),), dtype=bool)
                 mask[kept] = True
                 frag_targs_list.append(torch.from_numpy(mask))
-            inten_targets = np.asarray(tree["inten_targs"]) if include_inten_targs else None  # [N,2]
+            inten_targets = np.asarray(tree["raw_spec"]) if include_inten_targs else None  # [N,2]
         elif isinstance(tree, common.MassSpec):
             for frag in tree.int_frags:
                 info = self.featurize_frag_lite(
@@ -569,6 +569,7 @@ class IntenDataset(DAGDataset):
         frag_targs = [item["frag_targs"] for item in batch]
         num_frags = torch.LongTensor([t.shape[0] for t in frag_targs])
         max_atoms = max(t.shape[1] for t in frag_targs)
+
         padded_frag_targs = []
         for t in frag_targs:
             if t.shape[1] < max_atoms:

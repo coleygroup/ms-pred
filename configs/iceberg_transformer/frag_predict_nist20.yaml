@@ -2,7 +2,7 @@ launcher_args: {experiment_name: frag_only_nist20,
   script_name: "src/ms_pred/iceberg_transformer/predict_frag.py",
   slurm_script: launcher_scripts/generic_slurm.sh, 
   launch_method: local,
-  visible_devices: [2, 3],
+  visible_devices: [0, 1, 2, 3],
 }
 universal_args:
   _slurm_args:
@@ -13,9 +13,9 @@ universal_args:
 
   batch-size: [64]
   dataset-name: [nist20]
-  num-gpu-workers: [8]
+  num-gpu-workers: [12]
   num-cpu-workers: [64]
-  num-decoys: [10] # predict target structures + 10 decoys
+  num-decoys: [0] # predict target structures + 10 decoys
   # to predict decoys, you have to download https://zenodo.org/records/15529765/files/pubchem_formulae_inchikey.hdf5
   # and place it at the following path (pubchem-map-path)
   pubchem-map-path: ['data/retrieval/pubchem/pubchem_formulae_inchikey.hdf5']
@@ -23,5 +23,5 @@ universal_args:
 iterative_args:
 
   -  split-name: [split_1.tsv]
-     checkpoint-pth: [results/frag_only_nist20/split_1_rnd1/version_634/best.ckpt]
+     checkpoint-pth: [results/frag_only_nist20/split_1_rnd1/version_735/best.ckpt]
      save-dir: [split_1_rnd1/preds_train_100]

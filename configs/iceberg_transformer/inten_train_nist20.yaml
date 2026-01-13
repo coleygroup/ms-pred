@@ -12,23 +12,23 @@ universal_args:
   gpu: [true]
 
   seed: [1]
-  num-workers: [32]
+  num-workers: [16]
   batch-size: [32]
   max-epochs: [200]
 
   dataset-name: [nist20]
   split-name: [split_1.tsv]
 
-  learning-rate: [0.0003]
-  lr-decay-rate: [0.825]
+  learning-rate: [0.0001]
+  lr-decay-rate: [0.9]
 
-  dropout: [0.1]
+  dropout: [0.05]
   mpnn-type: [GGNN]
   pe-embed-k: [0]
   pool-op: [avg]
   set-layers: [0]
-  hidden-size: [256]
-  weight-decay: [0.0]
+  hidden-size: [512]
+  weight-decay: [0]
   layers: [4]
   binned-targs: [True]
   decoder-layers: [3]
@@ -36,7 +36,6 @@ universal_args:
   max-broken-bonds: [6]
 
   root-encode: [graphormer]
-  inject-early: [False]
   encode-forms: [True]
   embed-adduct: [True]
   embed-collision: [True]

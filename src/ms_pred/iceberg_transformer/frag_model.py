@@ -29,6 +29,8 @@ class FragOnlyModel(pl.LightningModule):
         self,
         hidden_size: int = 512,
         layers: int = 6,
+        decoder_layers: int = 3,
+        encoder_layers: int = 0,
         dropout: float = 0.1,
         learning_rate: float = 7e-4,
         lr_decay_rate: float = 1.0,
@@ -44,18 +46,20 @@ class FragOnlyModel(pl.LightningModule):
         embed_collision: bool = False,
         embed_elem_group: bool = False,
         encode_forms: bool = False,
-        mlp_layers: int = 1,
-        sk_tau: float = 0.05,
         linsat_tau: float = 0.01,
         gamma: float = 2,
         include_unassigned: bool = False,
         max_broken_bonds: int = 6,
         pe_embed_k: int = 0,
+        enable_aux_loss: bool = False,
+        enable_decoder_norm: bool = False,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
         self.hidden_size = hidden_size
         self.layers = layers
+        self.decoder_layers = decoder_layers
+        self.encoder_layers = encoder_layers
         self.dropout = dropout
         self.learning_rate = learning_rate
         self.lr_decay_rate = lr_decay_rate
@@ -68,8 +72,6 @@ class FragOnlyModel(pl.LightningModule):
         self.embed_collision = embed_collision
         self.embed_elem_group = embed_elem_group
         self.encode_forms = encode_forms
-        self.mlp_layers = mlp_layers
-        self.sk_tau = sk_tau
         self.linsat_tau = linsat_tau
         self.gamma = gamma
         self.include_unassigned = include_unassigned
@@ -83,6 +85,7 @@ class FragOnlyModel(pl.LightningModule):
             embed_elem_group=embed_elem_group,
             multi_hop_max_dist=multi_hop_max_dist,
         )
+        self.enable_aux_loss = enable_aux_loss
 
         adduct_shift = 0
         if self.embed_adduct:
@@ -123,7 +126,6 @@ class FragOnlyModel(pl.LightningModule):
             # Calculate formula dim
             self.formula_in_dim = self.formula_dim * self.embedder.num_dim
             self.formula_mapper = nn.Linear(self.formula_in_dim+self.hidden_size, self.hidden_size)
-
         # Root encoder
         if root_encode == "graphormer":
             self.root_module = GraphormerGraphEncoder(
@@ -136,7 +138,7 @@ class FragOnlyModel(pl.LightningModule):
                 multi_hop_max_dist=multi_hop_max_dist,
                 num_encoder_layers=layers,
                 embedding_dim=hidden_size,
-                ffn_embedding_dim=hidden_size * 4,
+                ffn_embedding_dim=4*hidden_size,
                 num_attention_heads=self.nhead,
                 dropout=dropout,
                 attention_dropout=dropout,
@@ -156,15 +158,29 @@ class FragOnlyModel(pl.LightningModule):
             self.pool = dgl_nn.AvgPooling()
         else:
             raise ValueError(f"Unsupported root_encode: {root_encode}")
-
+        
         # Fragment query tokens and decoder
+        self.enable_decoder_norm = enable_decoder_norm
         self.fragment_decoder = nn_utils.SlotDecoder(
             hidden_dim=hidden_size,
             num_slots=max_frags,
             nhead=self.nhead,
-            num_layers=3,
-            dropout=dropout
+            num_layers=self.decoder_layers,
+            dropout=dropout,
+            enable_norm=self.enable_decoder_norm
         )
+        if self.encoder_layers > 0:
+            fragment_encoder_layer = nn.TransformerEncoderLayer(
+                d_model=hidden_size,
+                nhead=self.nhead,
+                dim_feedforward=hidden_size * 4,
+                dropout=dropout,
+                batch_first=True,
+            )
+            self.fragment_encoder = nn.TransformerEncoder(
+                fragment_encoder_layer,
+                num_layers=self.encoder_layers,
+            )
         buckets = torch.DoubleTensor(np.linspace(0, 1500, 15000))
         self.inten_buckets = nn.Parameter(buckets)
         self.inten_buckets.requires_grad = False
@@ -205,7 +221,6 @@ class FragOnlyModel(pl.LightningModule):
         output_logit_3 = linsat_layer(breakpoint_logit, E=E, f=f_3, no_warning=True, max_iter=1, tau=self.linsat_tau).reshape(B, N, N_atom)
         logit_0 = torch.zeros_like(output_logit_1)
         logits = torch.stack([logit_0, output_logit_1, output_logit_2, output_logit_3], dim=-1)
-        # assert False, (output_logit_1.max(), output_logit_2.max(), output_logit_3.max())
         # breakpoint_preds = torch.sum(breakpoint_card.unsqueeze(2) * logits, dim=-1)
         # loss = torch.sum((breakpoint_preds.unsqueeze(2) - breakpoint_targs.unsqueeze(1)) ** 2, dim=-1)
         # return {"loss":loss, "preds":breakpoint_preds}
@@ -242,11 +257,31 @@ class FragOnlyModel(pl.LightningModule):
         hard = torch.zeros_like(x)
         hard.scatter_(0, idx, 1.0)
         return hard
+    
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
-        scheduler = nn_utils.build_lr_scheduler(
-            optimizer=optimizer, lr_decay_rate=self.lr_decay_rate, warmup=self.warmup
+        decay_params, no_decay_params = [], []
+
+        def _is_no_decay_param(name: str, param: torch.nn.Parameter) -> bool:
+            name_l = name.lower()
+            return param.ndim == 1 or name.endswith("bias") or ("norm" in name_l) or ("embed" in name_l)
+
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            if _is_no_decay_param(name, param):
+                no_decay_params.append(param)
+            else:
+                decay_params.append(param)
+
+        optimizer = torch.optim.AdamW(
+            [
+                {"params": decay_params, "weight_decay": self.weight_decay},
+                {"params": no_decay_params, "weight_decay": 0.0},
+            ],
+            lr=self.learning_rate,
         )
+        scheduler = nn_utils.build_lr_scheduler(optimizer=optimizer, 
+                    lr_decay_rate=self.lr_decay_rate, warmup=self.warmup)
         return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "frequency": 1, "interval": "step"}}
 
     def forward(self, graphormer_input, num_atoms, adducts, collision_engs, root_form_vecs, root_reprs=None) -> Dict[str, torch.Tensor]:
@@ -256,7 +291,7 @@ class FragOnlyModel(pl.LightningModule):
         
         if self.root_encode == "graphormer":
             assert graphormer_input is not None, "graphormer_input required for graphormer root_encode"
-            node_features = graphormer_input['x']  # [B, max_nodes, num_features]
+            original_node_features=node_features=graphormer_input['x']  # [B, max_nodes, num_features]
             max_nodes = node_features.shape[1]
             if self.embed_adduct:
                     # embed_adducts: [B, adduct_dim]
@@ -287,6 +322,7 @@ class FragOnlyModel(pl.LightningModule):
             node_embeddings = final_layer_output[1:].transpose(0, 1)  # [B, max_nodes, H]
             root_tokens = graph_rep.unsqueeze(1)  # [B,1,H]
             max_nodes = node_embeddings.shape[1]
+            graphormer_input['x']=original_node_features
         else:
             with root_reprs.local_scope():
                 if self.embed_adduct:
@@ -322,7 +358,11 @@ class FragOnlyModel(pl.LightningModule):
         if self.encode_forms:
             encoded_form = self.embedder(root_form_vecs)[:, None, :]
             root_tokens = self.formula_mapper(torch.cat((root_tokens, encoded_form), dim=-1))
-        frag_vecs = self.fragment_decoder(root_tokens, node_embeddings, memory_key_padding_mask=frag_mask)
+            frag_vecs = self.fragment_decoder(root_tokens, node_embeddings, memory_key_padding_mask=frag_mask)
+        if self.encoder_layers > 0:
+            frag_vecs_flatten = frag_vecs.reshape(-1, self.max_frags, self.hidden_size)
+            frag_vecs_encoded = self.fragment_encoder(frag_vecs_flatten)
+            frag_vecs = frag_vecs_encoded.reshape(self.decoder_layers, batch_size, self.max_frags, self.hidden_size)
         frag_card_logits = self.frag_card_mapper(frag_vecs)  # [num_layers, B, max_frags, 4]
         frag_logits = torch.einsum("nbij,bkj->nbik", frag_vecs, node_embeddings)
         return {"frag_logits": frag_logits, "frag_card_logits": frag_card_logits}
@@ -362,7 +402,7 @@ class FragOnlyModel(pl.LightningModule):
         )
         return {"boundary_mask": boundary_mask, "unique_boundary_patterns":batch_num_unique}
 
-    def _frag_loss(
+    def frag_loss(
         self,
         frags_predicted: torch.Tensor,
         frag_card_predicted: torch.Tensor,
@@ -370,7 +410,6 @@ class FragOnlyModel(pl.LightningModule):
         num_frag_targs: torch.Tensor,
         num_atoms: torch.Tensor,
         adj_matrices: torch.Tensor = None,
-        debug=False,
     ) -> torch.Tensor:
         # frags_predicted: [B, max_frags, max_nodes]
         # frag_targs: packed [sum_frags, max_nodes], num_frag_targs: [B]
@@ -406,7 +445,6 @@ class FragOnlyModel(pl.LightningModule):
         assign = pygm.hungarian(
             -cost, backend="pytorch", n2=num_frag_targs
         )  # [B, max_targs, max_frags]
-
         unassigned_prediction = 1-torch.sum(assign, dim=-1)
         unpaired_tensor = torch.tensor([1, 0, 0, 0], device=assign.device)[None, None, :].expand(frag_card_predicted.shape)
         unassigned_loss = self.cross_entropy(frag_card_predicted, unpaired_tensor, normalized=False) * unassigned_prediction
@@ -627,13 +665,18 @@ class FragOnlyModel(pl.LightningModule):
             num_atoms=batch["num_atoms"],
             adducts=batch["adducts"],
             collision_engs=batch["collision_engs"],
-            root_form_vecs=batch["root_form_vecs"]
+            root_form_vecs=batch["root_form_vecs"],
         )
-        loss = 0
-        for i in range(out["frag_logits"].shape[0]):
-            loss += self._frag_loss(
-            out["frag_logits"][i], out["frag_card_logits"][i], batch["frag_targs"], batch["num_frag_targs"], batch["num_atoms"], batch["adj_matrices"],
-        )    
+        if self.enable_aux_loss:
+            loss = 0
+            for i in range(out["frag_logits"].shape[0]):
+                loss += self.frag_loss(
+                out["frag_logits"][i], out["frag_card_logits"][i], batch["frag_targs"], batch["num_frag_targs"], batch["num_atoms"], batch["adj_matrices"],
+            ) * 0.9**(self.decoder_layers-1-i)
+        else:
+            loss = self.frag_loss(
+                out["frag_logits"][-1], out["frag_card_logits"][-1], batch["frag_targs"], batch["num_frag_targs"], batch["num_atoms"], batch["adj_matrices"],
+            )
         self.log(
             "train_loss", loss.item(), prog_bar=True, on_epoch=True, batch_size=len(batch["names"])
         )
@@ -646,11 +689,11 @@ class FragOnlyModel(pl.LightningModule):
             num_atoms=batch["num_atoms"],
             adducts=batch["adducts"],
             collision_engs=batch["collision_engs"],
-            root_form_vecs=batch["root_form_vecs"]
+            root_form_vecs=batch["root_form_vecs"],
         )
         frag_logits = out["frag_logits"][-1]
         frag_card_logits = out["frag_card_logits"][-1]
-        loss = self._frag_loss(
+        loss = self.frag_loss(
             frag_logits, frag_card_logits, batch["frag_targs"], batch["num_frag_targs"], batch["num_atoms"], batch["adj_matrices"],
         )
         breakpoints = self.breakpoint_inference(frag_logits, frag_card_logits, batch["num_atoms"])
@@ -660,7 +703,7 @@ class FragOnlyModel(pl.LightningModule):
         metrics = self.pattern_match_metrics(patterns, frag_targs_padded, batch["num_frag_targs"], patterns_count = patterns_count)
         recall, precision = metrics["recall"], metrics["precision"]
         metrics = self.pattern_match_metrics(patterns, frag_targs_padded, batch["num_frag_targs"], patterns_count = patterns_count)
-        mz_metrics = self.mz_metrics(patterns, batch["inten_targs"], batch["weights"], batch["atom_hs"], patterns_count, batch["adduct_mass_shifts"])
+        mz_metrics = self.mz_metrics(patterns, batch["inten_targs"], batch["masses"], batch["atom_hs"], patterns_count, batch["adduct_mass_shifts"])
         recall, precision = metrics["recall"], metrics["precision"]
         mz_recall, mz_precision = mz_metrics["recall"], mz_metrics["precision"]
         self.log(
@@ -679,17 +722,19 @@ class FragOnlyModel(pl.LightningModule):
             "val_mz_precision", mz_precision.item(), prog_bar=True, on_epoch=True, batch_size=len(batch["names"])
         )
 
+        return {"loss": loss}
+
     def test_step(self, batch: Dict[str, Any], batch_idx: int):
         out = self.forward(
             graphormer_input=batch.get("graphormer_input"),
             num_atoms=batch["num_atoms"],
             adducts=batch["adducts"],
             collision_engs=batch["collision_engs"],
-            root_form_vecs=batch["root_form_vecs"]
+            root_form_vecs=batch["root_form_vecs"],
         )
         frag_logits = out["frag_logits"][-1]
         frag_card_logits = out["frag_card_logits"][-1]
-        loss = self._frag_loss(
+        loss = self.frag_loss(
             frag_logits, frag_card_logits, batch["frag_targs"], batch["num_frag_targs"], batch["num_atoms"], batch["adj_matrices"],
         )
         breakpoints = self.breakpoint_inference(frag_logits, frag_card_logits, batch["num_atoms"])
@@ -697,7 +742,7 @@ class FragOnlyModel(pl.LightningModule):
         
         frag_targs_padded = nn_utils.pad_packed_tensor(batch["frag_targs"], batch["num_frag_targs"], 0)
         metrics = self.pattern_match_metrics(patterns, frag_targs_padded, batch["num_frag_targs"], patterns_count = patterns_count)
-        mz_metrics = self.mz_metrics(patterns, batch["inten_targs"], batch["weights"], batch["atom_hs"], patterns_count, batch["adduct_mass_shifts"])
+        mz_metrics = self.mz_metrics(patterns, batch["inten_targs"], batch["masses"], batch["atom_hs"], patterns_count, batch["adduct_mass_shifts"])
         recall, precision = metrics["recall"], metrics["precision"]
         mz_recall, mz_precision = mz_metrics["recall"], mz_metrics["precision"]
         self.log(
@@ -810,7 +855,7 @@ class FragOnlyModel(pl.LightningModule):
                 num_atoms=num_atoms,
                 adducts=adducts,
                 collision_engs=collision_engs,
-                root_form_vecs=root_form_vec
+                root_form_vecs=root_form_vec,
             )
             frag_logits = out["frag_logits"][-1]
             frag_card_logits = out["frag_card_logits"][-1]
