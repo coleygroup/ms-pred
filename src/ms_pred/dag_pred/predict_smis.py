@@ -216,7 +216,9 @@ def predict():
                     canonical_root_smi=True,
                 )
             except:
-                logging.error(f'Prediction failed, SMILES: {smis}')
+                logging.error(
+                    f'Prediction failed, SMILES: {smis}; colli_eng_vals: {colli_eng_vals}; adducts: {adducts}'
+                )
                 raise
             return_list = []
             for output_spec, spec_name, smi, ikey, adduct, pred_frag, collision_energy in \

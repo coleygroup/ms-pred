@@ -490,6 +490,12 @@ class CompositeMassSpec:
             else:
                 assert self.root_canonical_smiles == ms_obj.root_canonical_smiles
 
+    def __repr__(self):
+        _repr = f'CompositeMassSpec ['
+        _repr += ', '.join([ms.__repr__() for ms in self.values()])
+        _repr += ']'
+        return _repr
+
     @staticmethod
     def _standardize_ce(ce: Union[str, float]):
         if isinstance(ce, str) and 'collision' in ce:

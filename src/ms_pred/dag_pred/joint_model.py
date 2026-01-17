@@ -172,11 +172,12 @@ class JointModel(pl.LightningModule):
             if not self.inten_model_obj.include_unshifted_mz:
                 masses = masses[:, :, :1, :].contiguous()  # only keep m/z with adduct shift
 
-            for i, (inten_pred, mass, n) in \
+            for i, (inten_pred, mass, nfrags) in \
                     enumerate(zip(inten_preds["spec"], masses, num_frags)):
-                out_mass = mass[:n].reshape(-1)
+                out_mass = mass[:nfrags].reshape(-1)
                 out_inten = inten_pred.reshape(-1)
-                out_frag = frag_preds['frags'][i, :n].repeat_interleave(num_shifts, dim=0)
+                natoms = frag_preds['natoms'][i]
+                out_frag = frag_preds['frags'][i, :nfrags, :natoms].repeat_interleave(num_shifts, dim=0)
 
                 # add to output dict
                 out["spec"].append(torch.stack((out_mass, out_inten), dim=1))
