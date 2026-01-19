@@ -26,7 +26,7 @@ universal_args:
   dropout: [0]
   hidden-size: [512]
   layers: [5]
-  max-frags: [100]
+  max-breakpoints: [100]
   pe-embed-k: [0]
   include-unassigned: [False]
 

@@ -217,8 +217,8 @@ class IntenModel(pl.LightningModule):
         buckets = torch.DoubleTensor(np.linspace(0, 1500, 15000))
         self.inten_buckets = nn.Parameter(buckets)
         self.inten_buckets.requires_grad = False
-        self.token_mapper = nn.Linear(self.hidden_size + 2 * self.formula_in_dim 
-                                    + (self.max_broken_bonds + 1), self.hidden_size)
+        token_size = self.hidden_size + 2 * self.formula_in_dim + (self.max_broken_bonds + 1)
+        self.token_mapper = nn.Linear(token_size, self.hidden_size)
 
         if loss_fn == "cosine":
             self.loss_fn = self.cos_loss
@@ -237,48 +237,10 @@ class IntenModel(pl.LightningModule):
             self.contr_loss_fn = functools.partial(self.entropy_loss, weighted=True)
         else:
             raise NotImplementedError()
-
-    def forward(
-        self,
-        root_repr,
-        collision_engs,
-        adducts,
-        masses,
-        adduct_mass_shifts,
-        root_form_vecs,
-        atom_form_vecs,
-        num_atoms,
-        adj_matrices=None,
-        frag_targs=None,
-        num_frag_targs=None,
-        atom_hs=None,
-        total_hs=None,
-        graphormer_input=None,  # New parameter for Graphormer input format
-    ):
-        """forward _summary_
-
-        Args:
-            root_repr (_type_): _description_
-            collision_engs (_type_): _description_
-            adducts (_type_): _description_
-            masses (_type_): _description_
-            adduct_mass_shifts (_type_): _description_
-            root_form_vecs (_type_): _description_
-            atom_form_vecs (_type_): _description_
-            adj_matrices (_type_, optional): Adjacency matrices of molecular graphs [B, max_nodes, max_nodes]. Defaults to None.
-            frag_targs (_type_, optional): _description_. Defaults to None.
-            num_frag_targs (_type_, optional): _description_. Defaults to None.
-            atom_hs (_type_, optional): Hydrogen count per atom [B, max_atoms]. Defaults to None.
-            total_hs (_type_, optional): Total hydrogen count per molecule [B]. Defaults to None.
-
-        Raises:
-            NotImplementedError: _description_
-
-        Returns:
-            _type_: _description_
-        """
-        batch_size = collision_engs.shape[0]
+        
+    def molecular_embedding(self, adducts, collision_engs, root_repr, graphormer_input=None):
         embed_adducts = self.adduct_embedder[adducts.long()]
+        batch_size = collision_engs.shape[0]
         if self.root_encode == "fp":
             raise NotImplementedError()
         elif self.root_encode == "gnn":
@@ -362,33 +324,16 @@ class IntenModel(pl.LightningModule):
                 raise ValueError("graphormer_input is required when root_encode='graphormer'")     
         else:
             pass
-            
-        # adj_matrices contains the adjacency matrices for the molecular graphs [B, max_nodes, max_nodes]
-        # Currently available but not utilized in the model - can be used for graph-based operations
-        # if adj_matrices is not None:
-        #     # Future implementation: use adjacency matrices for graph convolutions, attention, etc.
-        #     pass
-            
-        # atom_embeddings is [N_atom, H] where N_atom = total atoms across all molecules
-        # frag_targs is [N1, N2] - fragment masks
-        # num_frag_targs is [B] - number of fragments per batch entry
-        
-        # Calculate fragment form vectors by summing atom form vectors
-        # atom_form_vecs: [N_total_atoms, form_dim] - flattened atom form vectors across all molecules in batch
-        # frag_targs: [N1, N2] - fragment masks (1.0 for atoms in fragment, 0.0 otherwise)
+        return {"root_tokens":root_tokens, "node_embeddings":node_embeddings}
+    
+    def inten_calculation(self, root_tokens, node_embeddings, frag_targs, num_frag_targs, root_form_vecs, atom_form_vecs, num_atoms, atom_hs, 
+                          total_hs, adj_matrices, adduct_mass_shifts, masses):
+        batch_size = num_frag_targs.shape[0]
         device = frag_targs.device
         atom_form_vecs_padded = nn_utils.pad_packed_tensor(atom_form_vecs, num_atoms, 0)
-        atom_mask = torch.arange(node_embeddings.shape[1], device=device).unsqueeze(0) >= num_atoms.unsqueeze(1)
-
-
-        # Mask logits for padded atoms so they don't contribute; large negative drives prob->0
 
         frag_targs_padded = nn_utils.pad_packed_tensor(frag_targs, num_frag_targs, True)
 
-        # Now expand to fragment structure and compute per-fragment quantities in a vectorized way
-        # Build fragment->molecule index mapping and expand per-molecule tensors
-
-        # Map each fragment to its molecule index: [N1]
         frag_to_mol = torch.arange(batch_size, device=device).repeat_interleave(num_frag_targs)
 
         # Expand atom form vectors per fragment: [N1, N2, form_dim]
@@ -432,8 +377,9 @@ class IntenModel(pl.LightningModule):
         # One-hot encode (clamped) broken bond counts: [B, max_frags, (max_broken_bonds+1)]
         num_broken_clamped = torch.clamp(num_broken_padded, max=self.max_broken_bonds).long()
         broken_bonds_embedded = F.one_hot(num_broken_clamped, num_classes=self.max_broken_bonds + 1).float()
+        token_list = [root_tokens_expanded, form_encodings, diff_encodings, broken_bonds_embedded]
         root_token_embedded = self.token_mapper(
-            torch.cat([root_tokens_expanded, form_encodings, diff_encodings, broken_bonds_embedded], dim=-1)
+            torch.cat(token_list, dim=-1)
         )
         frag_mask = torch.arange(max_frags, device=device).unsqueeze(0) >= num_frag_targs.unsqueeze(-1)  # [B, max_frags]
         frag_targs_padded = torch.repeat_interleave(frag_targs_padded, self.nhead, dim=0)
@@ -531,9 +477,53 @@ class IntenModel(pl.LightningModule):
         output_unbinned = output_unbinned.reshape(
             batch_size, max_frags, -1
         )
-        output_unbinned_alpha = output_unbinned * pool_weights
+        
+        return {"output_binned": output_binned, "output": output_unbinned}
 
-        return {"output_binned": output_binned, "output": output_unbinned_alpha}
+    def forward(
+        self,
+        root_repr,
+        collision_engs,
+        adducts,
+        masses,
+        adduct_mass_shifts,
+        root_form_vecs,
+        atom_form_vecs,
+        num_atoms,
+        adj_matrices=None,
+        frag_targs=None,
+        num_frag_targs=None,
+        atom_hs=None,
+        total_hs=None,
+        graphormer_input=None,  # New parameter for Graphormer input format
+    ):
+        """forward _summary_
+
+        Args:
+            root_repr (_type_): _description_
+            collision_engs (_type_): _description_
+            adducts (_type_): _description_
+            masses (_type_): _description_
+            adduct_mass_shifts (_type_): _description_
+            root_form_vecs (_type_): _description_
+            atom_form_vecs (_type_): _description_
+            adj_matrices (_type_, optional): Adjacency matrices of molecular graphs [B, max_nodes, max_nodes]. Defaults to None.
+            frag_targs (_type_, optional): _description_. Defaults to None.
+            num_frag_targs (_type_, optional): _description_. Defaults to None.
+            atom_hs (_type_, optional): Hydrogen count per atom [B, max_atoms]. Defaults to None.
+            total_hs (_type_, optional): Total hydrogen count per molecule [B]. Defaults to None.
+
+        Raises:
+            NotImplementedError: _description_
+
+        Returns:
+            _type_: _description_
+        """
+        molecular_embeddings = self.molecular_embedding(adducts, collision_engs, root_repr, graphormer_input=graphormer_input)
+        node_embeddings = molecular_embeddings["node_embeddings"]
+        root_tokens = molecular_embeddings["root_tokens"]
+        return self.inten_calculation(root_tokens, node_embeddings, frag_targs, num_frag_targs, root_form_vecs, atom_form_vecs, 
+                                      num_atoms, atom_hs, total_hs, adj_matrices, adduct_mass_shifts, masses)
 
     def predict(
         self,
@@ -733,7 +723,6 @@ class IntenModel(pl.LightningModule):
         def norm_peaks(prob):
             return prob / (prob.sum(dim=-1, keepdim=True) + 1e-22)
         def entropy(prob):
-            assert torch.all(torch.abs(prob.sum(dim=-1) - 1) < 1e-3), prob.sum(dim=-1)
             return -torch.sum(prob * torch.log(prob + 1e-22), dim=-1) / 1.3862943611198906 # norm by log(4)
 
         if not self.binned_targs:

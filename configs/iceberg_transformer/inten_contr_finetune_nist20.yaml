@@ -2,34 +2,34 @@ launcher_args: {experiment_name: iceberg_transformer_nist20,
   script_name: "src/ms_pred/iceberg_transformer/train_contr_inten.py",
   slurm_script: launcher_scripts/generic_slurm.sh, 
   launch_method: local,
-  visible_devices: [2, 3]
+  visible_devices: [0, 1]
 }
 universal_args:
   _slurm_args:
   - {_num_gpu: 1, cpus-per-task: 7, job-name: iceberg_transformer_train, mem-per-cpu: 8G,
     time: '1-18:00:00'}
-  debug: [true]
+  debug: [false]
   gpu: [true]
 
   seed: [1]
-  num-workers: [64]
+  num-workers: [32]
   batch-size: [16]
   max-epochs: [15]
 
   dataset-name: [nist20]
   split-name: [split_1.tsv]
 
-  learning-rate: [0.0001]
-  lr-decay-rate: [0.825]
+  learning-rate: [0.00007]
+  lr-decay-rate: [0.9]
   num-decoys: [3]
   num-decoy-h5s: [10]
 
-  dropout: [0.1]
+  dropout: [0.05]
   mpnn-type: [GGNN]
   pe-embed-k: [0]
   pool-op: [avg]
   set-layers: [0]
-  hidden-size: [256]
+  hidden-size: [512]
   weight-decay: [0.0]
   layers: [4]
   binned-targs: [True]
@@ -58,5 +58,5 @@ iterative_args:
      seed: [1]
      magma-folder: [results/frag_only_nist20/split_1_rnd1/preds_train_100_inten.hdf5]
      decoy-path: ['results/frag_only_nist20/split_1_rnd1/preds_train_100/decoy_frag_preds/decoy_frag_preds.hdf5']
-     train-checkpoint: [results/iceberg_transformer_nist20/split_1_rnd1/version_81/best.ckpt]
+     train-checkpoint: [results/iceberg_transformer_nist20/split_1_rnd1/version_121/best.ckpt]
      

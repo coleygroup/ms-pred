@@ -44,6 +44,7 @@ def get_args():
     parser.add_argument("--num-bins", default=15000, help="Number of bins for spectra")
     parser.add_argument("--upper-limit", default=1500, help="Largest m/z value")
     parser.add_argument("--binned-pred", action="store_true", default=False)
+    parser.add_argument("--pool-fn", default="add", choices=["add", "max"])
     return parser.parse_args()
 
 
@@ -360,6 +361,7 @@ def main(args):
     ignore_parent_peak = args.ignore_parent_peak
     num_bins = args.num_bins
     upper_limit = args.upper_limit
+    pool_fn = args.pool_fn
     data_folder = Path(f"data/spec_datasets/{dataset}")
     form_folder = data_folder / f"subformulae/{formula_dir_name}/"
     data_df = pd.read_csv(data_folder / "labels.tsv", sep="\t")
@@ -402,7 +404,7 @@ def main(args):
     for spec_id, cand_ikey, spec_dict in pred_specs.get_all_specs():
         pred_spec = {}
         for ce, spec_data in spec_dict.items():
-            pred_spec[ce] = spec_data.bin_spectrum()
+            pred_spec[ce] = spec_data.bin_spectrum(pool_fn=pool_fn)
         pred_spec_ars.append(pred_spec)
         pred_ikeys.append(cand_ikey.strip('ikey '))
         pred_spec_names.append(spec_id.strip('pred_'))

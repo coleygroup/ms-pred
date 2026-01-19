@@ -23,7 +23,7 @@ universal_args:
   split-name: [split_1.tsv]
 
   learning-rate: [0.0001]
-  lr-decay-rate: [0.9]
+  lr-decay-rate: [0.95]
   weight-decay: [0.0]
 
   inten-dropout: [0.05]

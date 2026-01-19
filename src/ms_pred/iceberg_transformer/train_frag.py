@@ -63,7 +63,7 @@ def add_frag_train_args(parser: argparse.ArgumentParser) -> argparse.ArgumentPar
     parser.add_argument("--encoder-layers", default=0, type=int)
     parser.add_argument("--decoder-layers", default=3, type=int)
     parser.add_argument("--warmup", default=1000, type=int)
-    parser.add_argument("--max-frags", default=100, type=int)
+    parser.add_argument("--max-breakpoints", default=100, type=int)
     parser.add_argument("--multi-hop-max-dist", default=5, type=int)
     parser.add_argument("--num-edge-dis", default=10, type=int)
     parser.add_argument("--sk-tau", default=0.05, type=float)
@@ -201,7 +201,7 @@ def train_model():
         root_encode=kwargs["root_encode"],
         node_feats=tree_processor.get_node_feats(),
         edge_feats=tree_processor.get_edge_feats(),
-        max_frags=kwargs["max_frags"],
+        max_breakpoints=kwargs["max_breakpoints"],
         multi_hop_max_dist=kwargs["multi_hop_max_dist"],
         num_edge_dis=kwargs["num_edge_dis"],
         embed_adduct=kwargs["embed_adduct"],

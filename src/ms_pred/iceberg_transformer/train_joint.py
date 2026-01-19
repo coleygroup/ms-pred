@@ -29,6 +29,7 @@ from ms_pred.iceberg_transformer.dataset import IntenDataset, TreeProcessor
 from ms_pred.iceberg_transformer.trainable_joint_model import JointModel
 
 
+
 def add_inten_train_args(parser):
     """Add training arguments."""
     parser.add_argument("--debug", default=False, action="store_true")

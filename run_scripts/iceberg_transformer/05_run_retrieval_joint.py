@@ -3,17 +3,18 @@ from pathlib import Path
 import subprocess
 import json
 
-pred_file = "src/ms_pred/iceberg_transformer/predict_smis.py"
+pred_file = "src/ms_pred/iceberg_transformer/predict_smis_joint.py"
 retrieve_file = "src/ms_pred/retrieval/retrieval_benchmark.py"
 subform_name = "no_subform"
-devices = [0, 1, 2, 3]
+devices = [0, 1, 2]
 vis_devices = ",".join([str(_) for _ in devices])
 num_gpu_workers = len(devices) * 2
 num_cpu_workers = 64
 max_nodes = 100
 batch_size = 64
-dist = "entropy"
+dist = "cos"
 binned_out = False
+pool_fn = "max"
 
 test_entries = [
     {"dataset": "nist20",
@@ -53,32 +54,24 @@ for test_entry in test_entries:
     train_split = test_entry['train_split']
     split = test_entry['test_split']
     maxk = test_entry['max_k']
-    inten_dir = Path(f"results/iceberg_transformer_{dataset}")
-    inten_model = inten_dir / train_split / "version_124/best.ckpt"  # contrastive learning model is version 1
-                                                                   # if no contrastive finetuning, change version_1 to version_0
-    if not inten_model.exists():
-        print(f"Could not find model {inten_model}; skipping\n: {json.dumps(test_entry, indent=1)}")
+    model_dir = Path(f"results/joint_train_{dataset}")
+    joint_model = model_dir/train_split/"version_14/best.ckpt"
+    if not joint_model.exists():
+        print(f"Could not find model {joint_model}; skipping\n: {json.dumps(test_entry, indent=1)}")
         continue
-
+    
     labels = f"data/spec_datasets/{dataset}/retrieval/cands_df_{split}_{maxk}.tsv"
 
-    save_dir = inten_model.parent.parent / f"retrieval_{dataset}_{split}_{maxk}"
+    save_dir = joint_model.parent.parent / f"retrieval_{dataset}_{split}_{maxk}"
     save_dir.mkdir(exist_ok=True)
 
-    args = yaml.safe_load(open(inten_model.parent.parent / "args.yaml", "r"))
-    form_folder = Path(args["magma_folder"])
-    frag_model = form_folder.parent / "version_735/best.ckpt"
-
-    save_dir = save_dir
-    save_dir.mkdir(exist_ok=True)
     cmd = f"""python {pred_file} \\
     --batch-size {batch_size}  \\
     --dataset-name {dataset} \\
     --sparse-out \\
-    --sparse-k 100 \\
-    --split-name {split}.tsv   \\
-    --frag-checkpoint {frag_model} \\
-    --inten-checkpoint {inten_model} \\
+    --sparse-k 1000 \\
+    --split-name {split}.tsv \\
+    --checkpoint {joint_model} \\
     --save-dir {save_dir} \\
     --dataset-labels {labels} \\
     --num-cpu-workers {num_cpu_workers} \\
@@ -93,12 +86,13 @@ for test_entry in test_entries:
     print(cmd + "\n")
     subprocess.run(cmd, shell=True)
 
-    # Run retrieval
+    # # Run retrieval
     cmd = f"""python {retrieve_file} \\
     --dataset {dataset} \\
     --formula-dir-name {subform_name}.hdf5 \\
     --pred-file {save_dir / pred_filename} \\
     --dist-fn {dist} \\
+    --pool-fn {pool_fn}
     """
     if binned_out:
         cmd += "--binned-pred"

@@ -41,7 +41,7 @@ class FragOnlyModel(pl.LightningModule):
         edge_feats: int = 12,
         multi_hop_max_dist: int = 5,
         num_edge_dis: int = 10,
-        max_frags: int = 40,
+        max_breakpoints: int = 40,
         embed_adduct: bool = False,
         embed_collision: bool = False,
         embed_elem_group: bool = False,
@@ -66,7 +66,7 @@ class FragOnlyModel(pl.LightningModule):
         self.weight_decay = weight_decay
         self.warmup = warmup
         self.root_encode = root_encode
-        self.max_frags = max_frags
+        self.max_breakpoints = max_breakpoints
         self.nhead = 8
         self.embed_adduct = embed_adduct
         self.embed_collision = embed_collision
@@ -163,7 +163,7 @@ class FragOnlyModel(pl.LightningModule):
         self.enable_decoder_norm = enable_decoder_norm
         self.fragment_decoder = nn_utils.SlotDecoder(
             hidden_dim=hidden_size,
-            num_slots=max_frags,
+            num_slots=max_breakpoints,
             nhead=self.nhead,
             num_layers=self.decoder_layers,
             dropout=dropout,
@@ -360,10 +360,10 @@ class FragOnlyModel(pl.LightningModule):
             root_tokens = self.formula_mapper(torch.cat((root_tokens, encoded_form), dim=-1))
             frag_vecs = self.fragment_decoder(root_tokens, node_embeddings, memory_key_padding_mask=frag_mask)
         if self.encoder_layers > 0:
-            frag_vecs_flatten = frag_vecs.reshape(-1, self.max_frags, self.hidden_size)
+            frag_vecs_flatten = frag_vecs.reshape(-1, self.max_breakpoints, self.hidden_size)
             frag_vecs_encoded = self.fragment_encoder(frag_vecs_flatten)
-            frag_vecs = frag_vecs_encoded.reshape(self.decoder_layers, batch_size, self.max_frags, self.hidden_size)
-        frag_card_logits = self.frag_card_mapper(frag_vecs)  # [num_layers, B, max_frags, 4]
+            frag_vecs = frag_vecs_encoded.reshape(self.decoder_layers, batch_size, self.max_breakpoints, self.hidden_size)
+        frag_card_logits = self.frag_card_mapper(frag_vecs)  # [num_layers, B, max_breakpoints, 4]
         frag_logits = torch.einsum("nbij,bkj->nbik", frag_vecs, node_embeddings)
         return {"frag_logits": frag_logits, "frag_card_logits": frag_card_logits}
     
@@ -411,9 +411,9 @@ class FragOnlyModel(pl.LightningModule):
         num_atoms: torch.Tensor,
         adj_matrices: torch.Tensor = None,
     ) -> torch.Tensor:
-        # frags_predicted: [B, max_frags, max_nodes]
+        # frags_predicted: [B, max_breakpoints, max_nodes]
         # frag_targs: packed [sum_frags, max_nodes], num_frag_targs: [B]
-        B, max_frags, max_nodes = frags_predicted.shape
+        B, max_breakpoints, max_nodes = frags_predicted.shape
         
         # frag_targs_padded = nn_utils.pad_packed_tensor(
         #     frag_targs, num_frag_targs, False
@@ -444,7 +444,7 @@ class FragOnlyModel(pl.LightningModule):
         cost = rank_loss+per_pair_cards_cross_entropy
         assign = pygm.hungarian(
             -cost, backend="pytorch", n2=num_frag_targs
-        )  # [B, max_targs, max_frags]
+        )  # [B, max_targs, max_breakpoints]
         unassigned_prediction = 1-torch.sum(assign, dim=-1)
         unpaired_tensor = torch.tensor([1, 0, 0, 0], device=assign.device)[None, None, :].expand(frag_card_predicted.shape)
         unassigned_loss = self.cross_entropy(frag_card_predicted, unpaired_tensor, normalized=False) * unassigned_prediction
@@ -452,7 +452,7 @@ class FragOnlyModel(pl.LightningModule):
         unassigned_loss = torch.sum(unassigned_loss, dim=-1)/unassigned_count
 
         
-        node_rank_reshape = node_rank.reshape(B, max_frags, -1)
+        node_rank_reshape = node_rank.reshape(B, max_breakpoints, -1)
         node_rank_assigned = torch.matmul(node_rank_reshape.transpose(1, 2), assign).transpose(1, 2)
         node_rank_assigned = node_rank_assigned.reshape(B, max_targs, max_nodes, -1)
         node_rank_assigned = torch.sum(node_rank_assigned*frag_cards_targs.unsqueeze(-2), dim=-1)
@@ -582,14 +582,14 @@ class FragOnlyModel(pl.LightningModule):
 
         max_inten_shift = (self.output_size - 1) / 2  # Center shift for hydrogen range
         max_break_ar = torch.arange(self.output_size, device=device)[None, None, :].to(device)
-        max_breaks_ub = max_add + max_inten_shift  # [B, max_frags]
-        max_breaks_lb = -max_remove + max_inten_shift  # [B, max_frags]
+        max_breaks_ub = max_add + max_inten_shift  # [B, max_breakpoints]
+        max_breaks_lb = -max_remove + max_inten_shift  # [B, max_breakpoints]
 
-        ub_mask = max_break_ar <= max_breaks_ub[:, :, None]  # [B, max_frags, output_size]
-        lb_mask = max_break_ar >= max_breaks_lb[:, :, None]  # [B, max_frags, output_size]
+        ub_mask = max_break_ar <= max_breaks_ub[:, :, None]  # [B, max_breakpoints, output_size]
+        lb_mask = max_break_ar >= max_breaks_lb[:, :, None]  # [B, max_breakpoints, output_size]
         valid_pos = torch.logical_and(ub_mask, lb_mask)
-        max_frags = pred_mask.shape[1]
-        frag_mask = torch.arange(max_frags, device=device).unsqueeze(0) < num_frag_pred.unsqueeze(1)
+        max_breakpoints = pred_mask.shape[1]
+        frag_mask = torch.arange(max_breakpoints, device=device).unsqueeze(0) < num_frag_pred.unsqueeze(1)
         valid_pos = torch.logical_and(valid_pos, frag_mask[:, :, None]).unsqueeze(-2)
         valid_mass = possible_mass.masked_fill(~valid_pos, 0)
         inverse_indices = torch.clamp(torch.bucketize(valid_mass, self.inten_buckets, right=False), max=len(self.inten_buckets) - 1)

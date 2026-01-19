@@ -2,7 +2,7 @@ from pathlib import Path
 import subprocess
 import argparse
 
-python_file = "src/ms_pred/iceberg_transformer/predict_inten.py"
+python_file = "src/ms_pred/iceberg_transformer/predict_inten_joint.py"
 node_num = 100
 num_workers = 64
 test_entries = [
@@ -13,7 +13,7 @@ test_entries = [
     # {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd2"},
     # {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd3"},
 ]
-devices = ",".join([str(_) for _ in [0, 1, 2, 3]])
+devices = ",".join([str(_) for _ in [0, 1, 2]])
 
 for test_entry in test_entries:
     split = test_entry['split']
@@ -21,8 +21,8 @@ for test_entry in test_entries:
     folder = test_entry['folder']
 
     base_formula_folder = Path(f"results/frag_only_{dataset}")
-    res_folder = Path(f"results/iceberg_transformer_{dataset}/")
-    model = res_folder / folder / "version_121/best.ckpt"  # if no contrastive finetuning, change version_1 to version_0
+    res_folder = Path(f"results/joint_train_{dataset}/")
+    model = res_folder / folder / "version_14/best.ckpt"  # if no contrastive finetuning, change version_1 to version_0
 
     if not model.exists(): 
         continue
@@ -47,7 +47,6 @@ for test_entry in test_entries:
     --magma-dag-folder {magma_dag_folder} \\
     --subset-datasets test_only \\
     --binned-out \\
-    --debug 
     """
     device_str = f"CUDA_VISIBLE_DEVICES={devices}"
     cmd = f"{device_str} {cmd}"
