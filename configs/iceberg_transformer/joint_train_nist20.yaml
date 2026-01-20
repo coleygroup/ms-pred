@@ -2,7 +2,7 @@ launcher_args: {experiment_name: joint_train_nist20,
   script_name: "src/ms_pred/iceberg_transformer/train_joint.py",
   slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,
-  visible_devices: [0]
+  visible_devices: [2]
 }
 universal_args:
   _slurm_args:
@@ -28,17 +28,16 @@ universal_args:
 
   inten-dropout: [0.05]
   frag-dropout: [0]
-  inten-hidden-size: [512]
-  frag-hidden-size: [512]
+  hidden-size: [512]
+  graphormer-layers: [4]
+  graphormer-dropout: [0]
   embed-elem-group: [True]
   add-hs: [True]
   embed-adduct: [True]
   embed-collision: [True]
   encode-forms: [True]
-  inten-graphormer-layers: [4]
   inten-decoder-layers: [3]
   inten-encoder-layers: [3]
-  frag-graphormer-layers: [5]
   frag-encoder-layers: [0]
   frag-decoder-layers: [4]
   max-broken-bonds: [6]

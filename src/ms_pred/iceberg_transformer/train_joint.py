@@ -56,20 +56,19 @@ def add_inten_train_args(parser):
     parser.add_argument("--test-checkpoint", default="", action="store", type=str)
 
     # Model params
+    parser.add_argument("--hidden-size", default=512, type=int)
+    parser.add_argument("--graphormer-layers", default=6, type=int)
+    parser.add_argument("--graphormer-dropout", default=0.05, type=float)
     parser.add_argument("--pe-embed-k", default=14, type=int)
     parser.add_argument("--inten-dropout", default=0.2, type=float)
     parser.add_argument("--frag-dropout", default=0.2, type=float)
-    parser.add_argument("--inten-hidden-size", default=512, type=int)
-    parser.add_argument("--frag-hidden-size", default=512, type=int)
     parser.add_argument("--embed-elem-group", default=True, action="store_true")
     parser.add_argument("--add-hs", default=True, action="store_true")
     parser.add_argument("--embed-adduct", default=True, action="store_true")
     parser.add_argument("--embed-collision", default=True, action="store_true")
     parser.add_argument("--encode-forms", default=True, action="store_true")
-    parser.add_argument("--inten-graphormer-layers", default=6, type=int)
     parser.add_argument("--inten-decoder-layers", default=6, type=int)
     parser.add_argument("--inten-encoder-layers", default=6, type=int)
-    parser.add_argument("--frag-graphormer-layers", default=6, type=int)
     parser.add_argument("--frag-encoder-layers", default=0, type=int)
     parser.add_argument("--frag-decoder-layers", default=3, type=int)
     parser.add_argument("--max-broken-bonds", default=6, type=int)
@@ -120,7 +119,7 @@ def train_model():
     kwargs = args.__dict__
 
     save_dir = kwargs["save_dir"]
-    common.setup_logger(save_dir, log_name="joint_train.log", debug=kwargs["debug"])
+    common.setup_logger(save_dir, log_name="joint_train_share.log", debug=kwargs["debug"])
     pl.seed_everything(kwargs.get("seed"))
 
     # Dump args
@@ -234,8 +233,9 @@ def train_model():
 
     # Define model
     model = JointModel(
-        frag_hidden_size = kwargs["frag_hidden_size"],
-        frag_graphormer_layers=kwargs["frag_graphormer_layers"],
+        hidden_size = kwargs["hidden_size"],
+        graphormer_layers=kwargs["graphormer_layers"],
+        graphormer_dropout = kwargs["graphormer_dropout"],
         frag_decoder_layers=kwargs["frag_decoder_layers"],
         frag_encoder_layers=kwargs["frag_encoder_layers"],
         frag_dropout=kwargs["frag_dropout"],
@@ -253,8 +253,6 @@ def train_model():
         pe_embed_k=pe_embed_k,
         enable_aux_loss=kwargs["enable_aux_loss"],
         enable_decoder_norm=kwargs["enable_decoder_norm"],
-        inten_hidden_size=kwargs["inten_hidden_size"],
-        inten_graphormer_layers=kwargs["inten_graphormer_layers"],
         inten_decoder_layers=kwargs["inten_decoder_layers"],
         inten_encoder_layers=kwargs["inten_encoder_layers"],
         inten_dropout=kwargs["inten_dropout"],
