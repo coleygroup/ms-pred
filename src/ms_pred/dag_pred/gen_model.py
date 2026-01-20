@@ -34,6 +34,7 @@ class FragGNN(pl.LightningModule):
         warmup: int = 1000,
         embed_adduct=False,
         embed_collision=False,
+        embed_instrument=False,
         embed_elem_group=False,
         encode_forms: bool = False,
         add_hs: bool = False,
@@ -74,6 +75,7 @@ class FragGNN(pl.LightningModule):
         self.pe_embed_k = pe_embed_k
         self.embed_adduct = embed_adduct
         self.embed_collision = embed_collision
+        self.embed_instrument = embed_instrument
         self.embed_elem_group = embed_elem_group
         self.encode_forms = encode_forms
         self.add_hs = add_hs
@@ -157,13 +159,22 @@ class FragGNN(pl.LightningModule):
             self.collision_embed_merged = nn.Parameter(torch.zeros(pe_dim))
             self.collision_embed_merged.requires_grad = False
 
+        instrument_shift = 0
+        if self.embed_instrument:
+            instrument_types = len(set(common.instrument2onehot_pos.values()))
+            onehot_instrument = torch.eye(instrument_types)
+            self.instrument_embedder = nn.Parameter(onehot_instrument.float())
+            self.instrument_embedder.requires_grad = False
+            instrument_shift = instrument_types
+
+
         # Define network
         self.gnn = nn_utils.MoleculeGNN(
             hidden_size=self.hidden_size,
             num_step_message_passing=self.layers,
             set_transform_layers=self.set_layers,
             mpnn_type=self.mpnn_type,
-            gnn_node_feats=node_feats + adduct_shift + collision_shift,
+            gnn_node_feats=node_feats + adduct_shift + collision_shift + instrument_shift,
             gnn_edge_feats=edge_feats,
             dropout=self.dropout,
         )
@@ -307,6 +318,12 @@ class FragGNN(pl.LightningModule):
             )
             concat_list.append(collision_exp)
 
+        if self.embed_instrument:                    
+            embed_instruments_exp = embed_instruments.repeat_interleave(
+                root_repr.batch_num_nodes(), 0
+            )
+            concat_list.append(embed_instruments_exp)
+
         with graphs.local_scope():
             graphs.ndata["h"] = torch.cat(concat_list, -1).float()
 
@@ -379,6 +396,7 @@ class FragGNN(pl.LightningModule):
             batch["inds"],
             broken=batch["broken_bonds"],
             adducts=batch["adducts"],
+            instruments=batch["instruments"],
             collision_engs=batch["collision_engs"],
             precursor_mzs=batch["precursor_mzs"],
             root_forms=batch["root_form_vecs"],
@@ -426,6 +444,7 @@ class FragGNN(pl.LightningModule):
         collision_eng,
         precursor_mz,
         adduct,
+        instrument,
         threshold=0,
         device: str = "cpu",
         max_nodes: int = None,
@@ -459,6 +478,7 @@ class FragGNN(pl.LightningModule):
             collision_eng = [collision_eng]
             precursor_mz = [precursor_mz]
             adduct = [adduct]
+            instrument = [instrument]
         else:
             batched_input = True
         batch_size = len(root_smi)
@@ -473,6 +493,7 @@ class FragGNN(pl.LightningModule):
         adducts = torch.LongTensor([common.ion2onehot_pos[a] if type(a) is str else a for a in adduct]).to(device)
         collision_engs = torch.FloatTensor(collision_eng).to(device)
         precursor_mzs = torch.FloatTensor(precursor_mz).to(device)
+        instruments = torch.LongTensor([common.instrument2onehot_pos[i] if type(i) is str else i for i in instrument]).to(device)
 
         # Step 2: Featurize the root molecule
         root_graph_dict = [self.tree_processor.featurize_frag(frag=rf, engine=e, add_random_walk=False)  # add random walk feature later in batched
@@ -524,6 +545,7 @@ class FragGNN(pl.LightningModule):
                     collision_engs=collision_engs,
                     precursor_mzs=precursor_mzs,
                     adducts=adducts,
+                    instruments=instruments,
                     root_forms=root_form_vec,
                     frag_forms=frag_form_vecs,
                 )

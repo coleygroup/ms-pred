@@ -40,6 +40,7 @@ class IntenGNN(pl.LightningModule):
         warmup: int = 1000,
         embed_adduct: bool = False,
         embed_collision: bool = False,
+        embed_instrument: bool = False,
         embed_elem_group: bool = False,
         include_unshifted_mz: bool = False,
         binned_targs: bool = True,
@@ -59,6 +60,7 @@ class IntenGNN(pl.LightningModule):
         self.inject_early = inject_early
         self.embed_adduct = embed_adduct
         self.embed_collision = embed_collision
+        self.embed_instrument = embed_instrument
         self.embed_elem_group = embed_elem_group
         self.include_unshifted_mz = include_unshifted_mz
         self.binned_targs = binned_targs
@@ -146,6 +148,15 @@ class IntenGNN(pl.LightningModule):
             # All-zero for collision == nan
             self.collision_embed_merged = nn.Parameter(torch.zeros(pe_dim))
             self.collision_embed_merged.requires_grad = False
+        
+        instrument_shift = 0
+        if self.embed_instrument:
+            instrument_types = len(set(common.instrument2onehot_pos.values()))
+            onehot_types = torch.eye(instrument_types)
+            self.instrument_embedder = nn.Parameter(onehot_types.float())
+            self.instrument_embedder.requires_grad = False
+            instrument_shift = instrument_types
+        
 
         # Define network
         self.gnn = nn_utils.MoleculeGNN(
@@ -168,7 +179,7 @@ class IntenGNN(pl.LightningModule):
                     num_step_message_passing=self.gnn_layers,
                     set_transform_layers=self.set_layers,
                     mpnn_type=self.mpnn_type,
-                    gnn_node_feats=node_feats + adduct_shift,
+                    gnn_node_feats=node_feats + adduct_shift + instrument_shift,
                     gnn_edge_feats=edge_feats,
                     dropout=self.dropout,
                 )
@@ -345,6 +356,7 @@ class IntenGNN(pl.LightningModule):
         max_breaks,
         adducts,
         collision_engs,
+        instruments,
         precursor_mzs,
         max_add_hs=None,
         max_remove_hs=None,
@@ -363,6 +375,7 @@ class IntenGNN(pl.LightningModule):
             max_breaks (_type_): _description_
             adducts (_type_): _description_
             collision_engs (_type_): _description_
+            instruments (_type_): _description_
             precursor_mzs (_type_): _description_
             max_add_hs (_type_, optional): _description_. Defaults to None.
             max_remove_hs (_type_, optional): _description_. Defaults to None.
@@ -385,6 +398,7 @@ class IntenGNN(pl.LightningModule):
             num_frags,
             adducts=adducts,
             collision_engs=collision_engs,
+            instruments=instruments,
             precursor_mzs=precursor_mzs,
             broken=max_breaks,
             max_add_hs=max_add_hs,
@@ -426,6 +440,7 @@ class IntenGNN(pl.LightningModule):
         num_frags,
         broken,
         collision_engs,
+        instruments,
         precursor_mzs,
         adducts,
         max_add_hs=None,
@@ -445,6 +460,7 @@ class IntenGNN(pl.LightningModule):
             adducts (_type_): _description_
             collision_engs (_type_): _description_
             precursor_mzs (_type_): _description_
+            instruments (_type_): _description_
             max_add_hs (_type_, optional): _description_. Defaults to None.
             max_remove_hs (_type_, optional): _description_. Defaults to None.
             masses (_type_, optional): _description_. Defaults to None.
@@ -521,6 +537,12 @@ class IntenGNN(pl.LightningModule):
                 collision_mapped, graphs.batch_num_nodes(), dim=0
             )
             concat_list.append(collision_exp)
+        if self.embed_instrument:
+            instrument_mapped = embed_instrument[ind_maps]
+            instrument_exp = torch.repeat_interleave(
+                instrument_mapped, graphs.batch_num_nodes(), dim=0
+            )
+            concat_list.append(instrument_exp)
 
         with graphs.local_scope():
             graphs.ndata["h"] = torch.cat(concat_list, -1).float()

@@ -154,6 +154,7 @@ def predict():
             smi = entry["smiles"]
             adduct = entry["ionization"]
             precursor_mz = entry["precursor"]
+            instrument = entry["instrument"]
             name = entry["spec"]
             inchikey = common.inchikey_from_smiles(smi)
             smi = Chem.MolToSmiles(Chem.MolFromSmiles(smi))  # canonicalize
@@ -202,12 +203,13 @@ def predict():
             model.to(device)
 
             # for batch in batched_entries:
-            smis, spec_names, colli_eng_vals, adducts, precursor_mzs, ikeys = list(zip(*batch))
+            smis, spec_names, colli_eng_vals, instruments, adducts, precursor_mzs, ikeys = list(zip(*batch))
             try:
                 full_outputs = model.predict_mol(
                     smis,
                     precursor_mz=precursor_mzs,
                     collision_eng=colli_eng_vals,
+                    instrument=instruments,
                     adduct=adducts,
                     threshold=kwargs["threshold"],
                     device=device,
@@ -235,6 +237,7 @@ def predict():
                 pred_ms = common.MassSpec(
                     root_canonical_smiles=smi,
                     adduct=adduct,
+                    instrument=instrument,
                     collision_energy=collision_energy,
                     masses=masses,
                     intens=intens,
