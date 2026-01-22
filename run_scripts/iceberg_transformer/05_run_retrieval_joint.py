@@ -8,7 +8,7 @@ retrieve_file = "src/ms_pred/retrieval/retrieval_benchmark.py"
 subform_name = "no_subform"
 devices = [0, 1, 2]
 vis_devices = ",".join([str(_) for _ in devices])
-num_gpu_workers = len(devices) * 2
+num_gpu_workers = len(devices) * 3
 num_cpu_workers = 64
 max_nodes = 100
 batch_size = 64
@@ -55,7 +55,7 @@ for test_entry in test_entries:
     split = test_entry['test_split']
     maxk = test_entry['max_k']
     model_dir = Path(f"results/joint_train_{dataset}")
-    joint_model = model_dir/train_split/"version_14/best.ckpt"
+    joint_model = model_dir/train_split/"version_25/best.ckpt"
     if not joint_model.exists():
         print(f"Could not find model {joint_model}; skipping\n: {json.dumps(test_entry, indent=1)}")
         continue
@@ -84,7 +84,7 @@ for test_entry in test_entries:
     device_str = f"CUDA_VISIBLE_DEVICES={vis_devices}"
     cmd = f"{device_str} {cmd}"
     print(cmd + "\n")
-    subprocess.run(cmd, shell=True)
+    # subprocess.run(cmd, shell=True)
 
     # # Run retrieval
     cmd = f"""python {retrieve_file} \\

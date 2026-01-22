@@ -153,23 +153,6 @@ def predict():
                     for gk in batch[k]:
                         batch[k][gk] = batch[k][gk].to(device)
 
-            # pred_obj = model.forward(
-            #     batch["root_reprs"],
-            #     batch["collision_engs"],
-            #     batch["adducts"],
-            #     batch["masses"],
-            #     batch["adduct_mass_shifts"],
-            #     batch["root_form_vecs"],
-            #     batch["atom_form_vecs"],
-            #     batch["num_atoms"],
-            #     adj_matrices=batch["adj_matrices"],
-            #     frag_targs=batch["frag_targs"],
-            #     num_frag_targs=batch["num_frag_targs"],
-            #     atom_hs=batch["atom_hs"],
-            #     total_hs=batch["total_hs"],
-            #     graphormer_input=batch.get("graphormer_input", None),  # Pass Graphormer input if available
-            #     binned_out=binned_out,
-            # )
             pred_obj = model.predict_inten(
                 batch["graphormer_input"],  # Pass Graphormer input if available
                 batch["num_atoms"],
@@ -215,7 +198,7 @@ def predict():
                 root_canonical_smiles=smi,
                 collision_energy=collision_energy.cpu().numpy(),
                 intens=output_spec,
-                num_bins=model.inten_predictor.inten_buckets.shape[-1],
+                num_bins=model.inten_buckets.shape[-1],
                 upper_limit=1500,
                 sparse_out=False,
             )
