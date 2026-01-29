@@ -24,7 +24,16 @@ from rdkit.Chem.Draw import rdMolDraw2D
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
-BASE_MGF_DIR = Path("/home/runzhong/ms-pred/data/retrieval/pubchem/atlas_20250816_model_ce10to50/out_mgf")
+BASE_MGF_DIR = Path("/home/runzhong/ms-pred/data/retrieval/pubchem/atlas/")
+ADDUCT_TO_DIR = {
+    '[M+H]+': BASE_MGF_DIR / 'h_plus_out_mgf',
+    '[M-H]-': BASE_MGF_DIR / 'h_minus_out_mgf',
+}
+
+# Example spectrum
+EXAMPLE_MS_PATH = (
+    Path(__file__).resolve().parent.parent / "data/exp_specs/clinical/lpc19-0_standard.ms"
+)
 
 # Collision energy matching tolerance (in eV)
 EV_TOLERANCE = 1.0
@@ -34,19 +43,19 @@ EV_TOLERANCE = 1.0
 # -----------------------------------------------------------------------------
 
 
-def get_formula_subdir(formula: str) -> Path:
+def get_formula_subdir(formula: str, adduct='[M+H]+') -> Path:
     """
     Wrapper around common.get_formula_subdir to return a Path.
     """
     subdir = common.get_formula_subdir(formula)
-    return BASE_MGF_DIR / subdir
+    return ADDUCT_TO_DIR[adduct] / subdir
 
 
-def get_mgf_path_for_formula(formula: str) -> Path:
+def get_mgf_path_for_formula(formula: str, adduct='[M+H]+') -> Path:
     """
     Get the .mgf path for a given chemical formula.
     """
-    subdir = get_formula_subdir(formula)
+    subdir = get_formula_subdir(formula, adduct)
     mgf_path = subdir / f"{formula}.mgf"
     return mgf_path
 
@@ -405,7 +414,7 @@ def retrieve_candidates(
     if progress_cb:
         progress_cb("load_mgf", 2, "Loading predicted spectra (.mgf)")
 
-    mgf_path = get_mgf_path_for_formula(formula)
+    mgf_path = get_mgf_path_for_formula(formula, adduct)
     lib_grouped = load_library_spectra_grouped(mgf_path, progress_cb)
 
     if progress_cb:
@@ -760,19 +769,12 @@ def index():
     )
 
 
-@app.route("/upload_ms", methods=["POST"])
-def upload_ms():
+def _spectra_payload_from_ms_lines(raw_lines: List[str]) -> List[Dict[str, Any]]:
     """
-    Parse an uploaded .ms (SIRIUS format) file and return spectra as JSON
-    so the frontend can populate spectrum blocks.
+    Shared helper: given the raw lines from a SIRIUS .ms file, return the
+    spectra payload expected by the frontend (for populateSpectraFromUpload).
     """
-    file = request.files.get("ms_file")
-    if not file or file.filename == "":
-        return jsonify({"error": "No file uploaded"}), 400
-
-    # Read file lines
-    raw = file.read().decode("utf-8", errors="ignore").splitlines()
-    meta, comp_ms = common.parse_spectra(raw)  # returns metadata, CompositeMassSpec
+    meta, comp_ms = common.parse_spectra(raw_lines)  # metadata, CompositeMassSpec
 
     # Try to get parentmass (precursor m/z) from metadata
     parentmass = None
@@ -782,16 +784,19 @@ def upload_ms():
         except Exception:
             parentmass = None
 
-    spectra_payload = []
+    spectra_payload: List[Dict[str, Any]] = []
 
     # comp_ms.ce_to_ms is a dict; iterating .items() exactly once
     for ce_key, ms_obj in comp_ms.items():
-        # assume the labels are nce
+        # Assume the labels are NCE
         if parentmass is not None:
             ms_obj.nce_to_ev(parentmass)
 
         # ms_obj.collision_energy has already been normalized to a float-like
-        ce_val = float(ms_obj.collision_energy)
+        try:
+            ce_val = float(ms_obj.collision_energy)
+        except Exception:
+            ce_val = 0.0
 
         spec = ms_obj.spec  # (N, 2) array of [m/z, intensity]
         if spec is None or len(spec) == 0:
@@ -806,9 +811,9 @@ def upload_ms():
         nce_cont = None
         try:
             nce_cont = float(ce_key)
-            # Snap to {10, 20, 30, 40, 50}
-            nce_guess = int(round(nce_cont / 10.0) * 10)
-            nce_guess = max(10, min(50, nce_guess))
+            # Snap to {5, 10, 15, 20, ..., 100}
+            nce_guess = int(round(nce_cont / 5.0) * 5)
+            nce_guess = max(5, min(100, nce_guess))
         except Exception:
             nce_guess = None
             nce_cont = None
@@ -822,7 +827,45 @@ def upload_ms():
             }
         )
 
+    return spectra_payload
+
+
+@app.route("/upload_ms", methods=["POST"])
+def upload_ms():
+    """
+    Parse an uploaded .ms (SIRIUS format) file and return spectra as JSON
+    so the frontend can populate spectrum blocks.
+    """
+    file = request.files.get("ms_file")
+    if not file or file.filename == "":
+        return jsonify({"error": "No file uploaded"}), 400
+
+    raw_lines = file.read().decode("utf-8", errors="ignore").splitlines()
+    spectra_payload = _spectra_payload_from_ms_lines(raw_lines)
+
     return jsonify({"spectra": spectra_payload})
+
+
+@app.route("/load_example_ms", methods=["GET"])
+def load_example_ms():
+    """
+    Load a bundled example SIRIUS .ms file and return spectra as JSON,
+    so the frontend can auto-populate the query spectra.
+    """
+    try:
+        if not EXAMPLE_MS_PATH.is_file():
+            return jsonify({"error": f"Example .ms file not found at {EXAMPLE_MS_PATH}"}), 500
+
+        with EXAMPLE_MS_PATH.open("r", encoding="utf-8", errors="ignore") as f:
+            raw_lines = f.read().splitlines()
+
+        spectra_payload = _spectra_payload_from_ms_lines(raw_lines)
+        if not spectra_payload:
+            return jsonify({"error": "No spectra found in example .ms file."}), 500
+
+        return jsonify({"spectra": spectra_payload})
+    except Exception as e:
+        return jsonify({"error": f"Failed to load example spectrum: {e}"}), 500
 
 
 @app.route("/api/retrieve_start", methods=["POST"])
@@ -1179,4 +1222,4 @@ def fragment_svg():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=8080, debug=False)
