@@ -158,6 +158,7 @@ def _structure_key(meta: Dict[str, Any]) -> str:
 def load_library_spectra_grouped(
     mgf_path: Path,
     progress_cb=None,
+    interested_ces=None,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Load predicted spectra from an .mgf file and group them by structure.
@@ -188,6 +189,9 @@ def load_library_spectra_grouped(
             continue
         try:
             ce_val = float(ce_str)
+            if interested_ces is not None:
+                if f'{ce_val:.0f}' not in interested_ces:
+                    continue
         except ValueError:
             continue
 
@@ -411,15 +415,6 @@ def retrieve_candidates(
     """
     Perform spectrum retrieval for a given formula and user spectra.
     """
-    if progress_cb:
-        progress_cb("load_mgf", 2, "Loading predicted spectra (.mgf)")
-
-    mgf_path = get_mgf_path_for_formula(formula, adduct)
-    lib_grouped = load_library_spectra_grouped(mgf_path, progress_cb)
-
-    if progress_cb:
-        progress_cb("load_mgf", 100, f"Loaded {len(lib_grouped)} candidate structures")
-
     # Precursor m/z for ignoring precursor peak if requested
     precursor_mz = common.formula_mass(formula) + common.ion2mass[adduct]
     ignore_mass_val = precursor_mz - 1 if ignore_precursor else None
@@ -428,7 +423,11 @@ def retrieve_candidates(
         progress_cb("preprocess", 10, "Pre-processing experimental spectrum")
 
     # Process the experimental spectra
-    if isinstance(user_specs, CompositeMassSpec) or isinstance(user_specs, MassSpec):
+    if isinstance(user_specs, CompositeMassSpec):
+        all_ces = [ce for ce in user_specs.keys()]
+        user_specs.process_spec_file(parentmass=precursor_mz, denoise=apply_denoise)
+    elif isinstance(user_specs, MassSpec):
+        all_ces = [f'{user_specs.collision_energy:.0f}']
         user_specs.process_spec_file(parentmass=precursor_mz, denoise=apply_denoise)
     else:
         raise TypeError(
@@ -437,6 +436,15 @@ def retrieve_candidates(
 
     if progress_cb:
         progress_cb("preprocess", 100, "Experimental spectrum processed")
+
+    if progress_cb:
+        progress_cb("load_mgf", 2, "Loading predicted spectra (.mgf)")
+
+    mgf_path = get_mgf_path_for_formula(formula, adduct)
+    lib_grouped = load_library_spectra_grouped(mgf_path, progress_cb, all_ces)
+
+    if progress_cb:
+        progress_cb("load_mgf", 100, f"Loaded {len(lib_grouped)} candidate structures")
 
     results: List[Dict[str, Any]] = []
     total = max(1, len(lib_grouped))
