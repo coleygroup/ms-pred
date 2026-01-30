@@ -244,8 +244,8 @@ for ion in _ori_ions:
 
 instrument2onehot_pos = {
     "Orbitrap": 0,
-    "QTOF": 1,
-    # "Unknown": 2, # TODO: this will break MSG loading, but make CANOPUS work
+    "QTOF": 1, 
+    "Unknown": 2
 }
 
 

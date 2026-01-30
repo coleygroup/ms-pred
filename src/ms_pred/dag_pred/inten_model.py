@@ -35,13 +35,14 @@ class IntenGNN(pl.LightningModule):
         max_broken: int = fragmentation.FRAGMENT_ENGINE_PARAMS["max_broken_bonds"],
         frag_set_layers: int = 0,
         loss_fn: str = "cosine",
+        track_cosine: bool = False,
         root_encode: str = "gnn",
         inject_early: bool = False,
         warmup: int = 1000,
         embed_adduct: bool = False,
         embed_collision: bool = False,
-        embed_instrument: bool = False,
         embed_elem_group: bool = False,
+        embed_instrument: bool = False, 
         include_unshifted_mz: bool = False,
         binned_targs: bool = True,
         encode_forms: bool = False,
@@ -148,7 +149,7 @@ class IntenGNN(pl.LightningModule):
             # All-zero for collision == nan
             self.collision_embed_merged = nn.Parameter(torch.zeros(pe_dim))
             self.collision_embed_merged.requires_grad = False
-        
+
         instrument_shift = 0
         if self.embed_instrument:
             instrument_types = len(set(common.instrument2onehot_pos.values()))
@@ -156,7 +157,6 @@ class IntenGNN(pl.LightningModule):
             self.instrument_embedder = nn.Parameter(onehot_types.float())
             self.instrument_embedder.requires_grad = False
             instrument_shift = instrument_types
-        
 
         # Define network
         self.gnn = nn_utils.MoleculeGNN(
@@ -164,7 +164,7 @@ class IntenGNN(pl.LightningModule):
             num_step_message_passing=self.gnn_layers,
             set_transform_layers=self.set_layers,
             mpnn_type=self.mpnn_type,
-            gnn_node_feats=node_feats + adduct_shift + collision_shift,
+            gnn_node_feats=node_feats + adduct_shift + collision_shift + instrument_shift,
             gnn_edge_feats=edge_feats,
             dropout=self.dropout,
         )
@@ -179,7 +179,7 @@ class IntenGNN(pl.LightningModule):
                     num_step_message_passing=self.gnn_layers,
                     set_transform_layers=self.set_layers,
                     mpnn_type=self.mpnn_type,
-                    gnn_node_feats=node_feats + adduct_shift + instrument_shift,
+                    gnn_node_feats=node_feats + adduct_shift,
                     gnn_edge_feats=edge_feats,
                     dropout=self.dropout,
                 )
@@ -219,6 +219,7 @@ class IntenGNN(pl.LightningModule):
         self.ppm_tol = ppm_tol
         self.mass_tol = self.ppm_tol * 1e-6
         self.loss_fn_name = loss_fn
+        self.track_cosine = track_cosine
         self.cos_fn = nn.CosineSimilarity()
         if loss_fn == "cosine":
             self.loss_fn = self.cos_loss
@@ -226,6 +227,8 @@ class IntenGNN(pl.LightningModule):
         elif loss_fn == "entropy":
             self.loss_fn = self.entropy_loss
             self.output_activations = [nn.Sigmoid()]
+            if self.track_cosine:
+                self._cosine_fn = self.cos_loss
         elif loss_fn == "weighted_entropy":
             self.loss_fn = functools.partial(self.entropy_loss, weighted=True)
             self.output_activations = [nn.Sigmoid()]
@@ -354,10 +357,10 @@ class IntenGNN(pl.LightningModule):
         ind_maps,
         num_frags,
         max_breaks,
-        adducts,
-        collision_engs,
-        instruments,
-        precursor_mzs,
+        adducts=None,
+        collision_engs=None,
+        instruments=None,
+        precursor_mzs=None,
         max_add_hs=None,
         max_remove_hs=None,
         masses=None,
@@ -440,9 +443,9 @@ class IntenGNN(pl.LightningModule):
         num_frags,
         broken,
         collision_engs,
-        instruments,
         precursor_mzs,
-        adducts,
+        adducts=None,
+        instruments=None,
         max_add_hs=None,
         max_remove_hs=None,
         masses=None,
@@ -459,8 +462,8 @@ class IntenGNN(pl.LightningModule):
             broken (_type_): _description_
             adducts (_type_): _description_
             collision_engs (_type_): _description_
-            precursor_mzs (_type_): _description_
             instruments (_type_): _description_
+            precursor_mzs (_type_): _description_
             max_add_hs (_type_, optional): _description_. Defaults to None.
             max_remove_hs (_type_, optional): _description_. Defaults to None.
             masses (_type_, optional): _description_. Defaults to None.
@@ -479,7 +482,10 @@ class IntenGNN(pl.LightningModule):
             masses = masses[:, :, :1, :].contiguous()  # only keep m/z with adduct shift
 
         # if root fingerprints:
-        embed_adducts = self.adduct_embedder[adducts.long()]
+        if self.embed_adduct:
+            embed_adducts = self.adduct_embedder[adducts.long()]
+        if self.embed_instrument:
+            embed_instruments = self.instrument_embedder[instruments.long()]
         if self.root_encode == "fp":
             root_embeddings = self.root_module(root_repr)
             raise NotImplementedError()
@@ -492,6 +498,7 @@ class IntenGNN(pl.LightningModule):
                     ndata = root_repr.ndata["h"]
                     ndata = torch.cat([ndata, embed_adducts_expand], -1)
                     root_repr.ndata["h"] = ndata
+
                 if self.embed_collision:
                     embed_collision = torch.cat(
                         (torch.sin(collision_engs.unsqueeze(1) / self.collision_embedder_denominators.unsqueeze(0)),
@@ -506,6 +513,24 @@ class IntenGNN(pl.LightningModule):
                     )
                     ndata = root_repr.ndata["h"]
                     ndata = torch.cat([ndata, embed_collision_expand], -1)
+                    root_repr.ndata["h"] = ndata
+
+                if self.embed_instrument:
+
+                    # TODO: should I account for nan:
+                    # self.instrument_nansub = nn.Parameter(torch.zeros(len(set(common.instrument2onehot_pos.values()))))
+                    # self.instrument_nansub.requires_grad = False
+
+                    # embed_instruments = torch.where(torch.isnan(embed_instruments), 
+                    #                                 self.instrument_nansub.unsqueeze(0),
+                    #                                 embed_instruments
+                    # )
+                    embed_instruments_expand = embed_instruments.repeat_interleave(
+                        root_repr.batch_num_nodes(), 0
+                    )
+
+                    ndata = root_repr.ndata["h"]
+                    ndata = torch.cat([ndata, embed_instruments_expand], -1)
                     root_repr.ndata["h"] = ndata
                 root_embeddings = self.root_module(root_repr)
                 root_embeddings = self.pool(root_repr, root_embeddings)
@@ -537,12 +562,13 @@ class IntenGNN(pl.LightningModule):
                 collision_mapped, graphs.batch_num_nodes(), dim=0
             )
             concat_list.append(collision_exp)
+
         if self.embed_instrument:
-            instrument_mapped = embed_instrument[ind_maps]
-            instrument_exp = torch.repeat_interleave(
-                instrument_mapped, graphs.batch_num_nodes(), dim=0
+            instruments_mapped = embed_instruments[ind_maps]
+            instruments_exp = torch.repeat_interleave(
+                instruments_mapped, graphs.batch_num_nodes(), dim=0
             )
-            concat_list.append(instrument_exp)
+            concat_list.append(instruments_exp)
 
         with graphs.local_scope():
             graphs.ndata["h"] = torch.cat(concat_list, -1).float()
@@ -702,6 +728,7 @@ class IntenGNN(pl.LightningModule):
             batch["num_frags"],
             broken=batch["broken_bonds"],
             adducts=batch["adducts"],
+            instruments=batch["instruments"] if self.embed_instrument else None,
             collision_engs=batch["collision_engs"],
             precursor_mzs=batch["precursor_mzs"],
             max_remove_hs=batch["max_remove_hs"],
@@ -723,9 +750,13 @@ class IntenGNN(pl.LightningModule):
         if name == 'train':
             loss_fn = self.loss_fn
             decoy_loss_fn = self.entropy_loss
+            if self.track_cosine:
+                cosine_fn = self._cosine_fn
         else:
             loss_fn = functools.partial(self.loss_fn, use_hun=True)  # use hungarian in val and test
             decoy_loss_fn = functools.partial(self.entropy_loss, use_hun=True)
+            if self.track_cosine:
+                cosine_fn = functools.partial(self._cosine_fn, use_hun=True) # use hungarian in val and test
 
         if 'is_decoy' in batch and 'mol_num' in batch:  # data with decoys
             true_data_inds = batch["is_decoy"] == 0
@@ -738,9 +769,9 @@ class IntenGNN(pl.LightningModule):
 
             # contrastive ranking loss cosine loss to decoys
             decoy_spec_loss = decoy_loss_fn(pred_inten,
-                                            batch["inten_targs"][true_data_inds].repeat_interleave(batch['mol_num'], dim=0),
-                                            parent_mass=batch["precursor_mzs"]
-                                            )['loss']
+                                      batch["inten_targs"][true_data_inds].repeat_interleave(batch['mol_num'], dim=0),
+                                      parent_mass=batch["precursor_mzs"]
+                                      )['loss']
             split_end = torch.cumsum(batch['mol_num'], dim=0)
             split_start = split_end - batch['mol_num']
             decoy_spec_loss = [decoy_spec_loss[s:e] for s, e in zip(split_start, split_end)]
@@ -755,12 +786,20 @@ class IntenGNN(pl.LightningModule):
                 "contr_loss": contr_loss,
                 "loss": spec_loss + contr_loss * self.contr_weight,
             }
+            # TODO: track cosine loss if desired
         else:
             loss = loss_fn(pred_inten, batch["inten_targs"], parent_mass=batch["precursor_mzs"])
+            if self.track_cosine:
+                cosine_loss_val = cosine_fn(pred_inten, batch["inten_targs"], parent_mass=batch["precursor_mzs"])['loss']
+
         loss = {k: v.mean() for k, v in loss.items()}
         self.log(
             f"{name}_loss", loss["loss"].item(), batch_size=batch_size, on_epoch=True
         )
+        if self.track_cosine:
+            self.log(
+                f"{name}_cosine", cosine_loss_val.mean().item(), batch_size=batch_size, on_epoch=True
+            )
 
         for k, v in loss.items():
             if k != "loss":

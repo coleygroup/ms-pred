@@ -39,6 +39,7 @@ class JointModel(pl.LightningModule):
         pe_embed_inten = self.inten_model_obj.pe_embed_k
         add_hs_inten = self.inten_model_obj.add_hs
         embed_elem_group_inten = self.inten_model_obj.embed_elem_group
+        self.embed_instrument = (self.gen_model_obj.embed_instrument and self.inten_model_obj.embed_instrument)
 
         self.gen_tp = dag_data.TreeProcessor(
             root_encode=root_enc_gen, pe_embed_k=pe_embed_gen, add_hs=add_hs_gen, embed_elem_group=embed_elem_group_gen,
@@ -57,8 +58,8 @@ class JointModel(pl.LightningModule):
             inten_checkpoint
         """
 
-        gen_model_obj = gen_model.FragGNN.load_from_checkpoint(gen_checkpoint)
-        inten_model_obj = inten_model.IntenGNN.load_from_checkpoint(inten_checkpoint)
+        gen_model_obj = gen_model.FragGNN.load_from_checkpoint(gen_checkpoint, map_location="cpu")
+        inten_model_obj = inten_model.IntenGNN.load_from_checkpoint(inten_checkpoint, map_location="cpu")
         return cls(gen_model_obj, inten_model_obj)
 
     def predict_mol(
@@ -67,20 +68,20 @@ class JointModel(pl.LightningModule):
         collision_eng: float,
         precursor_mz: float,
         adduct: str,
-        instrument: str,
         threshold: float,
         device: str,
         max_nodes: int,
+        instrument: str = None,
         binned_out: bool = False,
         adduct_shift: bool = False,
         canonical_root_smi: bool = False,
+        name: str = None,
     ) -> dict:
         """predict_mol.
 
         Args:
             smi (str): smi
             adduct
-            instrument
             threshold (float): threshold
             device (str): device
             max_nodes (int): max_nodes
@@ -98,19 +99,22 @@ class JointModel(pl.LightningModule):
             collision_eng = [collision_eng]
             precursor_mz = [precursor_mz]
             adduct = [adduct]
-            instrument = [instrument]
+            if self.embed_instrument:
+                instrument = [instrument] 
         else:
             batched_input = True
         batch_size = len(root_smi)
         if not canonical_root_smi:
+            # first remove stereochemistry, then roundtrip
+            root_smi = [common.rm_stereo(smi) for smi in root_smi]
             root_smi = [common.smiles_from_inchi(common.inchi_from_smiles(_)) for _ in root_smi] # canonical smiles
 
         frag_preds, root_reprs = self.gen_model_obj.predict_mol(
             root_smi=root_smi,
             collision_eng=collision_eng,
             precursor_mz=precursor_mz,
+            instrument=instrument if self.embed_instrument else None,
             adduct=adduct,
-            instrument=instrument,
             threshold=threshold,
             device=device,
             max_nodes=max_nodes,
@@ -145,8 +149,9 @@ class JointModel(pl.LightningModule):
         to_tensor = lambda x: torch.tensor(x, device=device, dtype=torch.float) if x is not None else x
         adducts = to_tensor([common.ion2onehot_pos[a] for a in adduct])
         collision_engs = to_tensor(collision_eng)
-        instruments = to_tensor(instrument)
         precursor_mzs = to_tensor(precursor_mz)
+        # TODO: unsure if needs to be converted. 
+        instruments = to_tensor([common.instrument2onehot_pos[i] for i in instrument]) if self.embed_instrument else None
         root_forms = frag_preds['root_form_vec']
         frag_forms = frag_preds['frag_form_vecs'][:, :max_nfrags]
 
@@ -157,7 +162,6 @@ class JointModel(pl.LightningModule):
             ind_maps=ind_maps,
             num_frags=num_frags,
             max_breaks=broken_bonds,
-            instruments=instrument, 
             max_add_hs=max_add_hs,
             max_remove_hs=max_remove_hs,
             masses=masses,
@@ -166,6 +170,7 @@ class JointModel(pl.LightningModule):
             binned_out=binned_out,
             adducts=adducts,
             collision_engs=collision_engs,
+            instruments=instruments if self.embed_instrument else None,
             precursor_mzs=precursor_mzs,
         )
 
@@ -178,18 +183,29 @@ class JointModel(pl.LightningModule):
             if not self.inten_model_obj.include_unshifted_mz:
                 masses = masses[:, :, :1, :].contiguous()  # only keep m/z with adduct shift
 
-            for i, (inten_pred, mass, nfrags) in \
+            for i, (inten_pred, mass, n) in \
                     enumerate(zip(inten_preds["spec"], masses, num_frags)):
-                out_mass = mass[:nfrags].reshape(-1)
+                out_mass = mass[:n].reshape(-1)
                 out_inten = inten_pred.reshape(-1)
-                natoms = frag_preds['natoms'][i]
-                out_frag = frag_preds['frags'][i, :nfrags, :natoms].repeat_interleave(num_shifts, dim=0)
+                out_frag = frag_preds['frags'][i, :n].repeat_interleave(num_shifts, dim=0)
 
                 # add to output dict
                 out["spec"].append(torch.stack((out_mass, out_inten), dim=1))
                 out["frag"].append(out_frag)
 
         if batched_input:
-            return out
+            # need to return to original order, using valid_mask
+            if not canonical_root_smi and sum(valid_mask) < batch_size:
+                rebatched_out = dict()
+                rebatched_out["spec"] = []
+                for elem in valid_mask:
+                    if elem:
+                        rebatched_out['spec'].append(out['spec'].pop(0))
+                    else:
+                        # TODO: ensure that this binsize is not hardcoded
+                        rebatched_out['spec'].append(np.zeros((15000,)))
+                return rebatched_out
+            else:
+                return out
         else:
             return {k: v[0] for k, v in out.items()}

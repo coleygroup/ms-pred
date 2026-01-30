@@ -70,6 +70,7 @@ def add_frag_train_args(parser):
     parser.add_argument("--inject-early", default=False, action="store_true")
     parser.add_argument("--embed-adduct", default=False, action="store_true")
     parser.add_argument("--embed-collision", default=False, action="store_true")
+    parser.add_argument("--embed-instrument", default=False, action="store_true")
     parser.add_argument("--embed-elem-group", default=False, action="store_true")
     parser.add_argument("--encode-forms", default=False, action="store_true")
     parser.add_argument("--add-hs", default=False, action="store_true")
@@ -179,6 +180,7 @@ def train_model():
         persistent_workers=persistent_workers,
         multiprocessing_context=mp_contex,
     )
+    # get example entry from train loader
     val_loader = DataLoader(
         val_dataset,
         num_workers=kwargs["num_workers"],
@@ -215,6 +217,7 @@ def train_model():
         inject_early=kwargs["inject_early"],
         embed_adduct=kwargs["embed_adduct"],
         embed_collision=kwargs["embed_collision"],
+        embed_instrument=kwargs["embed_instrument"],
         embed_elem_group=kwargs["embed_elem_group"],
         encode_forms=kwargs["encode_forms"],
         add_hs=add_hs,

@@ -138,6 +138,7 @@ def iceberg_prediction(
     collision_energies:List[int],
     nce:bool=False,
     adduct:str='[M+H]+',
+    instrument:str=None,
     exp_name:str='iceberg_elucidation',
     python_path:str='',
     gen_ckpt:str='',
@@ -162,6 +163,7 @@ def iceberg_prediction(
         collision_energies: (List[int]) list of collision energies. Could also be List[List[int]] for each candidate SMILES
         nce: (bool, default=False) if True, the collision energies are treated as normalized collision energy; otherwise, they are treated as absolute eV
         adduct: (str, default='[M+H]+') adduct type. Could also be List[str] for each candidate SMILES
+        instrument: (str, default=None) instrument used (Orbitrap or QTOF)
         exp_name: (str, default='iceberg_elucidation') name of the experiment
         python_path: (str) path to python executable
         gen_ckpt: (str) path to ICEBERG generator model (model 1) checkpoint
@@ -215,6 +217,11 @@ def iceberg_prediction(
                                  f'{list(common.ion2mass.keys())}')
     assert len(adducts) == len(candidate_smiles)
 
+    if isinstance(instrument, str) or instrument is None:
+        instruments = [instrument] * len(candidate_smiles)
+    else:
+        instruments = instrument
+
     # standardize collision energies
     if not common.is_iterable(collision_energies): # single value CE
         collision_energies = [[int(collision_energies)] for _ in adducts]
@@ -233,6 +240,7 @@ def iceberg_prediction(
     # candidate_smiles = [Chem.MolToSmiles(common.canonical_mol_from_inchi(common.inchi_from_smiles(smi)))
     #                     for smi in candidate_smiles]
     adducts = np.array(adducts)[uniq_idx].tolist()
+    instruments = np.array(instruments)[uniq_idx].tolist()
     collision_energies = [collision_energies[i] for i in uniq_idx]
 
     # get formula & mass & check candidate smiles
@@ -262,8 +270,8 @@ def iceberg_prediction(
 
     # generate temp directory
     param_str = exp_name + '|'
-    for cand_smi, adduct, ce in sorted(zip(candidate_smiles, adducts, collision_energies)):
-        param_str += '|' + cand_smi + ';' + str(common.ion2onehot_pos[adduct]) + ';' + ','.join(sorted(ce))
+    for cand_smi, adduct, instrument, ce in sorted(zip(candidate_smiles, adducts, instruments, collision_energies)):
+        param_str += '|' + cand_smi + ';' + str(common.ion2onehot_pos[adduct]) + ';' + str(common.instrument2onehot_pos[instrument]) + ';' + ','.join(sorted(ce))
     param_str += '||' + str(gen_ckpt.absolute()) + '||' + str(inten_ckpt.absolute()) + '||' + cuda_devices + \
                  '||' + f'{batch_size:d}-{sparse_k:d}-{max_nodes:d}||' + f'{threshold:.2f}' + \
                  '||' + ('binned_out' if binned_out else "")
@@ -279,9 +287,9 @@ def iceberg_prediction(
     if force_recompute or not (save_dir / 'iceberg_run_successful').exists():
         # write candidates to tsv
         entries = []
-        for cand_smi, adduct, ce, pmz in zip(candidate_smiles, adducts, collision_energies, precursor_masses):
+        for cand_smi, adduct, instrument, ce, pmz in zip(candidate_smiles, adducts, instruments, collision_energies, precursor_masses):
             entries.append({
-                'spec': exp_name, 'smiles': cand_smi, 'ionization': adduct, 'inchikey': common.inchikey_from_smiles(cand_smi),
+                'spec': exp_name, 'smiles': cand_smi, 'ionization': adduct, 'instrument': instrument, 'inchikey': common.inchikey_from_smiles(cand_smi),
                 'precursor': pmz, 'collision_energies': ce,
             })
         df = pd.DataFrame.from_dict(entries)
@@ -302,7 +310,7 @@ def iceberg_prediction(
                --save-dir {save_dir} \\
                --adduct-shift''')
         if cuda_devices:
-            cmd = f'CUDA_VISIBLE_DEVICES={cuda_devices} ' + cmd + ' \\\n               --gpu'
+            cmd = f'CUDA_VISIBLE_DEVICES={cuda_devices} ' + cmd + ' \\\n           --gpu'
         assert not binned_out, 'Elucidation not supported for binned_out=True'
         if binned_out:
             cmd += ' \\           --binned_out'
@@ -325,7 +333,7 @@ def load_real_spec(
     nce:bool=False,
     ppm:int=20,
     nist_path:str='data/spec_datasets/nist20/spec_files.hdf5',
-    denoise_spectrum:bool=True,
+    denoise_spectrum:bool=False,
     intensity_threshold:float=0.05,
     **kwargs,
 ) -> common.CompositeMassSpec:
@@ -388,6 +396,7 @@ def elucidation_over_candidates(
     num_bins:int=15000,
     ignore_precursor:bool=True,
     dist_func:str='entropy',
+    nist_path:str='data/spec_datasets/nist20/spec_files.hdf5',
     **kwargs,
 ):
     """
@@ -419,7 +428,7 @@ def elucidation_over_candidates(
     # hack the precursor mz if there are multiple formulae within tolerance
     precursor_mass = common.merge_mz(precursor_mass, ppm)
 
-    real_spec = load_real_spec(real_spec, real_spec_type, precursor_mass, nce, ppm)
+    real_spec = load_real_spec(real_spec, real_spec_type, precursor_mass, nce, ppm, nist_path)
     smiles, pred_specs = load_pred_spec(load_dir)
 
     # transform spec to binned spectrum
@@ -460,6 +469,92 @@ def elucidation_over_candidates(
         if idx >= topk and found_true:
             break
     return [(smiles[i], 1 - sim[i], i == true_idx) for i in sorted_indices[:topk]]
+
+def elucidation_over_energies(
+    load_dir,
+    real_spec,
+    precursor_mass,
+    real_smiles,
+    real_spec_type='ms',
+    mol_name='',
+    nce=False,
+    num_bins=2000,
+    ppm=20,
+    step_collision_energy=False,
+    ignore_precursor=True,
+    dist_func='entropy',
+    topk=5,
+    nist_path=None,
+    **kwargs
+):
+    """
+    Similar to elucidation_over_candidates, but for a single SMILES.
+    Ranks predicted spectra for the single molecule by energy (or prediction index).
+
+    Returns: list of TopK predictions:
+        [ (energy, entropy distance, is_true_molecule),
+          ...
+        ]
+    """
+    # hack the precursor mz if there are multiple formulae within tolerance
+    precursor_mass = common.merge_mz(precursor_mass, ppm)
+
+    real_spec = load_real_spec(real_spec, real_spec_type, precursor_mass, nce, ppm, nist_path)
+    smiles, pred_specs, pred_frags = load_pred_spec(load_dir, step_collision_energy)
+
+    # Only one SMILES, so just use the first (or only) one
+    if isinstance(smiles, list):
+        smi = smiles[0]
+    else:
+        smi = smiles
+
+    # transform spec to binned spectrum
+    real_binned = {k: common.bin_spectra([v], num_bins)[0] for k, v in real_spec.items()}
+    pred_binned_specs = [
+        {k: common.bin_spectra([v], num_bins, pool_fn='add')[0] for k, v in s.items()}
+        for s in pred_specs]
+    # now break up into individual spectra
+    if len(pred_binned_specs) == 1:
+            
+        pred_binned_specs = [[{k: v}] for k, v in pred_binned_specs[0].items()]
+        real_binned = [{k: v} for k, v in real_binned.items()]
+        pred_binned_specs = sorted(pred_binned_specs, key=lambda x: float(list(x[0].keys())[0]))
+
+        dist = [dist_bin(
+            pred,
+            real,
+            ignore_peak=(precursor_mass - 1) * 10 if ignore_precursor else None,
+            sparse=False,
+            func=dist_func
+        ) for pred, real in zip(pred_binned_specs, real_binned)]
+        dist = np.array(dist).squeeze()
+    else:
+        # compute distance for each predicted spectrum (over energies)
+        dist = dist_bin(
+            pred_binned_specs,
+            real_binned,
+            ignore_peak=(precursor_mass - 1) * 10 if ignore_precursor else None,
+            sparse=False,
+            func=dist_func
+        )
+
+    sorted_indices = np.argsort(dist)
+    # If step_collision_energy, get the energy for each prediction
+    # if step_collision_energy:
+    #     energies = [s.get('energy', idx) for idx, s in enumerate(pred_specs)]
+    # else:
+    #     energies = list(range(len(pred_specs)))
+    energies = np.array([float(k) for k in pred_specs[0].keys()])
+
+    # Only one true molecule, so is_true is always True for all
+    results = []
+    for rnk, idx in enumerate(sorted_indices[:topk]):
+        energy = energies[idx]
+        d = dist[idx]
+        results.append((energy, d, True))
+        if rnk == 0 and len(mol_name) > 0:
+            print(f'[{mol_name}] Top1 energy={energy}, ent_dist={d:.3f}')
+    return results
 
 
 def plot_top_mols(
@@ -536,7 +631,6 @@ def explain_peaks(
     """
     from matplotlib.offsetbox import (OffsetImage, AnnotationBbox)
     import ms_pred.magma.fragmentation as fragmentation
-
     if 'step_collision_energy' in kwargs:
         merge_spec = kwargs['step_collision_energy']
 
@@ -666,6 +760,7 @@ def modi_finder(
     ppm:int=20,
     save_path: str = None,
     axes: list = None,
+    nist_path:str='data/spec_datasets/nist20/spec_files.hdf5',
 ):
     """
     ModiFinder find modification sites between two chemical compounds, whereby their mass spec are obtained and the
@@ -843,6 +938,7 @@ def modi_finder(
         for fig in all_figs:
             fig.savefig(p, format='pdf', bbox_inches='tight')
         p.close()
+
 
 
 def form_from_mgf_buddy(

@@ -67,7 +67,10 @@ def predict():
 
     save_dir = Path(kwargs["save_dir"])
     common.setup_logger(save_dir, log_name="dag_gen_pred.log", debug=kwargs["debug"])
-    pl.utilities.seed.seed_everything(kwargs.get("seed"))
+    try: 
+        pl.utilities.seed.seed_everything(kwargs.get("seed"))
+    except Exception as e:
+        pl.seed_everything(kwargs.get("seed"))
 
     # Dump args
     yaml_args = yaml.dump(kwargs)
@@ -100,6 +103,8 @@ def predict():
 
         df = df[df["spec"].isin(names)]
 
+        df = df[df["instrument"].isin(["Orbitrap", "QTOF", "Unknown"])] # drop any nans
+
     # Create model and load
     best_checkpoint = kwargs["checkpoint_pth"]
 
@@ -126,6 +131,7 @@ def predict():
             name = entry["spec"]
             adduct = entry["ionization"]
             precursor_mz = entry["precursor"]
+            instrument = entry["instrument"]
             collision_energies = [i for i in ast.literal_eval(entry["collision_energies"])]
             smi = common.rm_stereo(smi)
             mol = common.smi_inchi_round_mol(smi)
@@ -173,14 +179,14 @@ def predict():
                     for colli_eng in collision_energies:
                         colli_eng_val = common.collision_energy_to_float(colli_eng)  # str to float
                         tup_to_process.append((
-                            decoy_smi, f'pred_{name}', colli_eng_val, f'decoy {i}', adduct, precursor_mz,
+                            decoy_smi, f'pred_{name}', colli_eng_val, f'decoy {i}', adduct, instrument, precursor_mz,
                         ))
 
             else:
                 for colli_eng in collision_energies:
                     colli_eng_val = common.collision_energy_to_float(colli_eng)  # str to float
                     tup_to_process.append((
-                        smi, f'pred_{name}', colli_eng_val, None, adduct, precursor_mz,
+                        smi, f'pred_{name}', colli_eng_val, None, adduct, instrument, precursor_mz,
                     ))
             return tup_to_process
 
@@ -223,12 +229,13 @@ def predict():
                 device = "cpu"
             model.to(device)
 
-            smi, name, colli_eng_val, decoy_label, adduct, precursor_mz = list(zip(*batch))
+            smi, name, colli_eng_val, decoy_label, adduct, instrument, precursor_mz = list(zip(*batch))
             pred, _ = model.predict_mol(
                 smi,
                 precursor_mz=precursor_mz,
                 collision_eng=colli_eng_val,
                 adduct=adduct,
+                instrument=instrument,
                 threshold=kwargs["threshold"],
                 device=device,
                 max_nodes=kwargs["max_nodes"],
@@ -236,13 +243,14 @@ def predict():
                 canonical_root_smi=True,  # smi is canonical
             )
             return_list = []
-            for i, (_smi, _name, _colli_eng_val, _decoy_label, _adduct) in \
-                    enumerate(zip(smi, name, colli_eng_val, decoy_label, adduct)):
+            for i, (_smi, _name, _colli_eng_val, _decoy_label, _adduct, _instrument) in \
+                    enumerate(zip(smi, name, colli_eng_val, decoy_label, adduct, instrument)):
                 mask = pred["probs"][i] > 0
                 pred_ms = common.MassSpec(
                     root_canonical_smiles=_smi,
                     collision_energy=_colli_eng_val,
                     adduct=_adduct,
+                    instrument=_instrument,
                     natoms=pred["natoms"][i].item(),
                     remark=_decoy_label,
                     probs=pred["probs"][i][mask].cpu().numpy(),
@@ -261,6 +269,9 @@ def predict():
             for out_batch in out_entries:
                 for out_item in out_batch:
                     name, spec = out_item
+                    # make name: name_collision_{ce}
+                    ce_str = spec._standardize_ce(spec.collision_energy)
+                    name = name + '_' + ce_str
                     specdb.write(name, spec)
             specdb.close()
 

@@ -294,6 +294,8 @@ class TreeProcessor:
             out_dict = self._convert_to_dgl(tree, include_frag_targets, include_inten_targets, last_row)
             if "collision_energy" in tree:
                 out_dict["collision_energy"] = tree["collision_energy"]
+            if "instrument" in tree:
+                out_dict["instrument"] = tree["instrument"]
         else:
             out_dict = tree
 
@@ -470,10 +472,17 @@ class DAGDataset(Dataset):
         self.num_workers = num_workers
         self.magma_h5 = magma_h5
         self.magma_map = magma_map
-        valid_spec_ids = set([common.rm_collision_str(i) for i in self.magma_map])
+        if 'collision' in list(self.magma_map.keys())[0]:
+            valid_spec_ids = set([common.rm_collision_str(i) for i in self.magma_map])
+        else:
+            # TODO: fix for CANOPUS. 
+            # TODO: temporary fix for CANOPUS, change indexing back
+            #valid_spec_ids = set(["_".join(i.split("_")[:-2]) for i in self.magma_map])
+            valid_spec_ids = set(self.magma_map.keys())
 
-        valid_specs = [i in valid_spec_ids for i in self.df["spec"].values]
+        valid_specs = [(i in valid_spec_ids and inst in common.instrument2onehot_pos) for i, inst in self.df[["spec", "instrument"]].values]
         self.df_sub = self.df[valid_specs]
+        
         if len(self.df_sub) == 0:
             self.spec_names = []
             self.name_to_dict = {}
@@ -483,6 +492,8 @@ class DAGDataset(Dataset):
             self.name_to_dict = {}
             for i in self.magma_map:
                 ori_id = common.rm_collision_str(i)
+                # TODO: temporary fix for CANOPUS, change indexing back
+                #ori_id = "_".join(i.split("_")[:-2])
                 if ori_id in ori_label_map:
                     self.spec_names.append(i)
                     self.name_to_dict[i] = copy.deepcopy(ori_label_map[ori_id])
@@ -495,12 +506,26 @@ class DAGDataset(Dataset):
         adduct_map = dict(self.df[["spec", "ionization"]].values)
         self.name_to_adduct = {
             i: adduct_map[common.rm_collision_str(i)] for i in self.spec_names
+            # TODO: temporary fix for CANOPUS, change indexing back
+            #i: adduct_map["_".join(i.split("_")[:-2])] for i in self.spec_names
         }
         self.name_to_adducts = {
             i: common.ion2onehot_pos[self.name_to_adduct[i]] for i in self.spec_names
         }
+        instrument_map = dict(self.df[["spec", "instrument"]].values)
+        self.name_to_instrument = {
+            i: instrument_map[common.rm_collision_str(i)] for i in self.spec_names
+            # TODO: temporary fix for CANOPUS, change indexing back
+            # i: instrument_map["_".join(i.split("_")[:-2])] for i in self.spec_names
+        }
+
+        self.name_to_instruments = {
+            i: common.instrument2onehot_pos[self.name_to_instrument[i]] for i in self.spec_names
+        }
+
         self.name_to_smiles = {k: v['smiles'] for k, v in self.name_to_dict.items()}
         self.name_to_precursors = {k: v['precursor'] for k, v in self.name_to_dict.items()}
+        
 
     def load_tree(self, x):
         raise NotImplementedError
@@ -521,11 +546,13 @@ class DAGDataset(Dataset):
         name = self.spec_names[idx]
         adduct = self.name_to_adducts[name]
         precursor = self.name_to_precursors[name]
+        instrument = self.name_to_instruments[name]
 
         dgl_entry = self.read_fn(name)["dgl_tree"]
         # dgl_entry = self.dgl_trees[idx]
 
-        outdict = {"name": name, "adduct": adduct, "precursor": precursor}
+        outdict = {"name": name, "adduct": adduct, "precursor": precursor, 
+                   "instrument": instrument}
 
         # Convert this into a list of graphs with a list of targets
         outdict.update(dgl_entry)
@@ -537,7 +564,7 @@ class DAGDataset(Dataset):
 
 
 class GenDataset(DAGDataset):
-    """GenDatset."""
+    """GenDataset."""
 
     def __init__(
         self,
@@ -601,8 +628,15 @@ class GenDataset(DAGDataset):
         max_broken = [torch.LongTensor(i["max_broken"]) for i in input_list]
         max_broken = torch.cat(max_broken)
 
-        adducts = [j["adduct"] for j in input_list]
-        adducts = torch.FloatTensor(adducts)
+        supply_adduct = "adduct" in input_list[0]
+        if supply_adduct:
+            adducts = [j["adduct"] for j in input_list]
+            adducts = torch.FloatTensor(adducts)
+
+        supply_instrument = "instrument" in input_list[0]
+        if supply_instrument:
+            instruments = [j["instrument"] for j in input_list]
+            instruments = torch.FloatTensor(instruments)
 
         collision_engs = [float(j["collision_energy"]) for j in input_list]
         collision_engs = torch.FloatTensor(collision_engs)
@@ -621,8 +655,9 @@ class GenDataset(DAGDataset):
             "frag_atoms": frag_atoms,
             "inds": root_inds,
             "broken_bonds": max_broken,
-            "adducts": adducts,
+            "adducts": adducts if supply_adduct else None,
             "collision_engs": collision_engs,
+            "instruments": instruments if supply_instrument else None,
             "precursor_mzs": precursor_mzs,
             "root_form_vecs": root_vecs,
             "frag_form_vecs": form_vecs,
@@ -638,7 +673,7 @@ class GenDataset(DAGDataset):
 
 
 class IntenDataset(DAGDataset):
-    """GenDatset."""
+    """IntenDataset."""
 
     def __init__(
         self,
@@ -712,8 +747,14 @@ class IntenDataset(DAGDataset):
         max_broken = [torch.LongTensor(i["max_broken"]) for i in input_list]
         broken_padded = torch.nn.utils.rnn.pad_sequence(max_broken, batch_first=True)
 
-        adducts = [j["adduct"] for j in input_list]
-        adducts = torch.FloatTensor(adducts)
+        supply_adduct = "adduct" in input_list[0]
+        if supply_adduct:
+            adducts = [j["adduct"] for j in input_list]
+            adducts = torch.FloatTensor(adducts)
+        supply_instrument = "instrument" in input_list[0]
+        if supply_instrument:
+            instruments = [j["instrument"] for j in input_list]
+            instruments = torch.FloatTensor(instruments)
 
         collision_engs = [float(j["collision_energy"]) for j in input_list]
         collision_engs = torch.FloatTensor(collision_engs)
@@ -738,8 +779,9 @@ class IntenDataset(DAGDataset):
             "max_add_hs": max_add_hs_padded,
             "max_remove_hs": max_remove_hs_padded,
             "inten_frag_ids": inten_frag_ids,
-            "adducts": adducts,
+            "adducts": adducts if supply_adduct else None,
             "collision_engs": collision_engs,
+            "instruments": instruments if supply_instrument else None,
             "precursor_mzs": precursor_mzs,
             "root_form_vecs": root_vecs,
             "frag_form_vecs": form_vecs,
@@ -827,24 +869,28 @@ class IntenContrDataset(DAGDataset):
         name = self.spec_names[idx]
         spec_name = '_'.join(name.split('_')[:-1])  # remove collision energy label
         adduct = self.name_to_adducts[name]
+        instrument = self.name_to_instruments[name]
         precursor = self.name_to_precursors[name]
         dataset_smi = self.name_to_smiles[name]
 
         dgl_entry = self.read_fn(name)["dgl_tree"]
         colli_eng = common.get_collision_energy(name)
-        outdict = {"name": name, "adduct": adduct, "precursor": precursor, 'smiles': dataset_smi, 'decoy': 0}
+        outdict = {"name": name, "adduct": adduct, "precursor": precursor, 'instrument': instrument, 'smiles': dataset_smi, 'decoy': 0}
 
         # Convert this into a list of graphs with a list of targets
         outdict.update(dgl_entry)
 
         outlist = [outdict]
-
-        _, decoy_keys = self.decoy_db.get_entries(f'pred_{spec_name}', colli_eng)
+        # deposited differently for canopus: 
+        # query = f'pred_{spec_name}' before
+        query = f'pred_{spec_name}_{colli_eng}'
+        _, decoy_keys = self.decoy_db.get_entries(query, colli_eng)
+        
         if len(decoy_keys) > 0:
             if self.num_decoys < len(decoy_keys):
                 decoy_keys = random.sample(decoy_keys, self.num_decoys)
             for decoy_key in decoy_keys:
-                gen_pred = self.decoy_db.read(f'pred_{spec_name}', colli_eng, decoy_key)
+                gen_pred = self.decoy_db.read(query, colli_eng, decoy_key)
                 smi = gen_pred.root_canonical_smiles
                 engine = fragmentation.FragmentEngine(smi, mol_str_type="smiles", mol_str_canonicalized=True)
                 root_frag_id = engine.get_root_frag()
@@ -856,9 +902,14 @@ class IntenContrDataset(DAGDataset):
                 decoy_entry = trees['dgl_tree']
                 decoy_entry.update(
                     {"name": name + '_decoy_' + decoy_key,
+                    "instrument": instrument,
                      "adduct": adduct, "precursor": precursor, "collision_energy": colli_eng,
                      "smiles": smi, "decoy": 1})
                 outlist.append(decoy_entry)
+        else:
+            avail_decoys = [i for i in self.decoy_db.get_all_names() if spec_name in i]
+            if len(avail_decoys) != 0:
+                raise ValueError(f"Decoys are not loading properly for {spec_name} at {colli_eng}")
 
         return outlist
 

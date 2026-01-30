@@ -165,11 +165,10 @@ def predict():
                 colli_eng_val = common.collision_energy_to_float(colli_eng)  # str to float
                 if math.isnan(colli_eng_val):  # skip collision_energy == nan (no collision energy recorded)
                     continue
-                tup_to_process.append((smi, f"pred_{name}", colli_eng_val, adduct, precursor_mz, f"ikey {inchikey}"))
+                tup_to_process.append((smi, f"pred_{name}", colli_eng_val, adduct, instrument, precursor_mz, f"ikey {inchikey}"))
             return tup_to_process
 
         all_rows = [j for _, j in df.iterrows()]
-
         logging.info('Preparing entries')
         if kwargs["num_cpu_workers"] == 0:
             predict_entries = [prepare_entry(i) for i in tqdm(all_rows)]
@@ -189,6 +188,8 @@ def predict():
             predict_entries[i: i + batch_size] for i in range(0, len(predict_entries), batch_size)
         ]
 
+        print("# gpus", avail_gpu_num)
+
         def producer_func(batch):
             torch.set_num_threads(1)
             if use_gpu:
@@ -201,16 +202,18 @@ def predict():
             else:
                 device = "cpu"
             model.to(device)
+            # avoids error in pe_embedding under multithreading. 
+            torch.cuda.set_device(gpu_id)
 
             # for batch in batched_entries:
-            smis, spec_names, colli_eng_vals, instruments, adducts, precursor_mzs, ikeys = list(zip(*batch))
+            smis, spec_names, colli_eng_vals, adducts, instruments, precursor_mzs, ikeys = list(zip(*batch))
             try:
                 full_outputs = model.predict_mol(
                     smis,
                     precursor_mz=precursor_mzs,
                     collision_eng=colli_eng_vals,
-                    instrument=instruments,
                     adduct=adducts,
+                    instrument=instruments,
                     threshold=kwargs["threshold"],
                     device=device,
                     max_nodes=kwargs["max_nodes"],
@@ -237,7 +240,6 @@ def predict():
                 pred_ms = common.MassSpec(
                     root_canonical_smiles=smi,
                     adduct=adduct,
-                    instrument=instrument,
                     collision_energy=collision_energy,
                     masses=masses,
                     intens=intens,

@@ -7,6 +7,7 @@ from tqdm import tqdm
 import multiprocess.context as ctx
 ctx._force_start_method('spawn')
 
+
 def simple_parallel(
     input_list, function, max_cpu=16, timeout=4000, max_retries=3, use_ray: bool = False, task_name="",
 ):
