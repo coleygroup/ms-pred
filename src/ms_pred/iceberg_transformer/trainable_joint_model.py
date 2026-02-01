@@ -62,9 +62,6 @@ class JointModel(pl.LightningModule):
             graphormer_dropout: float = 0.05,
             graphormer_layers: int = 5,
             hidden_size: int = 512,
-            magma_warmup_steps: int = 10000,
-            magma_decay_rate: float = 0.9,
-            magma_decay_steps: int = 2000,
             lr: float = 1e-4,
             lr_decay_rate: float = 0.9,
             weight_decay: float = 0,
@@ -209,9 +206,6 @@ class JointModel(pl.LightningModule):
         self.isomer_attn_out = copy.deepcopy(self.output_map)
         self.inten_weight = inten_weight
         self.frag_weight = frag_weight
-        self.magma_warmup_steps = magma_warmup_steps
-        self.magma_decay_rate = magma_decay_rate
-        self.magma_decay_steps = magma_decay_steps
         self.step=0
         self.lr = lr
         self.lr_decay_rate = lr_decay_rate
@@ -458,25 +452,12 @@ class JointModel(pl.LightningModule):
         return {"output_binned": output_binned, "output": output_unbinned}
 
     def forward(self, graphormer_input, num_atoms, adducts, collision_engs, root_form_vecs, masses, 
-                adduct_mass_shifts, atom_form_vecs, adj_matrices, atom_hs, total_hs, 
-                training=False, frag_targs=None, num_frag_targs=None):
+                adduct_mass_shifts, atom_form_vecs, adj_matrices, atom_hs, total_hs):
         mol_embeddings = self.molecular_embedding(adducts, collision_engs, graphormer_input=graphormer_input)
         root_tokens = mol_embeddings["root_tokens"]
         node_embeddings = mol_embeddings["node_embeddings"]
         breakpoints_pred = self.breakpoint_forward(node_embeddings, root_tokens, num_atoms, root_form_vecs)
-        inten_pred_magma = self.inten_calculation(
-                                root_tokens,
-                                node_embeddings,
-                                frag_targs,
-                                num_frag_targs,
-                                root_form_vecs,
-                                atom_form_vecs,
-                                num_atoms, atom_hs, 
-                                total_hs, 
-                                adj_matrices, 
-                                adduct_mass_shifts,
-                                masses,
-                            ) if training else None
+
         frag_logits = breakpoints_pred["frag_logits"][-1]
         frag_card_logits = breakpoints_pred["frag_card_logits"][-1]
         with torch.no_grad():
@@ -497,7 +478,7 @@ class JointModel(pl.LightningModule):
                                 masses,
                             )
         frags_pred = {"fragments":fragments, "fragment_count":fragment_count}
-        return {"breakpoints_pred":breakpoints_pred, "inten_pred_end_to_end":inten_pred_end_to_end, "inten_pred_magma":inten_pred_magma, "frags_pred":frags_pred}
+        return {"breakpoints_pred":breakpoints_pred, "inten_pred_end_to_end":inten_pred_end_to_end, "frags_pred":frags_pred}
     
 
     def _common_step(self, batch, name="train"):
@@ -513,9 +494,6 @@ class JointModel(pl.LightningModule):
             adj_matrices=batch["adj_matrices"],
             atom_hs=batch["atom_hs"],
             total_hs=batch["total_hs"],
-            training=name=="train",
-            frag_targs=batch["frag_targs"] if name=="train" else None,
-            num_frag_targs=batch["num_frag_targs"] if name=="train" else None,
         )
         if self.binned_targs:
             pred_inten = pred["inten_pred_end_to_end"]["output_binned"]
@@ -533,15 +511,8 @@ class JointModel(pl.LightningModule):
             )            
             return loss
         else:
-            if self.binned_targs:
-                pred_inten_magma = pred["inten_pred_magma"]["output_binned"]
-            else:
-                pred_inten_magma = pred["inten_pred_end_to_end"]["output"]
-                pred_inten_magma = torch.stack((batch["masses"], pred_inten_magma), dim=-1)
-                pred_inten_magma = pred_inten_magma.reshape(pred_inten_magma.shape[0], -1, 2)  # B x (Out * Mass shifts) x 2
             inten_loss_fn = self.inten_loss_fn
             end_to_end_inten_loss = inten_loss_fn(pred_inten, batch["inten_targs"], parent_mass=batch["precursor_mzs"])["loss"].mean()
-            magma_inten_loss = inten_loss_fn(pred_inten_magma, batch["inten_targs"], parent_mass=batch["precursor_mzs"])["loss"].mean()
             breakpoints_pred = pred["breakpoints_pred"]
             if self.enable_aux_loss:
                 frag_loss = 0
@@ -557,11 +528,9 @@ class JointModel(pl.LightningModule):
                 )
             self.step += 1
             self.log("train_end_to_end_inten_loss", end_to_end_inten_loss, batch_size=batch_size, on_epoch=True)
-            self.log("train_magma_inten_loss", magma_inten_loss, batch_size=batch_size, on_epoch=True)
             self.log("train_frag_loss", frag_loss, batch_size=batch_size, on_epoch=True)
             
-            magma_weight = self.magma_weight_scheduler()
-            loss = self.inten_weight * (magma_weight * magma_inten_loss + (1-magma_weight)*end_to_end_inten_loss) + self.frag_weight * frag_loss
+            loss = self.inten_weight * end_to_end_inten_loss + self.frag_weight * frag_loss
             self.log("train_loss", loss, batch_size=batch_size, on_epoch=True)
             return {"loss":loss}
 
@@ -577,14 +546,6 @@ class JointModel(pl.LightningModule):
         """test_step."""
         return self._common_step(batch, name="test")
     
-    def magma_weight_scheduler(self):
-        if self.step >= self.magma_warmup_steps:
-            # Adjust
-            step = self.step - self.magma_warmup_steps
-            weight = self.magma_decay_rate ** (step // self.magma_decay_steps)
-        else:
-            weight = 1
-        return weight
 
     def configure_optimizers(self):
         decay_params, no_decay_params = [], []
@@ -827,6 +788,16 @@ class JointModel(pl.LightningModule):
             patterns[batch_idx[valid_mask], topk_idx[valid_mask]] = True
         out = patterns.view(B, N, N_atom)
         return out
+    
+    def breakpoint_inference_st(self, breakpoint_logit, breakpoint_card, num_atoms):
+        """
+        Straight-through version of breakpoint_inference.
+        """
+        logits = self.node_ranking(breakpoint_logit, num_atoms)
+        B, N, N_atom, _ = logits.shape
+        k = F.gumbel_softmax(breakpoint_card, tau=1, hard=True)
+        logits_collapsed = torch.sum(k * logits, dim=-1)  # [B, N, N_atom]
+        return logits_collapsed
     
     def breakpoints_to_patterns(self, mask, A, num_nodes=None):
         B, M, N = mask.shape

@@ -84,9 +84,6 @@ def add_inten_train_args(parser):
     # Other params
     parser.add_argument("--inten-weight", default=1, type=float)
     parser.add_argument("--frag-weight", default=0.1, type=float)
-    parser.add_argument("--magma-warmup-steps", default=100, type=int)
-    parser.add_argument("--magma-decay-rate", default=0.1, type=float)
-    parser.add_argument("--magma-decay-steps", default=5000, type=int)
 
     parser.add_argument("--warmup", default=1000, action="store", type=int)
     parser.add_argument("--binned-targs", default=False, action="store_true")
@@ -264,9 +261,6 @@ def train_model():
         contr_loss_fn=kwargs["contr_loss_fn"],
         inten_weight=kwargs["inten_weight"],
         frag_weight = kwargs["frag_weight"],
-        magma_warmup_steps=kwargs["magma_warmup_steps"],
-        magma_decay_rate=kwargs["magma_decay_rate"],
-        magma_decay_steps=kwargs["magma_decay_steps"],
         lr=kwargs["learning_rate"],
         lr_decay_rate=kwargs["lr_decay_rate"],
         weight_decay=kwargs["weight_decay"],
