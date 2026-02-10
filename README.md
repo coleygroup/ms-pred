@@ -1,12 +1,21 @@
 #  Mass Spectrum Predictor
 
+**Update 10/25/2025:** We are releasing _open-source_ weights of ICEBERG trained on the [MassSpecGym](https://arxiv.org/abs/2410.23326) benchmark. ICEBERG achieves 57.8% cosine similarity and 46% top-1 retrieval accuracy when retrieving from formula candidates, representing state-of-the-art performance on the forward spectrum simulation challenge. The codebase has been updated to support training and inference from MassSpecGym data, and the retrieval sets used for this task as well as weights are available via Dropbox [here](https://www.dropbox.com/scl/fo/d73o0o4u5ymr9ubtp3m7j/AL4r7e3p9ElV0ewBwDCScbM?rlkey=tr99zkzy208ol8aw0pfsdsf5v&st=2zg9n01y&dl=0). Given the challenge of the scaffold split and inclusion of only [M+H]+ adducts and positive mode spectra, we encourage users to adopt the ICEBERG version trained on the NIST20 commercial dataset when possible.   
+
+
+| Model | Cosine Similarity | Entropy (JS) Similarity | Top 1 Hit Rate | Top 5 Hit Rate | Top 20 Hit Rate |
+|-------|-------------------|-------------------------|----------------|----------------|-----------------|
+| ICEBERG | **0.5782** (0.5702, 0.5865) | **0.4847** (0.4796, 0.4901) | **0.4595** (0.4432, 0.4759) | **0.7543** (0.7388, 0.7690) | **0.9169** (0.9073, 0.9260) |
+
+------------
+
 This repository contains implementations for the following spectrum simulator models predicting molecular tandem mass spectra from molecules: 
 
 - 🧊 ICEBERG 🧊️: [Inferring CID by Estimating Breakage Events and Reconstructing their Graphs](http://arxiv.org/abs/2304.13136) and [Neural Spectral Prediction for Structure Elucidation with Tandem Mass Spectrometry](https://www.biorxiv.org/content/10.1101/2025.05.28.656653v1)
 - 🏃‍ MARASON 🏃‍: [Neural Graph Matching Improves Retrieval Augmented Generation in Molecular Machine Learning](https://arxiv.org/html/2502.17874)
 - 🧣 SCARF 🧣: [Subformula Classification for Autoregressively Reconstructing Fragmentations](https://arxiv.org/abs/2303.06470)
 
-ICEBERG predicts spectra at the level of molecular fragments, whereas SCARF predicts spectra at the level of chemical formula. In order to fairly compare various spectra models, we implement a number of baselines and alternative models using equivalent settings across models (i.e., same covariates, hyeprparmaeter sweeps for each, etc.):
+ICEBERG predicts spectra at the level of molecular fragments, whereas SCARF predicts spectra at the level of chemical formula. In order to fairly compare various spectra models, we implement a number of baselines and alternative models using equivalent settings across models (i.e., same covariates, hyperparameter sweeps for each, etc.):
  
 1. *NEIMS* using both FFN and GNN encoders from [Rapid prediction of electron–ionization mass spectrometry using neural networks](https://pubs.acs.org/doi/full/10.1021/acscentsci.9b00085)    
 2. *MassFormer* from [MassFormer: Tandem Mass Spectrum Prediction for Small Molecules using Graph Transformers](https://arxiv.org/abs/2111.04824)  
@@ -63,6 +72,7 @@ Please go through the following prerequisites to run the demo:
 * Get pretrained ICEBERG model weights.
     * You can either train the model by yourself (following instructions below);
     * Or if you have an NSIT'20 license (or newer), you can [email the maintainer with a proof of license](mailto:runzhong@mit.edu?subject=Inquiry%20of%20pretrianed%20ICEBERG%20on%20NIST20&body=My%20organization%20has%20a%20NIST'20%20(or%20newer)%20license%20and%20I%20would%20like%20to%20receive%20pretrained%20weights%20of%20ICEBERG%20on%20NIST'20.%20Please%20find%20the%20proof%20of%20purchase%20as%20attached.)
+    * Or you can download the weights trained on the MassSpecGym dataset, publicly available via [Dropbox](https://www.dropbox.com/scl/fo/d73o0o4u5ymr9ubtp3m7j/AL4r7e3p9ElV0ewBwDCScbM?rlkey=tr99zkzy208ol8aw0pfsdsf5v&st=2zg9n01y&dl=0). Please keep in mind that MassSpecGym has undergone less manual curation and quality control compared to NIST, and the results of new predictions will be different.
 * Update [``the configuration file``](configs/iceberg/iceberg_elucidation.yaml) based your local setting. Change ``python_path`` to your Python excutiable, and update ``gen_ckpt`` and ``inten_ckpt`` to the path of your pretrained models.
     * When you have a GPU with smaller RAM, set smaller numbers for ``batch_size`` and ``num_workers`` to fit the model into GPU RAM (``batch_size: 8``, ``num_workers: 6`` tested on NVIDIA RTX 4070M 8GB; ``batch_size: 8``, ``num_workers: 12`` tested on NVIDIA RTX A5000 24GB).
     * CPU-only inference is also feasible if you set ``cuda_devices: None``.
@@ -167,7 +177,10 @@ The internal pipeline used to conduct experiments can be followed below:
 > * ``configs/iceberg/*.yaml``
 > * ``run_scripts/iceberg/02_sweep_gen_thresh.py``
 > * ``run_scripts/iceberg/05_predict_dag_inten.py``
-> * ``run_scripts/iceberg/06_run_retrieval.py``
+> * ``run_scripts/iceberg/06_run_retrieval.py``  
+>
+> Similarly, all the scripts also feature, but have commented out, the training commands to train on MassSpecGym. You can uncomment those in the corresponding configs and run_scripts.
+
 
 > You need two GPUs with at least 24GB RAM to train ICEBERG (we used NVIDIA A5000 for development). If you are trying to
 > train the model on a smaller GPU, try cutting down the batch size and skipping the contrastive 
@@ -181,6 +194,11 @@ training, and predict calls can be  made using the following scripts respectivel
 3. `python src/ms_pred/dag_pred/predict_smis.py`
 
 An example of how to use ICEBERG for structural elucidation campaigns can be found at ``notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb``.
+
+Replicating the retrieval metrics and CIs for the MassSpecGym spectrum challenge hit rate evaluation can be carried out by:
+1) downloading the full and deduplicated candidate sets from [Dropbox](https://www.dropbox.com/scl/fo/d73o0o4u5ymr9ubtp3m7j/AL4r7e3p9ElV0ewBwDCScbM?rlkey=tr99zkzy208ol8aw0pfsdsf5v&st=2zg9n01y&dl=0) and placing them in `data/spec_datasets/msg`,
+2) changing the retrieval script in `run_scripts/iceberg/06_run_retrieval.py` to use `src/ms_pred/retrieval/retrieval_benchmark_torchmetrics.py` and uncommenting the retrieval challenge config,
+3) and upon completion of ranking, running `src/ms_pred/retrieval/bootstrap_metrics.py`.
 
 ### MARASON
 

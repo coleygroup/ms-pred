@@ -472,7 +472,7 @@ class DAGDataset(Dataset):
         }
         instrument_map = dict(self.df[["spec", "instrument"]].values)
         self.name_to_instrument = {
-            i: instrument_map[self.rm_collision(i)] for i in self.spec_names
+            i: instrument_map[common.rm_collision_str(i)] for i in self.spec_names
         }
 
         self.name_to_instruments = {

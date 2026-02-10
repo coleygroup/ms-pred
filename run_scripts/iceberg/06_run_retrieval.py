@@ -5,6 +5,8 @@ import json
 
 pred_file = "src/ms_pred/dag_pred/predict_smis.py"
 retrieve_file = "src/ms_pred/retrieval/retrieval_benchmark.py"
+# can change the above to retrieval_benchmark_torchmetrics.py to retrieve with a candidate set that had duplicate stereoisomers, e.g.
+# the spectrum simulation hit rate evaluation of the MassSpecGym challenge. 
 subform_name = "no_subform"
 devices = [0, 1]
 vis_devices = ",".join([str(_) for _ in devices])
@@ -46,6 +48,27 @@ test_entries = [
     #  "train_split": "scaffold_1_rnd3",
     #  "test_split": "scaffold_1",
     #  "max_k": 50},
+
+    ## MassSpecGym retrieval set
+    # {"dataset": "msg",
+    #     "train_split": "split_1_rnd1",
+    #     "test_split": "split_1",
+    #     "max_k": 256,
+    #     "candidates": "cands_df_test_formula_256_no_stereo_clean_tauts.tsv",
+    #     "true_labels": "labels.tsv",
+    # },
+    
+    ## If using retrieval on full set with stereoisomers (to ensure fair comparison to challenge baselines)
+    # Add full_labels flag and change retrieval_benchmark.py to retrieval_benchmark_torchmetrics.py
+    # {"dataset": "msg",
+    #     "train_split": "split_1_rnd1",
+    #     "test_split": "split_1",
+    #     "max_k": 256,
+    #     "candidates": "cands_df_test_formula_256_no_stereo_clean_tauts.tsv",
+    #     "true_labels": "labels.tsv",
+    #     "full_labels": "cands_df_test_formula_256.tsv"
+    # },
+
 ]
 
 pred_filename = "binned_preds.hdf5" if binned_out else "preds.hdf5"
@@ -74,7 +97,7 @@ for test_entry in test_entries:
         inten_model = Path(inten_ckpt)
         gen_model = Path(gen_ckpt)
 
-    labels = f"data/spec_datasets/{dataset}/retrieval/cands_df_{split}_{maxk}.tsv"
+    candidates = f"data/spec_datasets/{dataset}/retrieval/cands_df_{split}_{maxk}.tsv"
 
     save_dir = inten_model.parent.parent / f"retrieval_{dataset}_{split}_{maxk}"
     save_dir.mkdir(exist_ok=True)
@@ -91,7 +114,7 @@ for test_entry in test_entries:
     --gen-checkpoint {gen_model} \\
     --inten-checkpoint {inten_model} \\
     --save-dir {save_dir} \\
-    --dataset-labels {labels} \\
+    --dataset-labels {candidates} \\
     --num-workers {num_workers} \\
     --gpu \\
     --adduct-shift \\
@@ -108,10 +131,13 @@ for test_entry in test_entries:
     --dataset {dataset} \\
     --formula-dir-name {subform_name}.hdf5 \\
     --pred-file {save_dir / pred_filename} \\
+    --true-labels data/spec_datasets/{dataset}/labels.tsv \\
     --dist-fn {dist} \\
     """
     if binned_out:
         cmd += "--binned-pred"
+    if "full_labels" in test_entry:
+        cmd += f" --full-labels data/spec_datasets/{dataset}/{test_entry['full_labels']} "
 
     print(cmd + "\n")
     subprocess.run(cmd, shell=True)
