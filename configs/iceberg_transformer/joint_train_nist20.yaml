@@ -8,7 +8,7 @@ universal_args:
   _slurm_args:
   - {_num_gpu: 1, cpus-per-task: 7, job-name: joint_train, mem-per-cpu: 8G,
     time: '1-12:00:00'}
-  debug: [False]
+  debug: [true]
   gpu: [true]
 
   seed: [1]
@@ -50,9 +50,6 @@ universal_args:
   linsat-tau: [15]
   inten-weight: [1]
   frag-weight: [0.1]
-  magma-warmup-steps: [5000]
-  magma-decay-rate: [0.9]
-  magma-decay-steps: [5000]
   warmup: [1000]
   binned-targs: [True]
   inten-loss-fn: [cosine]

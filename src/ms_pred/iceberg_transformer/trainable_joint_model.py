@@ -300,83 +300,77 @@ class JointModel(pl.LightningModule):
         frag_logits = torch.einsum("nbij,bkj->nbik", frag_vecs, node_embeddings)
         return {"frag_logits": frag_logits, "frag_card_logits": frag_card_logits}
     
-    def inten_calculation(self, root_tokens, node_embeddings, frag_targs, num_frag_targs, root_form_vecs, atom_form_vecs, num_atoms, atom_hs, 
-                          total_hs, adj_matrices, adduct_mass_shifts, masses):
-        batch_size = num_frag_targs.shape[0]
-        device = frag_targs.device
+    def breakpoint_hidden_calculation(self, root_tokens, node_embeddings, breakpoint_targs, root_form_vecs, atom_form_vecs, num_atoms, adj_matrices):
+        batch_size = root_tokens.shape[0]
+        max_node = node_embeddings.shape[1]
         atom_form_vecs_padded = nn_utils.pad_packed_tensor(atom_form_vecs, num_atoms, 0)
+        breakpoint_targs_reshaped = breakpoint_targs.reshape(batch_size, self.max_breakpoints, -1)
 
-        frag_targs_padded = nn_utils.pad_packed_tensor(frag_targs, num_frag_targs, True)
-
-        frag_to_mol = torch.arange(batch_size, device=device).repeat_interleave(num_frag_targs)
 
         # Expand atom form vectors per fragment: [N1, N2, form_dim]
-        expanded_atom_form_vecs = torch.repeat_interleave(atom_form_vecs_padded, num_frag_targs, dim=0)
+        expanded_atom_form_vecs = atom_form_vecs_padded.repeat_interleave(self.max_breakpoints, dim=0).reshape(batch_size, self.max_breakpoints, max_node, -1)
         
         # Fragment masks (packed): [N1, N2]
-        frag_masks = frag_targs.bool()
+        breakpoint_masks = breakpoint_targs.bool()
 
-        # Hydrogen counts per fragment
-        mol_atom_hs = atom_hs[frag_to_mol]  # [N1, N2]
-        frag_hs = (frag_masks.float() * mol_atom_hs.float()).sum(dim=1)  # [N1]
-
-        # Total H per fragment and max add/remove
-        mol_total_hs = total_hs[frag_to_mol].float()  # [N1]
-        max_remove = torch.clamp(frag_hs, max=self.max_broken_bonds)  # [N1]
-        max_add = torch.clamp(mol_total_hs - frag_hs, max=self.max_broken_bonds)  # [N1]
-
+       
         # Broken bonds per fragment (edges crossing fragment boundary)
-        adj_for_frags = adj_matrices[frag_to_mol]  # [N1, N2, N2]
-        non_frag_masks = ~frag_masks  # [N1, N2]
-        boundary_mask = frag_masks.unsqueeze(-1) & non_frag_masks.unsqueeze(-2)  # [N1, N2, N2]
-        cross_bonds = adj_for_frags * boundary_mask.float()  # [N1, N2, N2]
+        adj_for_breakpoints = adj_matrices.repeat_interleave(self.max_breakpoints, dim=0)  # [N1, N2, N2]
+        non_breakpoint_masks = ~breakpoint_masks  # [N1, N2]
+        boundary_mask = breakpoint_masks.unsqueeze(-1) & non_breakpoint_masks.unsqueeze(-2)  # [N1, N2, N2]
+        boundary_mask = boundary_mask.reshape(-1, num_atoms.max(), num_atoms.max())  # [N1, N2, N2]
+        cross_bonds = adj_for_breakpoints * boundary_mask.float()  # [N1, N2, N2]
         num_broken = cross_bonds.sum(dim=(1, 2))  # [N1]
         
          
-        num_broken_padded = nn_utils.pad_packed_tensor(num_broken, num_frag_targs, 0)
-        max_add_padded = nn_utils.pad_packed_tensor(max_add, num_frag_targs, 0)
-        max_remove_padded = nn_utils.pad_packed_tensor(max_remove, num_frag_targs, 0)
+        num_broken_reshaped = num_broken.reshape(batch_size, self.max_breakpoints)
         # Apply fragment masks and sum to get fragment form vectors
-        # frag_targs: [N1, N2] with 1.0 for atoms in fragment, 0.0 for atoms not in fragment
-        masked_form_vecs = expanded_atom_form_vecs * frag_targs.unsqueeze(-1).float()  # [N1, N2, form_dim]
-        fragment_form_vecs_flat = torch.sum(masked_form_vecs, dim=1)  # [N1, form_dim]
+        # breakpoint_targs: [N1, N2] with 1.0 for atoms in fragment, 0.0 for atoms not in fragment
+        masked_form_vecs = expanded_atom_form_vecs * (1-breakpoint_targs).unsqueeze(-1)  # [N1, N2, form_dim]
+        breakpoint_form_vecs = torch.sum(masked_form_vecs, dim=2)  # [N1, form_dim]
         
-        # Reshape back to batch format [B, max_frags, form_dim]
-        max_frags = max(num_frag_targs).item()
-        fragment_form_vecs = nn_utils.pad_packed_tensor(fragment_form_vecs_flat, num_frag_targs, 0)
-        root_tokens_expanded = root_tokens.expand(batch_size, max_frags, self.hidden_size)
-        diffs = root_form_vecs[:, None, :] - fragment_form_vecs
-        form_encodings = self.embedder(fragment_form_vecs)
+        root_tokens_expanded = root_tokens.expand(batch_size, self.max_breakpoints, self.hidden_size)
+        diffs = root_form_vecs[:, None, :] - breakpoint_form_vecs
+        form_encodings = self.embedder(breakpoint_form_vecs)
         diff_encodings = self.embedder(diffs)
-        # One-hot encode (clamped) broken bond counts: [B, max_frags, (max_broken_bonds+1)]
-        num_broken_clamped = torch.clamp(num_broken_padded, max=self.max_broken_bonds).long()
+        # One-hot encode (clamped) broken bond counts: [B, self.max_breakpoints, (max_broken_bonds+1)]
+        num_broken_clamped = torch.clamp(num_broken_reshaped, max=self.max_broken_bonds).long()
         broken_bonds_embedded = F.one_hot(num_broken_clamped, num_classes=self.max_broken_bonds + 1).float()
         token_list = [root_tokens_expanded, form_encodings, diff_encodings, broken_bonds_embedded]
         root_token_embedded = self.token_mapper(
             torch.cat(token_list, dim=-1)
         )
-        frag_mask = torch.arange(max_frags, device=device).unsqueeze(0) >= num_frag_targs.unsqueeze(-1)  # [B, max_frags]
-        frag_targs_padded = torch.repeat_interleave(frag_targs_padded, self.nhead, dim=0)
+        breakpoint_targs_reshaped = torch.repeat_interleave(breakpoint_targs_reshaped, self.nhead, dim=0)
+        breakpoint_targs_reshaped = torch.log(1-breakpoint_targs_reshaped + 1e-100)  # Logarithm for stability in attention masking
         hidden = self.inten_decoder(
             tgt=root_token_embedded,
             memory=node_embeddings,
-            memory_mask=~frag_targs_padded,
-            tgt_key_padding_mask=frag_mask,
+            memory_mask=breakpoint_targs_reshaped,
         )
         if self.inten_encoder_layers > 0:
-            hidden = self.inten_encoder(hidden, src_key_padding_mask=frag_mask)
+            hidden = self.inten_encoder(hidden)
+        return hidden
+    def intensity_pooling(self, hidden, frag_targs, num_frag_targs, masses, adduct_mass_shifts, atom_hs, total_hs):
+        batch_size, max_frags, _ = hidden.shape
+        frag_mask = torch.arange(max_frags, device=hidden.device)[None, :] >= num_frag_targs.unsqueeze(-1)  # [B, max_frags]
         
+        frag_to_mol = torch.arange(batch_size, device=hidden.device).repeat_interleave(num_frag_targs)
+
         # Hydrogen mass shifts vector
-        hydrogen_shift = torch.arange(-self.max_broken_bonds, self.max_broken_bonds + 1, device=device) * common.ELEMENT_TO_MASS["H"]
+        frag_hs = torch.sum(frag_targs * atom_hs.unsqueeze(1), dim=-1)  # [N1]
+        max_remove_padded = torch.clamp(frag_hs, max=self.max_broken_bonds)  # [N1]
+        max_add_padded = torch.clamp(total_hs.unsqueeze(1) - frag_hs, max=self.max_broken_bonds)  # [N1]        
+        hydrogen_shift = torch.arange(-self.max_broken_bonds, self.max_broken_bonds + 1, device=hidden.device) * common.ELEMENT_TO_MASS["H"]
 
         # Calculate net fragment masses (vectorized)
         # frag_targs: [N1, N2], masses: [B, N2], num_frag_targs: [B]
         masses_expanded = masses[frag_to_mol]  # [N1, N2]
         frag_targs_f = frag_targs.float()
-        net_fragment_mass_flat = (masses_expanded * frag_targs_f).sum(dim=-1)  # [N1]
+        masses_expanded = nn_utils.pad_packed_tensor(masses_expanded, num_frag_targs, 0)  
+        masses_expanded = F.pad(masses_expanded, (0, 0, 0, frag_targs.shape[1] - masses_expanded.shape[1], 0, 0), value=0)  # Pad to [N1, N2]
+        net_fragment_mass = (masses_expanded * frag_targs_f).sum(dim=-1)  # [N1]
 
         # Pad back to [B, max_frags]
-        net_fragment_mass = nn_utils.pad_packed_tensor(net_fragment_mass_flat, num_frag_targs, 0)
         fragment_mass = (
             net_fragment_mass[:, :, None, None]
             + hydrogen_shift[None, None, None, :]
@@ -387,7 +381,7 @@ class JointModel(pl.LightningModule):
         # Build mask for valid hydrogen shifts using max_add and max_remove
         # Similar to the logic in inten_model.py
         max_inten_shift = (self.output_size - 1) / 2  # Center shift for hydrogen range
-        max_break_ar = torch.arange(self.output_size, device=device)[None, None, :].to(device)
+        max_break_ar = torch.arange(self.output_size, device=hidden.device)[None, None, :].to(hidden.device)
         max_breaks_ub = max_add_padded + max_inten_shift  # [B, max_frags]
         max_breaks_lb = -max_remove_padded + max_inten_shift  # [B, max_frags]
 
@@ -460,25 +454,70 @@ class JointModel(pl.LightningModule):
 
         frag_logits = breakpoints_pred["frag_logits"][-1]
         frag_card_logits = breakpoints_pred["frag_card_logits"][-1]
-        with torch.no_grad():
-            breakpoints = self.breakpoint_inference(frag_logits, frag_card_logits, num_atoms)
-            fragments, fragment_count = self.breakpoints_to_patterns(breakpoints, adj_matrices, num_atoms)
-            fragments = nn_utils.pack_padded_tensor(fragments, fragment_count).bool()
-        inten_pred_end_to_end = self.inten_calculation(
-                                root_tokens,
-                                node_embeddings,
-                                fragments,
-                                fragment_count,
-                                root_form_vecs,
-                                atom_form_vecs,
-                                num_atoms, atom_hs, 
-                                total_hs, 
-                                adj_matrices, 
-                                adduct_mass_shifts,
-                                masses,
-                            )
-        frags_pred = {"fragments":fragments, "fragment_count":fragment_count}
-        return {"breakpoints_pred":breakpoints_pred, "inten_pred_end_to_end":inten_pred_end_to_end, "frags_pred":frags_pred}
+        breakpoints = self.breakpoint_inference_st(frag_logits, frag_card_logits, num_atoms)
+        hard_breakpoints = breakpoints["hard_logits"]
+        soft_breakpoints = breakpoints["soft_logits"]
+        breakpoint_embedding = self.breakpoint_hidden_calculation(root_tokens, node_embeddings, hard_breakpoints, root_form_vecs, atom_form_vecs, num_atoms, adj_matrices)
+        for name, param in self.fragment_decoder.named_parameters():
+            if param.requires_grad:
+                logging.info(f"{name}: {param.shape}")
+                logging.info(f"Sample values: {param.flatten()[:5]}")
+                if param.grad is not None:
+                    logging.info(f"Grad sample values: {param.grad.flatten()[:5]}")
+                else:
+                    logging.info("No gradient")
+                break
+        fragments, fragment_count = self.breakpoints_to_patterns(hard_breakpoints > 0, adj_matrices, num_atoms)
+        fragment_node_embeddings = torch.mean(node_embeddings[:, None, None, :, :] * fragments.unsqueeze(-1) * (1-soft_breakpoints)[:, :, None, :, None], dim=-2)
+        frags_embedding = breakpoint_embedding.unsqueeze(2) + fragment_node_embeddings
+        
+        # shapes
+        # fragment_count:      [B, J]
+        # frags_embedding:     [B, J, K, H]
+        # fragments:           [B, J, K, T]
+
+        B, J, K, H = frags_embedding.shape
+        T = fragments.shape[-1]
+
+        max_frags = fragment_count.max().item() * J
+        device = frags_embedding.device
+
+        # Output buffers
+        frags_embedding_padded = torch.zeros(B, max_frags, H, device=device, dtype=frags_embedding.dtype)
+        frag_targs_padded = torch.zeros(B, max_frags, T, device=fragments.device, dtype=fragments.dtype)
+
+        # --------------------------------------------------
+        # 1. Build mask for valid (j, k)
+        # --------------------------------------------------
+        k_idx = torch.arange(K, device=device)           # [K]
+        valid_mask = k_idx[None, None, :] < fragment_count[:, :, None]  
+        # shape: [B, J, K], bool
+
+        # --------------------------------------------------
+        # 2. Flatten breakpoint + fragment dims
+        # --------------------------------------------------
+        flat_embed = frags_embedding.reshape(B, J * K, H)
+        flat_targs = fragments.reshape(B, J * K, T)
+        flat_mask  = valid_mask.reshape(B, J * K)
+
+        # --------------------------------------------------
+        # 3. Compute target positions via prefix sum
+        # --------------------------------------------------
+        positions = torch.cumsum(flat_mask.int(), dim=1) - 1
+        # positions only valid where mask == True
+
+        # --------------------------------------------------
+        # 4. Scatter into padded tensors
+        # --------------------------------------------------
+        batch_idx = torch.arange(B, device=device)[:, None].expand_as(positions)
+
+        valid = flat_mask
+        frags_embedding_padded[batch_idx[valid], positions[valid]] = flat_embed[valid]
+        frag_targs_padded[batch_idx[valid], positions[valid]] = flat_targs[valid]
+        num_frag_targs = fragment_count.sum(dim=-1)
+        inten_pred_end_to_end = self.intensity_pooling(frags_embedding_padded, frag_targs_padded, 
+                                                       num_frag_targs, masses, adduct_mass_shifts, atom_hs, total_hs)
+        return {"inten_pred_end_to_end":inten_pred_end_to_end}
     
 
     def _common_step(self, batch, name="train"):
@@ -502,37 +541,14 @@ class JointModel(pl.LightningModule):
             pred_inten = torch.stack((batch["masses"], pred_inten), dim=-1)
             pred_inten = pred_inten.reshape(pred_inten.shape[0], -1, 2)  # B x (Out * Mass shifts) x 2
         batch_size = len(batch["names"])
-        if name != "train":
-            loss_fn = functools.partial(self.inten_loss_fn, use_hun=True)  # use hungarian in val and test
-            loss = loss_fn(pred_inten, batch["inten_targs"], parent_mass=batch["precursor_mzs"])
-            loss = {k: v.mean() for k, v in loss.items()}        
-            self.log(
-                f"{name}_loss", loss["loss"].item(), batch_size=batch_size, on_epoch=True
-            )            
-            return loss
-        else:
-            inten_loss_fn = self.inten_loss_fn
-            end_to_end_inten_loss = inten_loss_fn(pred_inten, batch["inten_targs"], parent_mass=batch["precursor_mzs"])["loss"].mean()
-            breakpoints_pred = pred["breakpoints_pred"]
-            if self.enable_aux_loss:
-                frag_loss = 0
-                for i in range(self.frag_decoder_layers):
-                    frag_loss += self.frag_loss(
-                        breakpoints_pred["frag_logits"][i], breakpoints_pred["frag_card_logits"][i], 
-                        batch["frag_targs"], batch["num_frag_targs"], batch["num_atoms"], batch["adj_matrices"],
-                    ) * 0.9**(self.frag_decoder_layers-1-i)
-            else:
-                frag_loss = self.frag_loss(
-                    breakpoints_pred["frag_logits"][-1], breakpoints_pred["frag_card_logits"][-1], 
-                    batch["frag_targs"], batch["num_frag_targs"], batch["num_atoms"], batch["adj_matrices"],
-                )
-            self.step += 1
-            self.log("train_end_to_end_inten_loss", end_to_end_inten_loss, batch_size=batch_size, on_epoch=True)
-            self.log("train_frag_loss", frag_loss, batch_size=batch_size, on_epoch=True)
-            
-            loss = self.inten_weight * end_to_end_inten_loss + self.frag_weight * frag_loss
-            self.log("train_loss", loss, batch_size=batch_size, on_epoch=True)
-            return {"loss":loss}
+        loss_fn = functools.partial(self.inten_loss_fn, use_hun=True)  # use hungarian in val and test
+        loss = loss_fn(pred_inten, batch["inten_targs"], parent_mass=batch["precursor_mzs"])
+        loss = {k: v.mean() for k, v in loss.items()}        
+        self.log(
+            f"{name}_loss", loss["loss"].item(), batch_size=batch_size, on_epoch=True
+        )            
+        return loss
+
 
     def training_step(self, batch, batch_idx):
         """training_step."""
@@ -796,8 +812,10 @@ class JointModel(pl.LightningModule):
         logits = self.node_ranking(breakpoint_logit, num_atoms)
         B, N, N_atom, _ = logits.shape
         k = F.gumbel_softmax(breakpoint_card, tau=1, hard=True)
-        logits_collapsed = torch.sum(k * logits, dim=-1)  # [B, N, N_atom]
-        return logits_collapsed
+        logits_collapsed = torch.sum(k.unsqueeze(-2) * logits, dim=-1)  # [B, N, N_atom]
+        hard_logits = self.breakpoint_inference(breakpoint_logit, breakpoint_card, num_atoms).float()
+        hard_logits = hard_logits + (logits_collapsed - logits_collapsed.detach())
+        return {"hard_logits":hard_logits, "soft_logits":logits_collapsed}
     
     def breakpoints_to_patterns(self, mask, A, num_nodes=None):
         B, M, N = mask.shape
@@ -809,32 +827,109 @@ class JointModel(pl.LightningModule):
 
         # Compute reachability matrix R for each masked adjacency (boolean closure)
         R = self.compute_reachability(A_exp, mask_exp, num_nodes=num_nodes)  # shape (BM, N, N), dtype=bool
+        R_reshaped = R.reshape(B, M, N, N)
+        return self.extract_unique_components_per_mask(R_reshaped, mask)   
 
-        # Create batch index that stays constant across M patterns
-        batch_ids = torch.arange(B, device=R.device).repeat_interleave(M)  # (BM,)
+    def extract_unique_components_per_mask(self, C, mask):
+        """
+        C:    (B, M, N, N) boolean
+        mask: (B, M, N)
 
-        # Expand per node
-        batch_idx = batch_ids.unsqueeze(1).expand(-1, N)  # (BM, N)
+        Returns:
+            comps:        (B, M, max_comp, N)
+            comp_counts:  (B, M)
+        """
+        B, M, N, _ = C.shape
+        device = C.device
 
-        # Append batch index as first bit
-        row_repr = torch.cat([
-            batch_idx.unsqueeze(-1).to(torch.int64),   # (BM, N, 1)
-            R.to(torch.int64)                          # (BM, N, N)
-        ], dim=-1)  # (BM, N, N+1)
+        # --------------------------------------------------
+        # 1. Zero out removed nodes
+        # --------------------------------------------------
+        C = C & (~mask.unsqueeze(-1))
 
-        # Flatten rows to (BM*N, N+1)
-        flat_rows = row_repr.view(BM*N, N+1)
+        # --------------------------------------------------
+        # 2. Flatten (B, M)
+        # --------------------------------------------------
+        BM = B * M
+        C_flat = C.view(BM, N, N)
 
-        # Unique per batch (batch id is part of the row)
-        unique_rows, inv = torch.unique(flat_rows, dim=0, return_inverse=True)
-        is_empty = (unique_rows[:, 1:].sum(dim=-1) == 0)
-        unique_rows = unique_rows[~is_empty]
-        batch_ids_unique = unique_rows[:, 0]
-        pattern_counts = torch.bincount(batch_ids_unique, minlength=B)
-        padded_pattern = nn_utils.pad_packed_tensor(
-            unique_rows[:, 1:], pattern_counts, 0
-        )  # (B, max_patterns, N)
-        return padded_pattern, pattern_counts
+        # --------------------------------------------------
+        # 3. Remove empty rows
+        # --------------------------------------------------
+        row_mask = C_flat.sum(dim=-1) > 0        # (BM, N)
+        rows = C_flat[row_mask]                  # (R, N)
+
+        if rows.numel() == 0:
+            return (
+                torch.zeros(B, M, 0, N, device=device),
+                torch.zeros(B, M, dtype=torch.long, device=device),
+            )
+
+        # Track origin (b, m)
+        bm_ids = torch.arange(BM, device=device).repeat_interleave(
+            row_mask.sum(dim=1)
+        )                                         # (R,)
+
+        # --------------------------------------------------
+        # 4. Pack rows into bytes
+        # --------------------------------------------------
+        # Each row -> ceil(N / 8) bytes
+        P = (N + 7) // 8
+
+        pad = P * 8 - N
+        if pad > 0:
+            rows = torch.cat(
+                [rows, torch.zeros(rows.size(0), pad, dtype=rows.dtype, device=device)],
+                dim=1,
+            )
+
+        rows_uint8 = rows.view(rows.size(0), P, 8).to(torch.uint8)
+        bit_weights = (1 << torch.arange(8, device=device)).to(torch.uint8)
+
+        packed = (rows_uint8 * bit_weights).sum(dim=-1)  # (R, P), uint8
+
+        # --------------------------------------------------
+        # 5. Global unique over (bm_id, packed_row)
+        # --------------------------------------------------
+        key = torch.cat([bm_ids[:, None].to(torch.int64), packed.to(torch.int64)], dim=1)
+
+        unique_key = torch.unique(key, dim=0, return_inverse=False)
+
+        unique_bm = unique_key[:, 0]
+        unique_packed = unique_key[:, 1:].to(torch.uint8)
+
+        # --------------------------------------------------
+        # 6. Decode packed rows
+        # --------------------------------------------------
+        bits = ((unique_packed[..., None] >> torch.arange(8, device=device)) & 1)
+        comps_flat = bits.reshape(unique_packed.size(0), -1)[:, :N].bool()
+
+        # --------------------------------------------------
+        # 7. Count components per (b, m)
+        # --------------------------------------------------
+        comp_counts_flat = torch.zeros(BM, dtype=torch.long, device=device)
+        comp_counts_flat.scatter_add_(
+            0, unique_bm, torch.ones_like(unique_bm, dtype=torch.long)
+        )
+
+        max_comp = comp_counts_flat.max().item()
+
+        # --------------------------------------------------
+        # 8. Pad components
+        # --------------------------------------------------
+        comps_padded = torch.zeros(BM, max_comp, N, device=device, dtype=comps_flat.dtype)
+
+        pos = torch.zeros(BM, dtype=torch.long, device=device)
+        comps_padded[unique_bm, pos[unique_bm]] = comps_flat
+        pos.scatter_add_(0, unique_bm, torch.ones_like(unique_bm))
+
+        # --------------------------------------------------
+        # 9. Reshape back
+        # --------------------------------------------------
+        comps = comps_padded.view(B, M, max_comp, N)
+        comp_counts = comp_counts_flat.view(B, M)
+
+        return comps, comp_counts
     
     def compute_reachability(self, A: torch.Tensor, mask: torch.Tensor = None, num_nodes: torch.Tensor = None) -> torch.Tensor:
         """
@@ -936,63 +1031,6 @@ class JointModel(pl.LightningModule):
             boundary_mask_batch_num_unique[:, 1:], batch_num_unique, 0
         )
         return {"boundary_mask": boundary_mask, "unique_boundary_patterns":batch_num_unique}
-    
-    def frag_loss(
-        self,
-        frags_predicted: torch.Tensor,
-        frag_card_predicted: torch.Tensor,
-        frag_targs: torch.Tensor,
-        num_frag_targs: torch.Tensor,
-        num_atoms: torch.Tensor,
-        adj_matrices: torch.Tensor = None,
-    ) -> torch.Tensor:
-        # frags_predicted: [B, max_breakpoints, max_nodes]
-        # frag_targs: packed [sum_frags, max_nodes], num_frag_targs: [B]
-        B, max_breakpoints, max_nodes = frags_predicted.shape
-        
-        # frag_targs_padded = nn_utils.pad_packed_tensor(
-        #     frag_targs, num_frag_targs, False
-        # )[:, :-1, :]  # [B, max_targs-1, max_nodes]
-        frag_targs_padded_original = nn_utils.pad_packed_tensor(
-            frag_targs, num_frag_targs, False
-        )[:, :, :]  # [B, max_targs-1, max_nodes]
-        boundary_info = self.boundary_nodes(adj_matrices, frag_targs_padded_original)
-        frag_targs_padded = boundary_info["boundary_mask"]
-        num_frag_targs = boundary_info["unique_boundary_patterns"]
-
-        node_rank = self.node_ranking(frags_predicted, num_atoms)
-        frag_cards_targs = F.one_hot(torch.sum(frag_targs_padded, dim=-1).long(), num_classes=fragmentation.FRAGMENT_ENGINE_PARAMS['max_tree_depth']+1)
-        rank_paired = torch.sum(node_rank.unsqueeze(2) * frag_cards_targs[:, None, :, None, :], dim=(-1))
-        frag_targs_expanded = frag_targs_padded.unsqueeze(1).expand(rank_paired.shape)
-        rank_paired_normed = F.normalize(rank_paired, p=1, dim=-1)
-        frag_targs_expanded_normed = F.normalize(frag_targs_expanded, p=1, dim=-1)
-        rank_loss = self.cross_entropy(rank_paired_normed, frag_targs_expanded_normed)
-
-        per_pair_cards_cross_entropy = self.cross_entropy(frag_card_predicted.unsqueeze(2), frag_cards_targs.unsqueeze(1), normalized=False)
-
-        B, max_targs, _ = frag_targs_padded.shape
-        
-        cost = rank_loss+per_pair_cards_cross_entropy
-        assign = pygm.hungarian(
-            -cost, backend="pytorch", n2=num_frag_targs
-        )  # [B, max_targs, max_breakpoints]
-       
-        node_rank_reshape = node_rank.reshape(B, max_breakpoints, -1)
-        node_rank_assigned = torch.matmul(node_rank_reshape.transpose(1, 2), assign).transpose(1, 2)
-        node_rank_assigned = node_rank_assigned.reshape(B, max_targs, max_nodes, -1)
-        node_rank_assigned = torch.sum(node_rank_assigned*frag_cards_targs.unsqueeze(-2), dim=-1)
-        frag_card_predicted = torch.matmul(frag_card_predicted.transpose(1, 2), assign).transpose(1, 2)
-        
-        # preds = torch.matmul(preds.transpose(1, 2), assign).transpose(1, 2)
-        
-        node_rank_assigned_normed = F.normalize(node_rank_assigned, p=1, dim=-1)
-        frag_targs_padded_normed = F.normalize(frag_targs_padded, p=1, dim=-1)
-        loss = self.cross_entropy(node_rank_assigned_normed, frag_targs_padded_normed)+self.cross_entropy(frag_card_predicted, frag_cards_targs, normalized=False)
-        # loss = torch.sum(self.binary_focal_loss(node_rank_assigned, frag_targs_padded, num_atoms), dim=-1)+self.cross_entropy(frag_card_predicted, frag_cards_targs)
-        frag_targs_mask = num_frag_targs[:, None] <= torch.arange(max_targs, device=loss.device)[None, :]
-
-        loss = torch.sum(loss.masked_fill(frag_targs_mask, 0), dim=-1)/num_frag_targs
-        return torch.mean(loss)
     
     def cos_loss(self, pred, targ, parent_mass=None, use_hun=False):
         """cos_loss.
