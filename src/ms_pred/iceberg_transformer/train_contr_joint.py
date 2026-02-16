@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional, Tuple
 import json
 
+from ms_pred.iceberg_transformer import trainable_joint_model
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -25,8 +26,12 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 
 import ms_pred.common as common
-from ms_pred.iceberg_transformer.dataset import IntenDataset, TreeProcessor
+from ms_pred.iceberg_transformer.dataset import IntenContrDataset, TreeProcessor
 from ms_pred.iceberg_transformer.trainable_joint_model import JointModel
+from pytorch_lightning.strategies import DDPStrategy
+from rdkit import Chem
+
+
 
 
 
@@ -54,6 +59,7 @@ def add_joint_train_args(parser):
     parser.add_argument("--lr-decay-rate", default=0.7214, type=float)
     parser.add_argument("--weight-decay", default=0.0, type=float)
     parser.add_argument("--test-checkpoint", default="", action="store", type=str)
+    parser.add_argument("--train-checkpoint", default="", action="store", type=str)
 
     # Model params
     parser.add_argument("--hidden-size", default=512, type=int)
@@ -105,6 +111,11 @@ def add_joint_train_args(parser):
     parser.add_argument(
         "--contr-weight", default=1, type=float
     )
+    parser.add_argument("--pubchem-map-path", default='data/pubchem/pubchem_formulae_inchikey.hdf5')
+    parser.add_argument("--num-decoys", default=3, type=int)
+    parser.add_argument("--all-decoy-nums", default=10, type=int)
+    parser.add_argument("--grad-accumulate", default=1, type=int, action="store")
+
     return parser
 
 
@@ -133,7 +144,6 @@ def train_model():
     data_dir = common.get_data_dir(dataset_name)
     labels = data_dir / kwargs["dataset_labels"]
     split_file = data_dir / "splits" / kwargs["split_name"]
-    add_hs = kwargs["add_hs"]
 
     # Get train, val, test inds
     df = pd.read_csv(labels, sep="\t")
@@ -147,6 +157,7 @@ def train_model():
     val_df = df.iloc[val_inds]
     test_df = df.iloc[test_inds]
 
+
     magma_folder = kwargs["magma_folder"]
     num_workers = kwargs.get("num_workers", 0)
     magma_h5_path = data_dir / f"{magma_folder}/magma_tree_with_inten.hdf5"
@@ -158,6 +169,9 @@ def train_model():
     embed_elem_group = kwargs["embed_elem_group"]
     binned_targs = kwargs["binned_targs"]
     multi_hop_max_dist = kwargs["multi_hop_max_dist"]
+    num_decoys = kwargs["num_decoys"]
+    pubchem_path = kwargs["pubchem_map_path"]
+    all_decoy_nums = kwargs["all_decoy_nums"]
 
     # Processor and datasets
     tree_processor = TreeProcessor(
@@ -167,7 +181,7 @@ def train_model():
         multi_hop_max_dist=kwargs["multi_hop_max_dist"],
     )
 
-    train_dataset = IntenDataset(
+    train_dataset = IntenContrDataset(
         train_df,
         magma_h5=magma_h5_path,
         magma_map=name_to_json,
@@ -175,9 +189,12 @@ def train_model():
         root_encode="graphormer",
         embed_elem_group=embed_elem_group,
         tree_processor=tree_processor,
-        datatype="HDF5"
+        datatype="HDF5",
+        num_decoys=num_decoys,
+        pubchem_path=pubchem_path,
+        all_decoy_nums=all_decoy_nums,
     )
-    val_dataset = IntenDataset(
+    val_dataset = IntenContrDataset(
         val_df,
         magma_h5=magma_h5_path,
         magma_map=name_to_json,
@@ -185,9 +202,12 @@ def train_model():
         root_encode="graphormer",
         embed_elem_group=embed_elem_group,
         tree_processor=tree_processor,
-        datatype="HDF5"
+        datatype="HDF5",
+        num_decoys=num_decoys,
+        pubchem_path=pubchem_path,
+        all_decoy_nums=all_decoy_nums,
     )
-    test_dataset = IntenDataset(
+    test_dataset = IntenContrDataset(
         test_df,
         magma_h5=magma_h5_path,
         magma_map=name_to_json,
@@ -195,7 +215,10 @@ def train_model():
         root_encode="graphormer",
         embed_elem_group=embed_elem_group,
         tree_processor=tree_processor,
-        datatype="HDF5"
+        datatype="HDF5",
+        num_decoys=num_decoys,
+        pubchem_path=pubchem_path,
+        all_decoy_nums=all_decoy_nums,
     )
 
     # Define dataloaders
@@ -299,14 +322,31 @@ def train_model():
     trainer = pl.Trainer(
         logger=[tb_logger, console_logger],
         accelerator="gpu" if kwargs["gpu"] else "cpu",
-        devices=1 if kwargs["gpu"] else 0,
+        strategy=DDPStrategy(find_unused_parameters=False),
+        devices=torch.cuda.device_count() if kwargs["gpu"] else 0,
         callbacks=callbacks,
         gradient_clip_val=5,
         min_epochs=kwargs["min_epochs"],
         max_epochs=kwargs["max_epochs"],
         gradient_clip_algorithm="value",
+        accumulate_grad_batches=kwargs["grad_accumulate"],
         num_sanity_val_steps=2 if kwargs["debug"] else 0,
     )
+
+    if kwargs["train_checkpoint"]:
+        train_checkpoint = kwargs["train_checkpoint"]
+        model = trainable_joint_model.JointModel.load_from_checkpoint(train_checkpoint)
+        logging.info(
+            f"Loaded model with from {train_checkpoint}"
+        )
+        # Force contrastive learning and magma params
+        model.sk_tau = kwargs["sk_tau"]
+        model.contr_weight = kwargs["contr_weight"]
+        model.inten_weight = kwargs["inten_weight"]
+        model.frag_weight = kwargs["frag_weight"]
+        model.magma_warmup_steps = kwargs["magma_warmup_steps"]
+        model.magma_decay_rate = kwargs["magma_decay_rate"]
+        model.magma_decay_steps = kwargs["magma_decay_steps"]
 
     if not kwargs["test_checkpoint"]:
         if kwargs["debug_overfit"]:

@@ -308,7 +308,7 @@ class JointModel(pl.LightningModule):
     
     def inten_calculation(self, root_tokens, node_embeddings, frag_targs, num_frag_targs, root_form_vecs, atom_form_vecs, num_atoms, atom_hs, 
                           total_hs, adj_matrices, adduct_mass_shifts, masses):
-        batch_size = num_frag_targs.shape[0]
+        batch_size = root_tokens.shape[0]
         device = frag_targs.device
         atom_form_vecs_padded = nn_utils.pad_packed_tensor(atom_form_vecs, num_atoms, 0)
 
@@ -459,11 +459,15 @@ class JointModel(pl.LightningModule):
 
     def forward(self, graphormer_input, num_atoms, adducts, collision_engs, root_form_vecs, masses, 
                 adduct_mass_shifts, atom_form_vecs, adj_matrices, atom_hs, total_hs, 
-                training=False, frag_targs=None, num_frag_targs=None):
+                include_magma=False, frag_targs=None, num_frag_targs=None, is_decoy=False):
         mol_embeddings = self.molecular_embedding(adducts, collision_engs, graphormer_input=graphormer_input)
         root_tokens = mol_embeddings["root_tokens"]
         node_embeddings = mol_embeddings["node_embeddings"]
-        breakpoints_pred = self.breakpoint_forward(node_embeddings, root_tokens, num_atoms, root_form_vecs)
+        if not is_decoy:
+            breakpoints_pred = self.breakpoint_forward(node_embeddings, root_tokens, num_atoms, root_form_vecs)
+        else:
+            with torch.no_grad():
+                breakpoints_pred = self.breakpoint_forward(node_embeddings, root_tokens, num_atoms, root_form_vecs)
         inten_pred_magma = self.inten_calculation(
                                 root_tokens,
                                 node_embeddings,
@@ -476,7 +480,7 @@ class JointModel(pl.LightningModule):
                                 adj_matrices, 
                                 adduct_mass_shifts,
                                 masses,
-                            ) if training else None
+                            ) if include_magma else None
         frag_logits = breakpoints_pred["frag_logits"][-1]
         frag_card_logits = breakpoints_pred["frag_card_logits"][-1]
         with torch.no_grad():
@@ -501,69 +505,165 @@ class JointModel(pl.LightningModule):
     
 
     def _common_step(self, batch, name="train"):
-        pred = self.forward(
-            graphormer_input=batch.get("graphormer_input"),
-            num_atoms=batch["num_atoms"],
-            adducts=batch["adducts"],
-            collision_engs=batch["collision_engs"],
-            root_form_vecs=batch["root_form_vecs"],
-            masses=batch["masses"],
-            adduct_mass_shifts=batch["adduct_mass_shifts"],
-            atom_form_vecs=batch["atom_form_vecs"],
-            adj_matrices=batch["adj_matrices"],
-            atom_hs=batch["atom_hs"],
-            total_hs=batch["total_hs"],
-            training=name=="train",
-            frag_targs=batch["frag_targs"] if name=="train" else None,
-            num_frag_targs=batch["num_frag_targs"] if name=="train" else None,
-        )
-        if self.binned_targs:
-            pred_inten = pred["inten_pred_end_to_end"]["output_binned"]
-        else:
-            pred_inten = pred["inten_pred_end_to_end"]["output"]
-            pred_inten = torch.stack((batch["masses"], pred_inten), dim=-1)
-            pred_inten = pred_inten.reshape(pred_inten.shape[0], -1, 2)  # B x (Out * Mass shifts) x 2
-        batch_size = len(batch["names"])
-        if name != "train":
-            loss_fn = functools.partial(self.inten_loss_fn, use_hun=True)  # use hungarian in val and test
-            loss = loss_fn(pred_inten, batch["inten_targs"], parent_mass=batch["precursor_mzs"])
-            loss = {k: v.mean() for k, v in loss.items()}        
-            self.log(
-                f"{name}_loss", loss["loss"].item(), batch_size=batch_size, on_epoch=True
-            )            
-            return loss
-        else:
+        if "decoy" not in batch:
+            pred = self.forward(
+                graphormer_input=batch.get("graphormer_input"),
+                num_atoms=batch["num_atoms"],
+                adducts=batch["adducts"],
+                collision_engs=batch["collision_engs"],
+                root_form_vecs=batch["root_form_vecs"],
+                masses=batch["masses"],
+                adduct_mass_shifts=batch["adduct_mass_shifts"],
+                atom_form_vecs=batch["atom_form_vecs"],
+                adj_matrices=batch["adj_matrices"],
+                atom_hs=batch["atom_hs"],
+                total_hs=batch["total_hs"],
+                include_magma=name=="train",
+                frag_targs=batch["frag_targs"] if name=="train" else None,
+                num_frag_targs=batch["num_frag_targs"] if name=="train" else None,
+            )
             if self.binned_targs:
-                pred_inten_magma = pred["inten_pred_magma"]["output_binned"]
+                pred_inten = pred["inten_pred_end_to_end"]["output_binned"]
             else:
-                pred_inten_magma = pred["inten_pred_end_to_end"]["output"]
-                pred_inten_magma = torch.stack((batch["masses"], pred_inten_magma), dim=-1)
-                pred_inten_magma = pred_inten_magma.reshape(pred_inten_magma.shape[0], -1, 2)  # B x (Out * Mass shifts) x 2
-            inten_loss_fn = self.inten_loss_fn
-            end_to_end_inten_loss = inten_loss_fn(pred_inten, batch["inten_targs"], parent_mass=batch["precursor_mzs"])["loss"].mean()
-            magma_inten_loss = inten_loss_fn(pred_inten_magma, batch["inten_targs"], parent_mass=batch["precursor_mzs"])["loss"].mean()
-            breakpoints_pred = pred["breakpoints_pred"]
-            if self.enable_aux_loss:
-                frag_loss = 0
-                for i in range(self.frag_decoder_layers):
-                    frag_loss += self.frag_loss(
-                        breakpoints_pred["frag_logits"][i], breakpoints_pred["frag_card_logits"][i], 
+                pred_inten = pred["inten_pred_end_to_end"]["output"]
+                pred_inten = torch.stack((batch["masses"], pred_inten), dim=-1)
+                pred_inten = pred_inten.reshape(pred_inten.shape[0], -1, 2)  # B x (Out * Mass shifts) x 2
+            batch_size = len(batch["names"])
+            if name != "train":
+                loss_fn = functools.partial(self.inten_loss_fn, use_hun=True)  # use hungarian in val and test
+                loss = loss_fn(pred_inten, batch["inten_targs"], parent_mass=batch["precursor_mzs"])
+                loss = {k: v.mean() for k, v in loss.items()}        
+                self.log(
+                    f"{name}_loss", loss["loss"].item(), batch_size=batch_size, on_epoch=True
+                )            
+                return loss
+            else:
+                if self.binned_targs:
+                    pred_inten_magma = pred["inten_pred_magma"]["output_binned"]
+                else:
+                    pred_inten_magma = pred["inten_pred_end_to_end"]["output"]
+                    pred_inten_magma = torch.stack((batch["masses"], pred_inten_magma), dim=-1)
+                    pred_inten_magma = pred_inten_magma.reshape(pred_inten_magma.shape[0], -1, 2)  # B x (Out * Mass shifts) x 2
+                inten_loss_fn = self.inten_loss_fn
+                end_to_end_inten_loss = inten_loss_fn(pred_inten, batch["inten_targs"], parent_mass=batch["precursor_mzs"])["loss"].mean()
+                magma_inten_loss = inten_loss_fn(pred_inten_magma, batch["inten_targs"], parent_mass=batch["precursor_mzs"])["loss"].mean()
+                breakpoints_pred = pred["breakpoints_pred"]
+                if self.enable_aux_loss:
+                    frag_loss = 0
+                    for i in range(self.frag_decoder_layers):
+                        frag_loss += self.frag_loss(
+                            breakpoints_pred["frag_logits"][i], breakpoints_pred["frag_card_logits"][i], 
+                            batch["frag_targs"], batch["num_frag_targs"], batch["num_atoms"], batch["adj_matrices"],
+                        ) * 0.9**(self.frag_decoder_layers-1-i)
+                else:
+                    frag_loss = self.frag_loss(
+                        breakpoints_pred["frag_logits"][-1], breakpoints_pred["frag_card_logits"][-1], 
                         batch["frag_targs"], batch["num_frag_targs"], batch["num_atoms"], batch["adj_matrices"],
-                    ) * 0.9**(self.frag_decoder_layers-1-i)
+                    )
+                self.step += 1
+                self.log("train_end_to_end_inten_loss", end_to_end_inten_loss, batch_size=batch_size, on_epoch=True)
+                self.log("train_magma_inten_loss", magma_inten_loss, batch_size=batch_size, on_epoch=True)
+                self.log("train_frag_loss", frag_loss, batch_size=batch_size, on_epoch=True)
+                
+                magma_weight = self.magma_weight_scheduler()
+                loss = self.inten_weight * (magma_weight * magma_inten_loss + (1-magma_weight)*end_to_end_inten_loss) + self.frag_weight * magma_weight * frag_loss
+                self.log("train_loss", loss, batch_size=batch_size, on_epoch=True)
+                return {"loss":loss}
+        else:
+            batch_size = batch["num_decoys_per_entry"].shape[0]
+            targ_batch = batch["targ"]
+            decoy_batch = batch["decoy"]
+            if name == 'train':
+                inten_loss_fn = self.inten_loss_fn
+                inten_decoy_loss_fn = self.contr_loss_fn
             else:
-                frag_loss = self.frag_loss(
-                    breakpoints_pred["frag_logits"][-1], breakpoints_pred["frag_card_logits"][-1], 
-                    batch["frag_targs"], batch["num_frag_targs"], batch["num_atoms"], batch["adj_matrices"],
-                )
-            self.step += 1
-            self.log("train_end_to_end_inten_loss", end_to_end_inten_loss, batch_size=batch_size, on_epoch=True)
-            self.log("train_magma_inten_loss", magma_inten_loss, batch_size=batch_size, on_epoch=True)
-            self.log("train_frag_loss", frag_loss, batch_size=batch_size, on_epoch=True)
+                inten_loss_fn = functools.partial(self.inten_loss_fn, use_hun=True)  # use hungarian in val and test
+                inten_decoy_loss_fn = functools.partial(self.contr_loss_fn, use_hun=True)
             
-            magma_weight = self.magma_weight_scheduler()
-            loss = self.inten_weight * (magma_weight * magma_inten_loss + (1-magma_weight)*end_to_end_inten_loss) + self.frag_weight * frag_loss
-            self.log("train_loss", loss, batch_size=batch_size, on_epoch=True)
-            return {"loss":loss}
+            targ_pred = self.forward(
+                graphormer_input=targ_batch.get("graphormer_input"),
+                num_atoms=targ_batch["num_atoms"],
+                adducts=targ_batch["adducts"],
+                collision_engs=targ_batch["collision_engs"],
+                root_form_vecs=targ_batch["root_form_vecs"],
+                masses=targ_batch["masses"],
+                adduct_mass_shifts=targ_batch["adduct_mass_shifts"],
+                atom_form_vecs=targ_batch["atom_form_vecs"],
+                adj_matrices=targ_batch["adj_matrices"],
+                atom_hs=targ_batch["atom_hs"],
+                total_hs=targ_batch["total_hs"],
+                include_magma=False,
+                frag_targs=None,
+                num_frag_targs=None,
+            )
+            decoy_pred = self.forward(
+                graphormer_input=decoy_batch.get("graphormer_input"),
+                num_atoms=decoy_batch["num_atoms"],
+                adducts=decoy_batch["adducts"],
+                collision_engs=decoy_batch["collision_engs"],
+                root_form_vecs=decoy_batch["root_form_vecs"],
+                masses=decoy_batch["masses"],
+                adduct_mass_shifts=decoy_batch["adduct_mass_shifts"],
+                atom_form_vecs=decoy_batch["atom_form_vecs"],
+                adj_matrices=decoy_batch["adj_matrices"],
+                atom_hs=decoy_batch["atom_hs"],
+                total_hs=decoy_batch["total_hs"],
+                include_magma=False,
+                is_decoy=True,
+                frag_targs=None,
+                num_frag_targs=None,
+            )
+            decoy_inten_targs = targ_batch["inten_targs"].repeat_interleave(batch["num_decoys_per_entry"], dim=0)
+            end_to_end_inten_loss = inten_loss_fn(targ_pred["inten_pred_end_to_end"]["output_binned"], targ_batch["inten_targs"], parent_mass=targ_batch["precursor_mzs"])["loss"]
+            decoy_spec_loss = inten_decoy_loss_fn(decoy_pred["inten_pred_end_to_end"]["output_binned"], decoy_inten_targs, parent_mass=decoy_batch["precursor_mzs"])["loss"]
+            targ_contr_loss = inten_decoy_loss_fn(targ_pred["inten_pred_end_to_end"]["output_binned"], targ_batch["inten_targs"], parent_mass=targ_batch["precursor_mzs"])["loss"]
+            split_end = torch.cumsum(batch["num_decoys_per_entry"], dim=0)
+            split_start = split_end - batch["num_decoys_per_entry"]
+            decoy_spec_loss = [decoy_spec_loss[s:e] for s, e in zip(split_start, split_end)]
+            decoy_spec_loss = torch.nn.utils.rnn.pad_sequence(decoy_spec_loss, batch_first=True, padding_value=1) # cos_loss <=1 by definition
+            decoy_spec_loss = torch.cat((targ_contr_loss.unsqueeze(1), decoy_spec_loss), dim=1)
+            decoy_spec_loss_sorted = torch.sort(decoy_spec_loss, dim=-1).values.detach()
+            ranking_dist = torch.abs(decoy_spec_loss[:, :, None] - decoy_spec_loss_sorted[:, None, :])
+            top1_prob = pygm.sinkhorn(-ranking_dist, n1=batch["num_decoys_per_entry"]+1, n2=batch["num_decoys_per_entry"]+1, tau=self.sk_tau, backend='pytorch')[:, 0, 0]
+            contr_loss = torch.relu(-torch.log(top1_prob + 0.5))  # shift & cut ce loss for probs > 0.5
+            if name != "train":  
+                loss = {
+                    "spec_loss": end_to_end_inten_loss,
+                    "contr_loss": contr_loss,
+                    "loss": end_to_end_inten_loss + contr_loss * self.contr_weight,
+                }
+                loss = {k: v.mean() for k, v in loss.items()}      
+                self.log(
+                    f"{name}_loss", loss["loss"].item(), batch_size=batch_size, on_epoch=True
+                )
+                for k, v in loss.items():
+                    if k != "loss":
+                        self.log(f"{name}_aux_{k}", v.item(), batch_size=batch_size)
+                return loss
+            else:
+                breakpoints_pred = targ_pred["breakpoints_pred"]
+                if self.enable_aux_loss:
+                    frag_loss = 0
+                    for i in range(self.frag_decoder_layers):
+                        frag_loss += self.frag_loss(
+                            breakpoints_pred["frag_logits"][i], breakpoints_pred["frag_card_logits"][i], 
+                            targ_batch["frag_targs"], targ_batch["num_frag_targs"], targ_batch["num_atoms"], targ_batch["adj_matrices"],
+                        ) * 0.9**(self.frag_decoder_layers-1-i)
+                else:
+                    frag_loss = self.frag_loss(
+                        breakpoints_pred["frag_logits"][-1], breakpoints_pred["frag_card_logits"][-1], 
+                        targ_batch["frag_targs"], targ_batch["num_frag_targs"], targ_batch["num_atoms"], targ_batch["adj_matrices"],
+                    )
+                self.step += 1
+                end_to_end_inten_loss = end_to_end_inten_loss.mean()
+                contr_loss = contr_loss.mean()
+                self.log("train_end_to_end_inten_loss", end_to_end_inten_loss.item(), batch_size=batch_size, on_epoch=True)
+                self.log("train_frag_loss", frag_loss.item(), batch_size=batch_size, on_epoch=True)
+                self.log("train_contr_loss", contr_loss.item(), batch_size=batch_size, on_epoch=True)
+                magma_weight = self.magma_weight_scheduler()
+                loss = self.inten_weight * end_to_end_inten_loss + self.frag_weight * magma_weight * frag_loss + contr_loss * self.contr_weight
+                self.log("train_loss", loss.item(), batch_size=batch_size, on_epoch=True)
+                return {"loss": loss}
 
     def training_step(self, batch, batch_idx):
         """training_step."""

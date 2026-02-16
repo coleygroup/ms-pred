@@ -199,6 +199,8 @@ ion2onehot_pos = {
     "[M-H-CO2]-": 10,
 }
 
+onehot_pos2ion = {ion2onehot_pos[k]:k for k in ion2onehot_pos}
+
 ion_pos2extra_multihot = {v: set() for v in ion2onehot_pos.values()}
 for k, v in ion2onehot_pos.items():
     _ion_mode = k[-1]  # '+' or '-'
