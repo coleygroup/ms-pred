@@ -55,7 +55,7 @@ for test_entry in test_entries:
     split = test_entry['test_split']
     maxk = test_entry['max_k']
     model_dir = Path(f"results/joint_train_{dataset}")
-    joint_model = model_dir/train_split/"version_28/best.ckpt"
+    joint_model = model_dir/train_split/"version_106/best.ckpt"
     if not joint_model.exists():
         print(f"Could not find model {joint_model}; skipping\n: {json.dumps(test_entry, indent=1)}")
         continue
@@ -92,6 +92,19 @@ for test_entry in test_entries:
     --formula-dir-name {subform_name}.hdf5 \\
     --pred-file {save_dir / pred_filename} \\
     --dist-fn {dist} \\
+    --pool-fn {pool_fn}
+    """
+    if binned_out:
+        cmd += "--binned-pred"
+
+    print(cmd + "\n")
+    subprocess.run(cmd, shell=True)
+
+    cmd = f"""python {retrieve_file} \\
+    --dataset {dataset} \\
+    --formula-dir-name {subform_name}.hdf5 \\
+    --pred-file {save_dir / pred_filename} \\
+    --dist-fn cos \\
     --pool-fn {pool_fn}
     """
     if binned_out:

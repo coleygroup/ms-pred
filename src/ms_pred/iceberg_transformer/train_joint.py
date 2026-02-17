@@ -26,11 +26,11 @@ from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 
 import ms_pred.common as common
 from ms_pred.iceberg_transformer.dataset import IntenDataset, TreeProcessor
-from ms_pred.iceberg_transformer.trainable_joint_model import JointModel
+from ms_pred.iceberg_transformer.joint_model import JointModel
 
 
 
-def add_inten_train_args(parser):
+def add_joint_train_args(parser):
     """Add training arguments."""
     parser.add_argument("--debug", default=False, action="store_true")
     parser.add_argument("--debug-overfit", default=False, action="store_true")
@@ -93,21 +93,12 @@ def add_inten_train_args(parser):
         action="store",
         choices=["cosine", "entropy", "weighted_entropy"],
     )
-    parser.add_argument(
-        "--contr-loss-fn",
-        default="cosine",
-        action="store",
-        choices=["cosine", "entropy", "weighted_entropy"],
-    )
-    parser.add_argument(
-        "--contr-weight", default=1, type=float
-    )
     return parser
 
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser = add_inten_train_args(parser)
+    parser = add_joint_train_args(parser)
     return parser.parse_args()
 
 
@@ -116,7 +107,7 @@ def train_model():
     kwargs = args.__dict__
 
     save_dir = kwargs["save_dir"]
-    common.setup_logger(save_dir, log_name="joint_train_st.log", debug=kwargs["debug"])
+    common.setup_logger(save_dir, log_name="joint_train_entropy.log", debug=kwargs["debug"])
     pl.seed_everything(kwargs.get("seed"))
 
     # Dump args
@@ -257,8 +248,6 @@ def train_model():
         binned_targs=binned_targs,
         sk_tau=kwargs["sk_tau"],
         ppm_tol=kwargs["ppm_tol"],
-        contr_weight=kwargs["contr_weight"],
-        contr_loss_fn=kwargs["contr_loss_fn"],
         inten_weight=kwargs["inten_weight"],
         frag_weight = kwargs["frag_weight"],
         lr=kwargs["learning_rate"],

@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 
 import ms_pred.common as common
-from ms_pred.iceberg_transformer import dataset, trainable_joint_model
+from ms_pred.iceberg_transformer import dataset, joint_model
 
 
 def get_args():
@@ -98,7 +98,7 @@ def predict():
     # Create model and load
     # Load from checkpoint
     best_checkpoint = kwargs["checkpoint_pth"]
-    model = trainable_joint_model.JointModel.load_from_checkpoint(best_checkpoint)
+    model = joint_model.JointModel.load_from_checkpoint(best_checkpoint)
     logging.info(f"Loaded model with from {best_checkpoint}")
 
     pe_embed_k = model.pe_embed_k
