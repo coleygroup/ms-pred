@@ -74,11 +74,13 @@ def predict():
     labels = data_dir / kwargs["dataset_labels"]
 
     # Get train, val, test inds
-    df = pd.read_csv(labels, sep="\t")
+    df = pd.read_csv(labels, sep="\t").rename(columns={"name": "spec"})
 
     if kwargs["subset_datasets"] != "none":
         splits = pd.read_csv(data_dir / "splits" / kwargs["split_name"], sep="\t")
+        splits = splits.rename(columns={"name": "spec"})
         folds = set(splits.keys())
+        
         folds.remove("spec")
         fold_name = list(folds)[0]
         if kwargs["subset_datasets"] == "train_only":
@@ -97,6 +99,8 @@ def predict():
 
     # Create model and load
     # Load from checkpoint
+    if kwargs["debug"]:
+        df = df.head(10)
     best_checkpoint = kwargs["checkpoint_pth"]
     model = inten_model.IntenGNN.load_from_checkpoint(best_checkpoint)
     logging.info(f"Loaded model with from {best_checkpoint}")
@@ -161,6 +165,7 @@ def predict():
             inten_frag_ids = batch["inten_frag_ids"]
             masses = batch["masses"].to(device)
             adducts = batch["adducts"].to(device)
+            instruments = batch["instruments"].to(device)
             precursor_mzs = batch["precursor_mzs"].to(device)
             collision_energies = batch["collision_engs"].to(device)
 
@@ -174,6 +179,7 @@ def predict():
                 num_frags=num_frags,
                 max_breaks=broken_bonds,
                 adducts=adducts,
+                instruments=instruments,
                 precursor_mzs=precursor_mzs,
                 collision_engs=collision_energies,
                 max_add_hs=max_add_hs,

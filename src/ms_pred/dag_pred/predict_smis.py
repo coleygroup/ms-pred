@@ -154,6 +154,7 @@ def predict():
             smi = entry["smiles"]
             adduct = entry["ionization"]
             precursor_mz = entry["precursor"]
+            instrument = entry["instrument"]
             name = entry["spec"]
             inchikey = common.inchikey_from_smiles(smi)
             smi = Chem.MolToSmiles(Chem.MolFromSmiles(smi))  # canonicalize
@@ -164,11 +165,10 @@ def predict():
                 colli_eng_val = common.collision_energy_to_float(colli_eng)  # str to float
                 if math.isnan(colli_eng_val):  # skip collision_energy == nan (no collision energy recorded)
                     continue
-                tup_to_process.append((smi, f"pred_{name}", colli_eng_val, adduct, precursor_mz, f"ikey {inchikey}"))
+                tup_to_process.append((smi, f"pred_{name}", colli_eng_val, adduct, instrument, precursor_mz, f"ikey {inchikey}"))
             return tup_to_process
 
         all_rows = [j for _, j in df.iterrows()]
-
         logging.info('Preparing entries')
         if kwargs["num_cpu_workers"] == 0:
             predict_entries = [prepare_entry(i) for i in tqdm(all_rows)]
@@ -188,6 +188,8 @@ def predict():
             predict_entries[i: i + batch_size] for i in range(0, len(predict_entries), batch_size)
         ]
 
+        print("# gpus", avail_gpu_num)
+
         def producer_func(batch):
             torch.set_num_threads(1)
             if use_gpu:
@@ -200,15 +202,18 @@ def predict():
             else:
                 device = "cpu"
             model.to(device)
+            # avoids error in pe_embedding under multithreading. 
+            torch.cuda.set_device(gpu_id)
 
             # for batch in batched_entries:
-            smis, spec_names, colli_eng_vals, adducts, precursor_mzs, ikeys = list(zip(*batch))
+            smis, spec_names, colli_eng_vals, adducts, instruments, precursor_mzs, ikeys = list(zip(*batch))
             try:
                 full_outputs = model.predict_mol(
                     smis,
                     precursor_mz=precursor_mzs,
                     collision_eng=colli_eng_vals,
                     adduct=adducts,
+                    instrument=instruments,
                     threshold=kwargs["threshold"],
                     device=device,
                     max_nodes=kwargs["max_nodes"],
@@ -216,7 +221,9 @@ def predict():
                     canonical_root_smi=True,
                 )
             except:
-                logging.error(f'Prediction failed, SMILES: {smis}')
+                logging.error(
+                    f'Prediction failed, SMILES: {smis}; colli_eng_vals: {colli_eng_vals}; adducts: {adducts}'
+                )
                 raise
             return_list = []
             for output_spec, spec_name, smi, ikey, adduct, pred_frag, collision_energy in \

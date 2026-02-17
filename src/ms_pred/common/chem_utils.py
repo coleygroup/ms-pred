@@ -260,7 +260,8 @@ for ion in _ori_ions:
 
 instrument2onehot_pos = {
     "Orbitrap": 0,
-    "QTOF": 1, # Streamline upstream preprocessing to make QToF count here too 
+    "QTOF": 1, 
+    "Unknown": 2
 }
 
 

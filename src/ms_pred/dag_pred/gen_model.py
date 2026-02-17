@@ -13,6 +13,8 @@ import ms_pred.nn_utils as nn_utils
 import ms_pred.magma.fragmentation as fragmentation
 import ms_pred.dag_pred.dag_data as dag_data
 
+import time
+
 
 class FragGNN(pl.LightningModule):
     def __init__(
@@ -34,6 +36,7 @@ class FragGNN(pl.LightningModule):
         warmup: int = 1000,
         embed_adduct=False,
         embed_collision=False,
+        embed_instrument=False,
         embed_elem_group=False,
         encode_forms: bool = False,
         add_hs: bool = False,
@@ -74,6 +77,7 @@ class FragGNN(pl.LightningModule):
         self.pe_embed_k = pe_embed_k
         self.embed_adduct = embed_adduct
         self.embed_collision = embed_collision
+        self.embed_instrument = embed_instrument
         self.embed_elem_group = embed_elem_group
         self.encode_forms = encode_forms
         self.add_hs = add_hs
@@ -157,13 +161,22 @@ class FragGNN(pl.LightningModule):
             self.collision_embed_merged = nn.Parameter(torch.zeros(pe_dim))
             self.collision_embed_merged.requires_grad = False
 
+        instrument_shift = 0
+        if self.embed_instrument:
+            instrument_types = len(set(common.instrument2onehot_pos.values()))
+            onehot_instrument = torch.eye(instrument_types)
+            self.instrument_embedder = nn.Parameter(onehot_instrument.float())
+            self.instrument_embedder.requires_grad = False
+            instrument_shift = instrument_types
+
+
         # Define network
         self.gnn = nn_utils.MoleculeGNN(
             hidden_size=self.hidden_size,
             num_step_message_passing=self.layers,
             set_transform_layers=self.set_layers,
             mpnn_type=self.mpnn_type,
-            gnn_node_feats=node_feats + adduct_shift + collision_shift,
+            gnn_node_feats=node_feats + adduct_shift + collision_shift + instrument_shift,
             gnn_edge_feats=edge_feats,
             dropout=self.dropout,
         )
@@ -178,7 +191,7 @@ class FragGNN(pl.LightningModule):
                     num_step_message_passing=self.layers,
                     set_transform_layers=self.set_layers,
                     mpnn_type=self.mpnn_type,
-                    gnn_node_feats=orig_node_feats + adduct_shift,
+                    gnn_node_feats=orig_node_feats + adduct_shift, # TODO: why not ev or instrument?
                     gnn_edge_feats=edge_feats,
                     dropout=self.dropout,
                 )
@@ -224,7 +237,8 @@ class FragGNN(pl.LightningModule):
         broken,
         collision_engs,
         precursor_mzs,
-        adducts,
+        adducts=None,
+        instruments=None,
         root_forms=None,
         frag_forms=None,
     ):
@@ -238,6 +252,7 @@ class FragGNN(pl.LightningModule):
             collision_engs (_type_): _description_
             precursor_mzs (_type_): _description_
             adducts (_type_): _description_
+            instruments (_type_): _description_
             root_forms (_type_, optional): _description_. Defaults to None.
             frag_forms (_type_, optional): _description_. Defaults to None.
 
@@ -247,19 +262,26 @@ class FragGNN(pl.LightningModule):
         Returns:
             _type_: _description_
         """
-        embed_adducts = self.adduct_embedder[adducts.long()]
+        if self.embed_adduct:
+            embed_adducts = self.adduct_embedder[adducts.long()]
+        if self.embed_instrument:
+            embed_instruments = self.instrument_embedder[instruments.long()]
         if self.root_encode == "fp":
             root_embeddings = self.root_module(root_repr)
             raise NotImplementedError()
         elif self.root_encode == "gnn":
             with root_repr.local_scope():
+                ndata = root_repr.ndata["h"]
+                concat_list = [ndata]
                 if self.embed_adduct:
                     embed_adducts_expand = embed_adducts.repeat_interleave(
                         root_repr.batch_num_nodes(), 0
                     )
-                    ndata = root_repr.ndata["h"]
-                    ndata = torch.cat([ndata, embed_adducts_expand], -1)
-                    root_repr.ndata["h"] = ndata
+                    concat_list.append(embed_adducts_expand)                    
+                    # ndata = root_repr.ndata["h"]
+                    # ndata = torch.cat([ndata, embed_adducts_expand], -1)
+                    # root_repr.ndata["h"] = ndata
+
                 if self.embed_collision:
                     embed_collision = torch.cat(
                         (torch.sin(collision_engs.unsqueeze(1) / self.collision_embedder_denominators.unsqueeze(0)),
@@ -272,14 +294,35 @@ class FragGNN(pl.LightningModule):
                     embed_collision_expand = embed_collision.repeat_interleave(
                         root_repr.batch_num_nodes(), 0
                     )
-                    ndata = root_repr.ndata["h"]
-                    ndata = torch.cat([ndata, embed_collision_expand], -1)
-                    root_repr.ndata["h"] = ndata
+                    concat_list.append(embed_collision_expand)
+                    # ndata = root_repr.ndata["h"]
+                    # ndata = torch.cat([ndata, embed_collision_expand], -1)
+                    # root_repr.ndata["h"] = ndata
+
+                if self.embed_instrument:
+
+                    # TODO: should I account for nan:
+                    # self.instrument_nansub = nn.Parameter(torch.zeros(len(set(common.instrument2onehot_pos.values()))))
+                    # self.instrument_nansub.requires_grad = False
+
+                    # embed_instruments = torch.where(torch.isnan(embed_instruments), 
+                    #                                 self.instrument_nansub.unsqueeze(0),
+                    #                                 embed_instruments
+                    # )
+                    embed_instruments_expand = embed_instruments.repeat_interleave(
+                        root_repr.batch_num_nodes(), 0
+                    )
+                    concat_list.append(embed_instruments_expand)
+
+                    # ndata = root_repr.ndata["h"]
+                    # ndata = torch.cat([ndata, embed_instruments_expand], -1)
+                    # root_repr.ndata["h"] = ndata
+                root_repr.ndata["h"] = torch.cat(concat_list, -1)
                 root_embeddings = self.root_module(root_repr)
                 root_embeddings = self.pool(root_repr, root_embeddings)
         else:
             pass
-
+        
         # Line up the features to be parallel between fragment avgs and root
         # graphs
         ext_root = root_embeddings[ind_maps]
@@ -306,6 +349,13 @@ class FragGNN(pl.LightningModule):
                 collision_mapped, graphs.batch_num_nodes(), dim=0
             )
             concat_list.append(collision_exp)
+
+        if self.embed_instrument:
+            instruments_mapped = embed_instruments[ind_maps]
+            instruments_exp = torch.repeat_interleave(
+                instruments_mapped, graphs.batch_num_nodes(), dim=0
+            )
+            concat_list.append(instruments_exp)
 
         with graphs.local_scope():
             graphs.ndata["h"] = torch.cat(concat_list, -1).float()
@@ -347,11 +397,12 @@ class FragGNN(pl.LightningModule):
             mlp_cat_vec,
             dim=1,
         )
-
+        
         output = self.output_map(hidden)
         output = self.sigmoid(output)
         padded_out = nn_utils.pad_packed_tensor(output, graphs.batch_num_nodes(), 0)
         padded_out = torch.squeeze(padded_out, -1)
+
         return padded_out
 
     def loss_fn(self, outputs, targets, natoms):
@@ -381,6 +432,7 @@ class FragGNN(pl.LightningModule):
             adducts=batch["adducts"],
             collision_engs=batch["collision_engs"],
             precursor_mzs=batch["precursor_mzs"],
+            instruments=batch["instruments"] if "instruments" in batch else None,
             root_forms=batch["root_form_vecs"],
             frag_forms=batch["frag_form_vecs"],
         )
@@ -425,7 +477,8 @@ class FragGNN(pl.LightningModule):
         root_smi: str,
         collision_eng,
         precursor_mz,
-        adduct,
+        adduct=None,
+        instrument=None, 
         threshold=0,
         device: str = "cpu",
         max_nodes: int = None,
@@ -459,6 +512,7 @@ class FragGNN(pl.LightningModule):
             collision_eng = [collision_eng]
             precursor_mz = [precursor_mz]
             adduct = [adduct]
+            instrument = [instrument]
         else:
             batched_input = True
         batch_size = len(root_smi)
@@ -470,14 +524,16 @@ class FragGNN(pl.LightningModule):
         root_frag = [e.get_root_frag() for e in engine]
         root_form = [common.form_from_smi(rsmi) for rsmi in root_smi]
         root_form_vec = torch.FloatTensor(np.array([common.formula_to_dense(rf) for rf in root_form])).to(device)
-        adducts = torch.LongTensor([common.ion2onehot_pos[a] if type(a) is str else a for a in adduct]).to(device)
+        if self.embed_adduct:
+            adducts = torch.LongTensor([common.ion2onehot_pos[a] if type(a) is str else a for a in adduct]).to(device)
         collision_engs = torch.FloatTensor(collision_eng).to(device)
+        if self.embed_instrument:
+            instruments = torch.LongTensor([common.instrument2onehot_pos[i] if type(i) is str else i for i in instrument]).to(device)
         precursor_mzs = torch.FloatTensor(precursor_mz).to(device)
 
         # Step 2: Featurize the root molecule
         root_graph_dict = [self.tree_processor.featurize_frag(frag=rf, engine=e, add_random_walk=False)  # add random walk feature later in batched
                            for rf, e in zip(root_frag, engine)]
-
         root_repr = None
         if self.root_encode == "gnn":
             root_repr = dgl.batch([rg["graph"] for rg in root_graph_dict]).to(device)
@@ -523,7 +579,8 @@ class FragGNN(pl.LightningModule):
                     broken=broken_nums,  # torch.ones_like(inds) * depth,
                     collision_engs=collision_engs,
                     precursor_mzs=precursor_mzs,
-                    adducts=adducts,
+                    adducts=adducts if self.embed_adduct else None, 
+                    instruments=instruments if self.embed_instrument else None, 
                     root_forms=root_form_vec,
                     frag_forms=frag_form_vecs,
                 )

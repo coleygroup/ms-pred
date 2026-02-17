@@ -65,7 +65,10 @@ class MassSpec:
             else:
                 return None
             if not np.issubdtype(x_np.dtype, dtype):
-                raise TypeError(f'Input data does not have the correct data type, expected {dtype}, got {x_np.dtype}')
+                if dtype == np.integer:
+                    x_np = x_np.astype(np.integer)
+                else:
+                    raise TypeError(f'Input data does not have the correct data type, expected {dtype}, got {x_np.dtype}')
             return x_np
         self.probs = safe_assign(probs, np.floating)
         self.brokens = safe_assign(brokens, np.integer)
@@ -475,6 +478,7 @@ class MassSpec:
 class CompositeMassSpec:
     """
     Multiple mass spectra corresponding to the same molecule (e.g., different collision energies)
+    If there are multiple spectra with the same collision energy, they will be merged.
     """
     def __init__(self, mass_spec_list: Union[List[MassSpec], Dict[str, MassSpec]]):
         self.ce_to_ms = {}
@@ -484,11 +488,44 @@ class CompositeMassSpec:
             mass_spec_list = mass_spec_list.values()
         for ms_obj in mass_spec_list:
             ce = ms_obj.collision_energy
-            self.ce_to_ms[self._standardize_ce(ce)] = ms_obj
+            standardized_ce = self._standardize_ce(ce)
+            if standardized_ce in self.ce_to_ms:
+                # Merge with existing
+                existing_ms = self.ce_to_ms[standardized_ce]
+                
+                # Use merge_specs to properly bin and sum peaks
+                specs_to_merge = {'old': existing_ms.spec, 'new': ms_obj.spec}
+                merged_result = merge_specs(specs_to_merge, precision=4, merge_method='sum')
+                merged_spec_ar = list(merged_result.values())[0] # extract the single merged spectrum
+                
+                new_masses = merged_spec_ar[:, 0]
+                new_intens = merged_spec_ar[:, 1]
+                
+                # Create merged MassSpec
+                merged_ms = MassSpec(
+                    collision_energy=existing_ms.collision_energy,
+                    masses=new_masses,
+                    intens=new_intens,
+                    root_canonical_smiles=existing_ms.root_canonical_smiles,
+                    adduct=existing_ms.adduct,
+                    remark=existing_ms.remark,
+                    # Propagate other attributes if needed, assuming basic raw spectra here
+                    **existing_ms.meta
+                )
+                self.ce_to_ms[standardized_ce] = merged_ms
+            else:
+                self.ce_to_ms[standardized_ce] = ms_obj
+
             if self.root_canonical_smiles is None:
                 self.root_canonical_smiles = ms_obj.root_canonical_smiles
             else:
                 assert self.root_canonical_smiles == ms_obj.root_canonical_smiles
+
+    def __repr__(self):
+        _repr = f'CompositeMassSpec ['
+        _repr += ', '.join([ms.__repr__() for ms in self.values()])
+        _repr += ']'
+        return _repr
 
     @staticmethod
     def _standardize_ce(ce: Union[str, float]):
@@ -956,6 +993,7 @@ class HDF5Dataset:
 
     def read_attr(self, name) -> dict:
         """read attribute of name as a dict"""
+
         return {k: v for k, v in self.h5_obj[name].attrs.items()}
 
     def update_attr(self, name, inp_dict):
@@ -1080,7 +1118,7 @@ def parse_spectra(spectra_file: [str, list]) -> Tuple[dict, CompositeMassSpec]:
         lines = [i.strip() for i in spectra_file]
     else:
         raise ValueError(f'type of variable spectra_file not understood, got {type(spectra_file)}')
-
+    
     group_num = 0
     metadata = {}
     spectras = []
@@ -1161,7 +1199,7 @@ def spec_to_ms_str(
 def parse_spectra_mgf(
     mgf_file: str, max_num = None
 ) -> List[Tuple[dict, np.ndarray]]:
-    """parse_spectr_mgf.
+    """parse_spectra_mgf.
 
     Parses spectra in the MGF file formate, with
 
@@ -1336,7 +1374,12 @@ def process_spec_file(meta, tuples, precision=4, merge_specs=True, exclude_paren
     parent_mass = float(parent_mass)
 
     # First norm spectra
-    fused_tuples = {ce: x for ce, x in tuples if x.size > 0}
+    # First norm spectra
+    from collections import defaultdict
+    fused_tuples = defaultdict(list)
+    for ce, x in tuples:
+        if x.size > 0:
+            fused_tuples[ce].append(x)
 
     if len(fused_tuples) == 0:
         return
@@ -1344,18 +1387,19 @@ def process_spec_file(meta, tuples, precision=4, merge_specs=True, exclude_paren
     if merge_specs:
         mz_to_inten_pair = {}
         new_tuples = []
-        for i in fused_tuples.values():
-            for tup in i:
-                mz, inten = tup
-                mz_ind = np.round(mz, precision)
-                cur_pair = mz_to_inten_pair.get(mz_ind)
-                if cur_pair is None:
-                    mz_to_inten_pair[mz_ind] = tup
-                    new_tuples.append(tup)
-                elif inten > cur_pair[1]:
-                    cur_pair[1] = inten # max merging
-                else:
-                    pass
+        for i_list in fused_tuples.values():
+            for i in i_list: # iterate across grouped spectra 
+                for tup in i: # iterate across spectrum
+                    mz, inten = tup
+                    mz_ind = np.round(mz, precision)
+                    cur_pair = mz_to_inten_pair.get(mz_ind)
+                    if cur_pair is None:
+                        mz_to_inten_pair[mz_ind] = tup
+                        new_tuples.append(tup)
+                    elif inten > cur_pair[1]:
+                        cur_pair[1] = inten # max merging
+                    else:
+                        pass
 
         merged_spec = np.vstack(new_tuples)
         if exclude_parent:
@@ -1372,8 +1416,8 @@ def process_spec_file(meta, tuples, precision=4, merge_specs=True, exclude_paren
         return merged_spec
     else:
         new_specs = {}
-        for k, v in fused_tuples.items():
-            new_spec = np.vstack(v)
+        for k, v_list in fused_tuples.items():
+            new_spec = np.vstack(v_list)
             new_spec = new_spec[new_spec[:, 0] <= (parent_mass + 1)]
             new_spec = new_spec[new_spec[:, 1] > 0]
             if len(new_spec) == 0:

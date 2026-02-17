@@ -107,6 +107,11 @@
             cursor: pointer;
             white-space: nowrap;
         }
+        .btn-sm {
+            padding: 0.25rem 0.6rem;
+            font-size: 0.8rem;
+            border-radius: 999px;
+        }
         .btn-primary {
             background: #2563eb;
             color: white;
@@ -329,16 +334,58 @@
     </style>
 
     <script>
+        const NCE_VALUES = Array.from({ length: 20 }, (_, i) => 5 + i * 5);
+
+        function clampToNceBucket(nce) {
+            const x = Number(nce);
+            if (!Number.isFinite(x)) return 30;  // sensible default
+            let best = NCE_VALUES[0];
+            let bestDiff = Infinity;
+            for (const v of NCE_VALUES) {
+                const diff = Math.abs(x - v);
+                if (diff < bestDiff) {
+                    bestDiff = diff;
+                    best = v;
+                }
+            }
+            return best;
+        }
+
+        function renderNceSelect(name, selected) {
+            const sel = clampToNceBucket(selected);
+            return `
+                <select name="${name}">
+                    ${NCE_VALUES.map(v =>
+                        `<option value="${v}" ${v === sel ? "selected" : ""}>${v}</option>`
+                    ).join("")}
+                </select>
+            `;
+        }
+
+        function renderSteppedCheckboxes(selectedList) {
+            const selectedSet = new Set(
+                (selectedList || []).map(x => Number(x)).filter(v => Number.isFinite(v))
+            );
+            return NCE_VALUES.map(v => `
+                <label>
+                    <input type="checkbox" class="stepped-nce-checkbox"
+                           value="${v}" ${selectedSet.has(v) ? "checked" : ""}>
+                    ${v}
+                </label>
+            `).join("");
+        }
+
         function addSpectrumBlock() {
             const container = document.getElementById("spectra-container");
-            const idx = container.querySelectorAll(".spectrum-block").length + 1;
-
             const block = document.createElement("div");
             block.className = "spectrum-block";
 
+            const spectrumIndex = container.querySelectorAll(".spectrum-block").length + 1;
+            const defaultNce = 30;
+
             block.innerHTML = `
                 <div class="spectrum-header">
-                    <span>Spectrum ${idx}</span>
+                    <span>Spectrum ${spectrumIndex}</span>
                     <button type="button" class="btn btn-secondary" onclick="removeSpectrumBlock(this)">Remove</button>
                 </div>
 
@@ -354,39 +401,33 @@
                     </div>
                 </div>
 
+                <!-- Single-NCE controls -->
                 <div class="single-nce-row">
                     <div class="row">
                         <div>
                             <label>Collision energy (NCE, %)</label>
-                            <select name="spectrum_nce">
-                                <option value="10">10</option>
-                                <option value="20">20</option>
-                                <option value="30" selected>30</option>
-                                <option value="40">40</option>
-                                <option value="50">50</option>
-                            </select>
+                            ${renderNceSelect("spectrum_nce", defaultNce)}
                         </div>
                     </div>
                 </div>
 
+                <!-- Stepped-NCE controls (hidden by default) -->
                 <div class="stepped-nce-row" style="display:none; margin-top:0.5rem;">
                     <label>Stepped collision energies (NCE, %)</label>
-                    <div class="stepped-nce-options" style="font-size:0.8rem; color:#4b5563; display:flex; gap:0.5rem; flex-wrap:wrap;">
-                        <label><input type="checkbox" class="stepped-nce-checkbox" value="10"> 10</label>
-                        <label><input type="checkbox" class="stepped-nce-checkbox" value="20"> 20</label>
-                        <label><input type="checkbox" class="stepped-nce-checkbox" value="30"> 30</label>
-                        <label><input type="checkbox" class="stepped-nce-checkbox" value="40"> 40</label>
-                        <label><input type="checkbox" class="stepped-nce-checkbox" value="50"> 50</label>
+                    <div class="stepped-nce-options"
+                         style="font-size:0.8rem; color:#4b5563; display:flex; gap:0.5rem; flex-wrap:wrap;">
+                        ${renderSteppedCheckboxes([])}
                     </div>
                     <input type="hidden" name="spectrum_stepped_nces" value="">
                     <div style="font-size:0.75rem; color:#6b7280; margin-top:0.25rem;">
-                        Select one or more stepped NCEs, e.g. 20/30/50.
+                        Select one or more stepped NCEs, e.g. 20/40/60.
                     </div>
                 </div>
 
                 <label style="margin-top:0.5rem;">Spectrum (m/z intensity per line)</label>
-                <textarea name="spectrum_text" placeholder="59.9664 0.0967&#10;60.9743 0.0679&#10;62.9899 0.0450&#10;..."></textarea>
+                <textarea name="spectrum_text"></textarea>
             `;
+
             container.appendChild(block);
         }
 
@@ -626,29 +667,14 @@
                 block.className = "spectrum-block";
 
                 const ev = Number(spec.collision_energy);
-                const nce = Number(spec.nce_cont);
+                const nceCont = Number(spec.nce_cont);
                 let nceGuess = spec.nce_guess != null ? Number(spec.nce_guess) : 30;
-
-                // Clamp nceGuess just in case
-                const possibleNCEs = [10, 20, 30, 40, 50];
-                if (!possibleNCEs.includes(nceGuess)) {
-                    // fallback: nearest bucket
-                    let best = 30;
-                    let bestDiff = Infinity;
-                    for (const nce of possibleNCEs) {
-                        const diff = Math.abs(nceGuess - nce);
-                        if (diff < bestDiff) {
-                            bestDiff = diff;
-                            best = nce;
-                        }
-                    }
-                    nceGuess = best;
-                }
+                nceGuess = clampToNceBucket(nceGuess);
 
                 const evLine =
-                    !Number.isNaN(ev) && Number.isFinite(ev)
+                    Number.isFinite(ev) && Number.isFinite(nceCont)
                         ? `<div style="font-size:0.75rem; color:#6b7280; margin-top:0.25rem;">
-                               Detected CE ≈ ${ev.toFixed(0)} eV | NCE ≈ ${nce.toFixed(0)} % (from .ms)
+                               Detected CE ≈ ${ev.toFixed(0)} eV | NCE ≈ ${nceCont.toFixed(0)} % (from .ms)
                            </div>`
                         : "";
 
@@ -674,20 +700,9 @@
                         <div class="row">
                             <div>
                                 <label>Collision energy (NCE, %)</label>
-                                <select name="spectrum_nce">
-                                    <option value="10" ${nceGuess === 10 ? "selected" : ""}>10</option>
-                                    <option value="20" ${nceGuess === 20 ? "selected" : ""}>20</option>
-                                    <option value="30" ${nceGuess === 30 ? "selected" : ""}>30</option>
-                                    <option value="40" ${nceGuess === 40 ? "selected" : ""}>40</option>
-                                    <option value="50" ${nceGuess === 50 ? "selected" : ""}>50</option>
-                                </select>
-
-                                <!-- Persist the exact values so POST can reuse them -->
-                                <input type="hidden" name="spectrum_ev"
-                                       value="${!Number.isNaN(ev) && Number.isFinite(ev) ? ev : ""}">
-                                <input type="hidden" name="spectrum_nce_cont"
-                                       value="${!Number.isNaN(nce) && Number.isFinite(nce) ? nce : ""}">
-
+                                ${renderNceSelect("spectrum_nce", nceGuess)}
+                                <input type="hidden" name="spectrum_ev" value="${Number.isFinite(ev) ? ev : ""}">
+                                <input type="hidden" name="spectrum_nce_cont" value="${Number.isFinite(nceCont) ? nceCont : ""}">
                                 ${evLine}
                             </div>
                         </div>
@@ -695,16 +710,13 @@
 
                     <div class="stepped-nce-row" style="display:none; margin-top:0.5rem;">
                         <label>Stepped collision energies (NCE, %)</label>
-                        <div class="stepped-nce-options" style="font-size:0.8rem; color:#4b5563; display:flex; gap:0.5rem; flex-wrap:wrap;">
-                            <label><input type="checkbox" class="stepped-nce-checkbox" value="10"> 10</label>
-                            <label><input type="checkbox" class="stepped-nce-checkbox" value="20"> 20</label>
-                            <label><input type="checkbox" class="stepped-nce-checkbox" value="30"> 30</label>
-                            <label><input type="checkbox" class="stepped-nce-checkbox" value="40"> 40</label>
-                            <label><input type="checkbox" class="stepped-nce-checkbox" value="50"> 50</label>
+                        <div class="stepped-nce-options"
+                             style="font-size:0.8rem; color:#4b5563; display:flex; gap:0.5rem; flex-wrap:wrap;">
+                            ${renderSteppedCheckboxes([])}
                         </div>
                         <input type="hidden" name="spectrum_stepped_nces" value="">
                         <div style="font-size:0.75rem; color:#6b7280; margin-top:0.25rem;">
-                            Select one or more stepped NCEs, e.g. 20/30/50.
+                            Select one or more stepped NCEs, e.g. 20/40/60.
                         </div>
                     </div>
 
@@ -1031,8 +1043,9 @@
             const adductEl = document.getElementById("adduct");
 
             const formula = formulaEl ? formulaEl.value.trim() : "";
-            const adduct = adductEl ? adductEl.value.trim() : "[M+H]+";
             const smiles = btn.getAttribute("data-smiles") || "";
+            const adductFromHit = btn.getAttribute("data-adduct") || "";
+            const adduct = adductFromHit || (adductEl ? adductEl.value.trim() : "[M+H]+");
             const ceAttr = btn.getAttribute("data-ce") || "";   // e.g. "11, 17"
             const ceList = parseCeListFromAttr(ceAttr);         // e.g. [11, 17]
 
@@ -1143,10 +1156,18 @@
                 "}",
                 "#plot-area {",
                 "  margin-top: 1.25rem;",
+                "  padding: 1rem 1rem;",
                 "  position: relative;",
+                "  overflow-x: auto;",
+                "  overflow-y: hidden;",
+                "}",
+                ".plot-svg-container {",
+                "  width: 100%;",
+                "  min-width: 800px;",
                 "}",
                 "#plot-area svg {",
-                "  max-width: 100%;",
+                "  width: 100%;",
+                "  height: auto;",
                 "  border-radius: 0.5rem;",
                 "  box-shadow: 0 8px 20px rgba(15,23,42,0.08);",
                 "  display: block;",
@@ -1180,7 +1201,7 @@
                 "  border-color: #d1d5db;",
                 "}",
                 ".fragment-overlay.active {",
-                "  transform: scale(1.22);",
+                "  transform: scale(1.1);",
                 "  border-color: #2563eb;",
                 "  background: rgba(255, 255, 255, 0.8);",
                 "  z-index: 3;",
@@ -1220,7 +1241,7 @@
                 "  gap: 1rem;",
                 "}",
                 "#fragment-detail-body svg {",
-                "  width: 260px;",
+                "  width: 360px;",
                 "  height: auto;",
                 "  display: block;",
                 "}",
@@ -1355,6 +1376,7 @@
                 if (currentEntry && currentOverlayContainer) {
                     // Fire-and-forget; buildFragmentOverlays is async
                     buildFragmentOverlays(currentEntry, currentOverlayContainer);
+                    scheduleRepositionAllOverlays();
                 }
             });
 
@@ -1368,7 +1390,7 @@
 
             const legendEl = doc.createElement("div");
             legendEl.id = "legend";
-            legendEl.textContent = "Predicted spectrum (top) · Experimental spectrum (bottom). Hover/click a predicted peak to focus its fragment overlay.";
+            legendEl.textContent = "Predicted spectrum (top) · Experimental spectrum (bottom). Hover/click a predicted peak to focus its fragment.";
             card.appendChild(legendEl);
 
             const fragDetailPanel = doc.createElement("div");
@@ -1508,6 +1530,15 @@
                 mzMaxInput.value = globalMzMax.toFixed(1);
                 generatePlot();
             });
+
+            win.addEventListener("resize", scheduleRepositionAllOverlays);
+            plotArea.addEventListener("scroll", scheduleRepositionAllOverlays);
+
+            // Observe plot-area size changes not caused by window resize
+            if (typeof ResizeObserver !== "undefined") {
+                const ro = new ResizeObserver(() => scheduleRepositionAllOverlays());
+                ro.observe(plotArea);
+            }
 
             // Track the currently displayed entry + overlay container so the slider
             // can re-build overlays without re-drawing the whole SVG
@@ -1698,6 +1729,36 @@
                         ov.classList.remove("active");
                     }
                 });
+            }
+
+            function repositionAllOverlays() {
+                if (!currentOverlayContainer) return;
+
+                const overlays = currentOverlayContainer.querySelectorAll(".fragment-overlay");
+                overlays.forEach(ov => {
+                  const fragIdStr = ov.getAttribute("data-frag-id");
+                  const mzStr = ov.getAttribute("data-mz");
+                  const mz = mzStr ? parseFloat(mzStr) : NaN;
+                  if (!fragIdStr || !Number.isFinite(mz)) return;
+                  positionOverlayForPeak(ov, mz, fragIdStr);
+                });
+            }
+
+            let repositionTimer = null;
+
+            function scheduleRepositionAllOverlays() {
+                if (repositionTimer) {
+                    win.clearTimeout(repositionTimer);
+                }
+                repositionTimer = win.setTimeout(() => {
+                    repositionTimer = null;
+                    // Wait for layout to settle
+                    win.requestAnimationFrame(() => {
+                        win.requestAnimationFrame(() => {
+                            repositionAllOverlays();
+                        });
+                    });
+                }, 60);
             }
 
             async function showFragmentDetail(fragIdStr, mzStr) {
@@ -1892,7 +1953,7 @@
                     return false;
                 }
 
-                let svg = `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">`;
+                let svg = `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">`;
 
                 // X-axis baseline and label
                 svg += `
@@ -2022,24 +2083,26 @@
                 const lineRect = targetLine.getBoundingClientRect();
                 const overlayRect = overlay.getBoundingClientRect();
                 const margin = 8;
+                const scrollX = plotArea.scrollLeft || 0;
+                const scrollY = plotArea.scrollTop  || 0;
 
-                let left = lineRect.left - plotRect.left - overlayRect.width / 2;
+                let left = (lineRect.left - plotRect.left) + scrollX - overlayRect.width / 2;
                 if (left < 0) left = 0;
-                if (left + overlayRect.width > plotRect.width) {
-                    left = plotRect.width - overlayRect.width;
-                }
+                // if (left + overlayRect.width > plotRect.width) {
+                //     left = plotRect.width - overlayRect.width;
+                // }
 
                 const centerY = plotRect.height / 2;  // approximate x-axis for mirror plot
 
-                let top = lineRect.top - plotRect.top - overlayRect.height - margin;
+                let top = (lineRect.top  - plotRect.top) + scrollY - overlayRect.height - margin;
 
                 const maxTop = centerY - overlayRect.height - margin;
                 if (top > maxTop) {
                     top = maxTop;
                 }
 
-                if (top < 0) {
-                    top = 0;
+                if (top < margin) {
+                    top = margin;
                 }
 
                 overlay.style.left = left + "px";
@@ -2192,6 +2255,7 @@
                     attachPeakHandlers(entry);
                     // Build overlays asynchronously but tied to this plot
                     buildFragmentOverlays(entry, overlayContainer);
+                    scheduleRepositionAllOverlays();
 
                 } catch (err) {
                     console.error(err);
@@ -2269,9 +2333,9 @@
 
                 if (data.status === "done") return data;
                 if (data.status === "error") {
-                    showError(data.error || "Unknown error");
-                    showError(msg);
-                    return { status: "error", error: msg };
+                    const errMsg = data.error || "Unknown error";
+                    showError(errMsg);
+                    return { status: "error", error: errMsg };
                 }
 
                 await new Promise(r => setTimeout(r, 500));
@@ -2378,6 +2442,48 @@
                     .catch(err => {
                         console.error(err);
                         alert("Failed to parse .ms file: " + err.message);
+                    });
+            });
+        }
+
+        // ---- Load example spectrum → call /load_example_ms ----
+        const exampleBtn = document.getElementById("load-example-btn");
+        if (exampleBtn) {
+            exampleBtn.addEventListener("click", function () {
+                exampleBtn.disabled = true;
+                const originalText = exampleBtn.textContent;
+                exampleBtn.textContent = "Loading…";
+
+                fetch("/load_example_ms", {
+                    method: "GET"
+                })
+                    .then(resp => resp.json())
+                    .then(data => {
+                        if (data.error) {
+                            alert("Error: " + data.error);
+                            return;
+                        }
+                        if (!data.spectra || !data.spectra.length) {
+                            alert("No spectra found in the example .ms file.");
+                            return;
+                        }
+
+                        // Populate the spectrum blocks with the example spectra
+                        populateSpectraFromUpload(data.spectra);
+
+                        // Also set the formula to the example's formula
+                        const formulaInput = document.getElementById("formula");
+                        if (formulaInput) {
+                            formulaInput.value = "C27H56NO7P";
+                        }
+                    })
+                    .catch(err => {
+                        console.error(err);
+                        alert("Failed to load example spectrum: " + err.message);
+                    })
+                    .finally(() => {
+                        exampleBtn.disabled = false;
+                        exampleBtn.textContent = originalText;
                     });
             });
         }
@@ -2571,6 +2677,7 @@
                     <label for="adduct">Adduct</label>
                     <select id="adduct" name="adduct">
                         <option value="[M+H]+" {% if adduct == "[M+H]+" %}selected{% endif %}>[M+H]+</option>
+                        <option value="[M-H]-" {% if adduct == "[M-H]-" %}selected{% endif %}>[M-H]-</option>
                         <!-- extend here with other adducts if needed -->
                     </select>
                 </div>
@@ -2578,7 +2685,7 @@
 
             <p style="margin-top:0.75rem; font-size:0.85rem; color:#6b7280;">
                 Paste one or more MS/MS spectra below. For multiple collision energies,
-                click “Add another spectrum” and select the corresponding NCE (10–50%).
+                click “Add another spectrum” and select the corresponding NCE (5–100%).
                 The NCE will be converted to absolute eV using the precursor m/z
                 computed from the formula and adduct.
             </p>
@@ -2591,6 +2698,20 @@
                         If provided, spectra in the .ms file (one block per collision energy) will be parsed
                         and used as query spectra. You can still edit the collision energy and peaks below.
                     </p>
+                </div>
+
+                <div style="text-align: right;">
+                <button
+                    type="button"
+                    class="btn btn-secondary"
+                    id="load-example-btn"
+                    style="margin-top:0.25rem;"
+                >
+                    Load example spectra
+                </button>
+                <p style="font-size:0.8rem; color:#6b7280; margin-top:0.25rem;">
+                    Use spectra of a phospholipid standard (C27H56NO7P).
+                </p>
                 </div>
             </div>
 
@@ -2627,7 +2748,7 @@
                                 <div>
                                     <label>Collision energy (NCE, %)</label>
                                     <select name="spectrum_nce">
-                                        {% for nce in [10, 20, 30, 40, 50] %}
+                                        {% for nce in [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100] %}
                                             <option value="{{ nce }}" {% if sp.nce_guess == nce %}selected{% endif %}>
                                                 {{ nce }}
                                             </option>
@@ -2662,8 +2783,9 @@
                             <div class="stepped-nce-options" style="font-size:0.8rem; color:#4b5563; display:flex; gap:0.5rem; flex-wrap:wrap;">
                                 {% set stepped_vals = (sp.stepped_nces|default('') or '') %}
                                 {% set stepped_list = stepped_vals.split(',') if stepped_vals else [] %}
-                                {% for nce in [10, 20, 30, 40, 50] %}
-                                    <label>
+                                {% for nce in [5, 10, 15, 20, 25, 30, 35, 40, 45, 50,
+                                               55, 60, 65, 70, 75, 80, 85, 90, 95, 100] %}
+                                <label>
                                         <input type="checkbox"
                                                class="stepped-nce-checkbox"
                                                value="{{ nce }}"
@@ -2708,11 +2830,10 @@
                                 <div>
                                     <label>Collision energy (NCE, %)</label>
                                     <select name="spectrum_nce">
-                                        <option value="10">10</option>
-                                        <option value="20">20</option>
-                                        <option value="30" selected>30</option>
-                                        <option value="40">40</option>
-                                        <option value="50">50</option>
+                                        {% for nce in [5, 10, 15, 20, 25, 30, 35, 40, 45, 50,
+                                                       55, 60, 65, 70, 75, 80, 85, 90, 95, 100] %}
+                                            <option value="{{ nce }}" {% if nce == 30 %}selected{% endif %}>{{ nce }}</option>
+                                        {% endfor %}
                                     </select>
                                 </div>
                             </div>
@@ -2722,16 +2843,14 @@
                         <div class="stepped-nce-row" style="display:none; margin-top:0.5rem;">
                             <label>Stepped collision energies (NCE, %)</label>
                             <div class="stepped-nce-options" style="font-size:0.8rem; color:#4b5563; display:flex; gap:0.5rem; flex-wrap:wrap;">
-                                <label><input type="checkbox" class="stepped-nce-checkbox" value="10"> 10</label>
-                                <label><input type="checkbox" class="stepped-nce-checkbox" value="20"> 20</label>
-                                <label><input type="checkbox" class="stepped-nce-checkbox" value="30"> 30</label>
-                                <label><input type="checkbox" class="stepped-nce-checkbox" value="40"> 40</label>
-                                <label><input type="checkbox" class="stepped-nce-checkbox" value="50"> 50</label>
+                                {% for nce in [5, 10, 15, 20, 25, 30, 35, 40, 45, 50,
+                                               55, 60, 65, 70, 75, 80, 85, 90, 95, 100] %}
+                                    <label><input type="checkbox" class="stepped-nce-checkbox" value="{{ nce }}"> {{ nce }}</label>
+                                {% endfor %}
                             </div>
-                            <!-- This gets filled with e.g. "20,30,50" before submit -->
                             <input type="hidden" name="spectrum_stepped_nces" value="">
                             <div style="font-size:0.75rem; color:#6b7280; margin-top:0.25rem;">
-                                Select one or more stepped NCEs, e.g. 20/30/50.
+                                Select one or more stepped NCEs, e.g. 20/40/60.
                             </div>
                         </div>
 
@@ -2846,7 +2965,8 @@
                                               class="btn btn-secondary"
                                               onclick="viewMirrorPlot(this)"
                                               data-smiles="{{ res.smiles }}"
-                                              data-ce="{{ res.collision_energy }}">
+                                              data-ce="{{ res.collision_energy }}"
+                                              data-adduct="{{ res.adduct }}">
                                             Show
                                         </button>
                                     </td>

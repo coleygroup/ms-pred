@@ -73,6 +73,7 @@ def add_frag_train_args(parser):
         action="store",
         choices=["cosine", "entropy", "weighted_entropy"],
     )
+    parser.add_argument("--track-cosine", default=False, action="store_true") # Generally, use if not using cosine as main loss. 
     parser.add_argument(
         "--root-encode",
         default="gnn",
@@ -85,6 +86,7 @@ def add_frag_train_args(parser):
     parser.add_argument("--binned-targs", default=False, action="store_true")
     parser.add_argument("--embed-adduct", default=False, action="store_true")
     parser.add_argument("--embed-collision", default=False, action="store_true")
+    parser.add_argument("--embed-instrument", default=False, action="store_true")
     parser.add_argument("--embed-elem-group", default=False, action="store_true")
     parser.add_argument("--encode-forms", default=False, action="store_true")
     parser.add_argument("--add-hs", default=False, action="store_true")
@@ -144,7 +146,7 @@ def train_model():
     for name in magma_tree_h5.get_all_names():
         ces, remarks = magma_tree_h5.get_entries(name)
         for ce, r in zip(ces, remarks):
-            name_to_keys[f'{name}_collision {ce}'] = (name, ce, r)
+            name_to_keys[f'{name}'] = (name, ce, r)
 
     pe_embed_k = kwargs["pe_embed_k"]
     root_encode = kwargs["root_encode"]
@@ -236,10 +238,12 @@ def train_model():
         pe_embed_k=kwargs["pe_embed_k"],
         pool_op=kwargs["pool_op"],
         loss_fn=kwargs["loss_fn"],
+        track_cosine=kwargs["track_cosine"],
         root_encode=kwargs["root_encode"],
         inject_early=kwargs["inject_early"],
         embed_adduct=kwargs["embed_adduct"],
         embed_collision=kwargs["embed_collision"],
+        embed_instrument=kwargs["embed_instrument"],
         embed_elem_group=kwargs["embed_elem_group"],
         include_unshifted_mz=kwargs["include_unshifted_mz"],
         binned_targs=binned_targs,
@@ -256,7 +260,7 @@ def train_model():
     if kwargs["debug"]:
         kwargs["max_epochs"] = 2
 
-    if kwargs["debug_overfit"]:
+    if kwargs["debug_overfit"]: # this debugs _by_ overfitting, not debugging overfitting itself
         kwargs["min_epochs"] = 1000
         kwargs["max_epochs"] = kwargs["min_epochs"]
         kwargs["no_monitor"] = True
