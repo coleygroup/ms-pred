@@ -24,7 +24,8 @@ from rdkit.Chem.Draw import rdMolDraw2D
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
-BASE_MGF_DIR = Path("/home/runzhong/ms-pred/data/retrieval/pubchem/atlas/")
+# BASE_MGF_DIR = Path("/home/runzhong/ms-pred/data/retrieval/pubchem/atlas/")
+BASE_MGF_DIR = Path("/home/coley-group/atlas/")
 ADDUCT_TO_DIR = {
     '[M+H]+': BASE_MGF_DIR / 'h_plus_out_mgf',
     '[M-H]-': BASE_MGF_DIR / 'h_minus_out_mgf',
