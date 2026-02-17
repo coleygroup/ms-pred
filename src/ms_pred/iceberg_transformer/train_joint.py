@@ -26,7 +26,7 @@ from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 
 import ms_pred.common as common
 from ms_pred.iceberg_transformer.dataset import IntenDataset, TreeProcessor
-from ms_pred.iceberg_transformer.trainable_joint_model import JointModel
+from ms_pred.iceberg_transformer.joint_model import JointModel
 
 
 
@@ -95,15 +95,6 @@ def add_joint_train_args(parser):
         default="cosine",
         action="store",
         choices=["cosine", "entropy", "weighted_entropy"],
-    )
-    parser.add_argument(
-        "--contr-loss-fn",
-        default="cosine",
-        action="store",
-        choices=["cosine", "entropy", "weighted_entropy"],
-    )
-    parser.add_argument(
-        "--contr-weight", default=1, type=float
     )
     return parser
 
@@ -260,8 +251,6 @@ def train_model():
         binned_targs=binned_targs,
         sk_tau=kwargs["sk_tau"],
         ppm_tol=kwargs["ppm_tol"],
-        contr_weight=kwargs["contr_weight"],
-        contr_loss_fn=kwargs["contr_loss_fn"],
         inten_weight=kwargs["inten_weight"],
         frag_weight = kwargs["frag_weight"],
         magma_warmup_steps=kwargs["magma_warmup_steps"],

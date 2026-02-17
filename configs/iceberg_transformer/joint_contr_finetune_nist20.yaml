@@ -1,20 +1,20 @@
 launcher_args: {experiment_name: joint_train_nist20,
-  script_name: "src/ms_pred/iceberg_transformer/train_joint.py",
+  script_name: "src/ms_pred/iceberg_transformer/train_contr_joint.py",
   slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,
-  visible_devices: [2]
+  visible_devices: [1, 2]
 }
 universal_args:
   _slurm_args:
   - {_num_gpu: 1, cpus-per-task: 7, job-name: joint_train, mem-per-cpu: 8G,
     time: '1-12:00:00'}
-  debug: [False]
+  debug: [false]
   gpu: [true]
 
   seed: [1]
-  num-workers: [16]
-  batch-size: [32]
-  max-epochs: [200]
+  num-workers: [64]
+  batch-size: [16]
+  max-epochs: [20]
   min-epochs: [0]
 
   dataset-name: [nist20]
@@ -22,9 +22,12 @@ universal_args:
   magma-folder: [magma_outputs]
   split-name: [split_1.tsv]
 
-  learning-rate: [0.0001]
+  learning-rate: [0.00007]
   lr-decay-rate: [0.95]
+  num-decoys: [3]
+  all-decoy-nums: [10]
   weight-decay: [0.0]
+  grad-accumulate: [2]
 
   inten-dropout: [0.05]
   frag-dropout: [0]
@@ -56,6 +59,11 @@ universal_args:
   warmup: [1000]
   binned-targs: [True]
   inten-loss-fn: [cosine]
+  contr-loss-fn: [entropy]
+  contr-weight: [1]
+  train-checkpoint: [results/joint_train_nist20/split_1_rnd1/version_90/best.ckpt]
+  pubchem-map-path: ['data/retrieval/pubchem/pubchem_formulae_inchikey.hdf5']
+
 
 iterative_args:
   -  split-name: [split_1.tsv]

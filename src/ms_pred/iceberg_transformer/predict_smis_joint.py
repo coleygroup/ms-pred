@@ -20,7 +20,7 @@ import torch
 import pytorch_lightning as pl
 
 import ms_pred.common as common
-from ms_pred.iceberg_transformer import trainable_joint_model 
+from ms_pred.iceberg_transformer import joint_model 
 
 from rdkit import Chem
 from rdkit import rdBase
@@ -126,7 +126,7 @@ def predict():
         f"Loaded joint models from {checkpoint}"
     )
 
-    model = trainable_joint_model.JointModel.load_from_checkpoint(
+    model = joint_model.JointModel.load_from_checkpoint(
         checkpoint
     )
 

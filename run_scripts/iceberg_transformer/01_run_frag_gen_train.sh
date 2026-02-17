@@ -1,1 +1,0 @@
-python launcher_scripts/run_from_config.py configs/iceberg_transformer/frag_train_nist20.yaml

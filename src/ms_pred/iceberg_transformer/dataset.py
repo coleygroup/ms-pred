@@ -704,6 +704,7 @@ class IntenContrDataset(IntenDataset):
         self.pubchem_path = pubchem_path
         self.all_decoy_nums = all_decoy_nums
         self.num_decoys = num_decoys
+        self.fixed_decoys = {}
 
     @classmethod
     def get_collate_fn(cls):
@@ -742,15 +743,17 @@ class IntenContrDataset(IntenDataset):
         mol = common.smi_inchi_round_mol(smi)
         smi = Chem.MolToSmiles(mol)  # canonical smiles
         inchikey = Chem.MolToInchiKey(mol)
+        if inchikey in self.fixed_decoys:
+            return self.fixed_decoys[inchikey]
         pubchem_rate = 0.5
         formula = common.uncharged_formula(mol, mol_type='mol')
         h5obj = common.HDF5Dataset(self.pubchem_path)
         if formula in h5obj:
-            num_pubchem = int(self.num_decoys * pubchem_rate)
-            num_mutation = self.num_decoys - num_pubchem
+            num_pubchem = int(self.all_decoy_nums * pubchem_rate)
+            num_mutation = self.all_decoy_nums - num_pubchem
         else:
             num_pubchem = 0
-            num_mutation = self.num_decoys
+            num_mutation = self.all_decoy_nums
 
         # mutate molecules
         decoy_mols = [mutate(mol, mutation_rate=1.) for _ in range(num_mutation)]
@@ -773,6 +776,7 @@ class IntenContrDataset(IntenDataset):
             if '.' not in new_smi:
                 if new_inchikey != inchikey:
                     decoy_smis.append(new_smi)
+        self.fixed_decoys[inchikey] = decoy_smis
         return decoy_smis
     def __getitem__(self, idx: int):
 
