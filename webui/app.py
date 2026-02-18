@@ -24,7 +24,7 @@ from rdkit.Chem.Draw import rdMolDraw2D
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
-BASE_MGF_DIR = Path("/home/runzhong/ms-pred/data/retrieval/pubchem/atlas/")
+BASE_MGF_DIR = Path(os.environ.get("MSPRED_ATLAS_DIR", "/home/coley-group/atlas/"))
 ADDUCT_TO_DIR = {
     '[M+H]+': BASE_MGF_DIR / 'h_plus_out_mgf',
     '[M-H]-': BASE_MGF_DIR / 'h_minus_out_mgf',
@@ -756,7 +756,7 @@ def _cleanup_old_jobs(ttl_seconds: int = 3600) -> None:
 # Flask application
 # -----------------------------------------------------------------------------
 app = Flask(__name__)
-app.secret_key = "ms-pred-secret-key"  # replace with something secure in production
+app.secret_key = os.environ["FLASK_SECRET_KEY"]
 
 
 @app.route("/", methods=["GET", "POST"])
