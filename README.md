@@ -34,19 +34,23 @@ Contributors: Sam Goldman, Runzhong Wang, Rui-Xi Wang, Mrunali Manjrekar, John B
 
 ## Install & setup <a name="setup"></a>
 
-Install and set up the conda environment using [mamba](https://mamba.readthedocs.io/en/latest/):
-
+Install [mamba](https://mamba.readthedocs.io/en/latest/) if it is not on your system. On Linux, run
+```shell
+curl -L -O "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"
+bash Miniforge3-$(uname)-$(uname -m).sh
 ```
+Please refer to [the official repo](https://github.com/conda-forge/miniforge?tab=readme-ov-file#install) for detailed instructions.
+
+Make sure you have ``gcc`` installed. Use mamba to set up the environment
+```shell
 mamba env create -f environment.yml
 mamba activate ms-gen
-pip install -r requirements.txt
-pip install -e .
 ```
 Installation will take ~10 minutes.
 
 Note: The ``environment.yml`` has configurations for CUDA 11.8. 
-CUDA versions 12.1 and 12.4 are also supported, please change the CUDA tags in ``environment.yml`` accordingly.
-If you are not using GPU, please comment the CUDA-based packages in ``envorinment.yaml``.
+Any newer/older CUDA versions should also work, please change the CUDA tags in ``environment.yml`` accordingly.
+If you are not using GPU, please update ``envorinment.yml`` following the ``CPU-only`` comments in that file.
 
 ## Demo <a name="demo"></a>
 A demo of how to use mass spectrum predictors (ICEBERG as an example) for structural elucidation campaigns can be found at [``notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb``](notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb).

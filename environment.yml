@@ -1,25 +1,73 @@
+# NOTE:
+# - GPU setup below is for Linux + NVIDIA only (including WSL).
+# - For CPU-only Linux: remove `nvidia` channel, remove `pytorch-cuda`, replace `dglteam/label/th24_cu118` with `dglteam`,
+#   and use pip for `torch-scatter` and `torch-sparse`.
+# - For macOS/Windows: use the CPU variant (CUDA packages won't solve).
+
 name: ms-gen
+
 channels:
-- pytorch
-- nvidia
-- dglteam/label/th24_cu118
-- conda-forge
-- pyg
-- bioconda
+  - pytorch
+  - nvidia  # for CPU-only: remove
+  - dglteam/label/th24_cu118  # for CPU-only: rename to dglteam/label/th24_cpu
+  - pyg
+  - conda-forge
+  - bioconda
+
 dependencies:
-- python=3.10.*
-- cython
-- matplotlib=3.10.*
-- rdkit=2025.03.*
-- pytorch-lightning=1.6.*
-- pip=21.2.*
-- ipykernel=6.29.*
-- pytorch=2.4.1
-- pytorch-cuda=11.8
-- einops
-- nb_conda_kernels=2.3.*
-- seaborn=0.13.*
-- ray-tune
-- pytorch-scatter
-- pytorch-sparse
-- dgl
+  # Core
+  - python=3.10
+  - pip=21.2.*
+  - setuptools=59.5.0
+  - cython
+
+  # Scientific stack
+  - matplotlib=3.10.*
+  - seaborn=0.13.*
+  - h5py
+  - scikit-learn
+  - lightgbm
+  - rdkit=2025.03.*
+
+  # PyTorch + CUDA
+  - pytorch=2.4.1
+  - pytorch-cuda=11.8  # for CPU-only: remove
+  # - cpuonly            # for CPU-only: uncomment
+  - pytorch-lightning=1.6.*
+  - pytorch-scatter  # for CPU-only: remove; uncomment the lines in the pip section
+  - pytorch-sparse   # for CPU-only: remove; uncomment the lines in the pip section
+  - dgl
+
+  # ML / distributed
+  - ray-tune
+  - einops
+  # for CPU-only: uncomment the following two lines
+  # - libarrow=*=*cpu*
+  # - pyarrow-core=*=*cpu*
+
+  # Jupyter
+  - ipykernel=6.29.*
+  - nb_conda_kernels=2.3.*
+
+  - pip:
+      # for CPU-only: uncomment the following lines
+      # - --find-links https://pytorch-geometric.com/whl/torch-2.4.1+cpu.html
+      # - torch-scatter
+      # - torch-sparse
+
+      # Web
+      - Flask>=2.3
+      - gunicorn>=21.2
+
+      # Requirements.txt migrated
+      - pathos
+      - hyperopt
+      - CairoSVG
+      - ipdb
+      - omegaconf
+      - pubchempy
+      - pygmtools
+      - msbuddy
+
+      # Editable install of current project
+      - -e .
