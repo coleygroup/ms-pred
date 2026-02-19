@@ -478,6 +478,8 @@ class DAGDataset(Dataset):
             # TODO: temporary fix for CANOPUS, change indexing back
             #valid_spec_ids = set(["_".join(i.split("_")[:-2]) for i in self.magma_map])
             valid_spec_ids = set(self.magma_map.keys())
+        if 'instrument' not in self.df.columns:
+            self.df['instrument'] = 'Unknown'
 
         valid_specs = [(i in valid_spec_ids and inst in common.instrument2onehot_pos) for i, inst in self.df[["spec", "instrument"]].values]
         self.df_sub = self.df[valid_specs]

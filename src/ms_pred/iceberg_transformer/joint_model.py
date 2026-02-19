@@ -24,8 +24,6 @@ import numpy as np
 from ms_pred.iceberg_transformer.dataset import TreeProcessor
 import dgl
 from rdkit import Chem  # type: ignore
-from ms_pred.iceberg_transformer.inten_model import IntenModel
-from ms_pred.iceberg_transformer.frag_model import FragOnlyModel
 from ms_pred.common import CompositeMassSpec, bin_spectra
 import functools
 
@@ -391,7 +389,6 @@ class JointModel(pl.LightningModule):
         fragment_mass = torch.where(fragment_mass > 0, fragment_mass, torch.zeros_like(fragment_mass))
         
         # Build mask for valid hydrogen shifts using max_add and max_remove
-        # Similar to the logic in inten_model.py
         max_inten_shift = (self.output_size - 1) / 2  # Center shift for hydrogen range
         max_break_ar = torch.arange(self.output_size, device=device)[None, None, :].to(device)
         max_breaks_ub = max_add_padded + max_inten_shift  # [B, max_frags]
