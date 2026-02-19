@@ -22,7 +22,7 @@ for test_entry in test_entries:
 
     base_formula_folder = Path(f"results/frag_only_{dataset}")
     res_folder = Path(f"results/joint_train_{dataset}/")
-    model = res_folder / folder / "version_98/best.ckpt"  # if no contrastive finetuning, change version_1 to version_0
+    model = res_folder / folder / "version_109/best.ckpt"  # if no contrastive finetuning, change version_1 to version_0
 
     if not model.exists(): 
         continue

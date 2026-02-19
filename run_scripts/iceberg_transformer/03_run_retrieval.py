@@ -55,7 +55,7 @@ for test_entry in test_entries:
     split = test_entry['test_split']
     maxk = test_entry['max_k']
     model_dir = Path(f"results/joint_train_{dataset}")
-    joint_model = model_dir/train_split/"version_106/best.ckpt"
+    joint_model = model_dir/train_split/"version_109/best.ckpt"
     if not joint_model.exists():
         print(f"Could not find model {joint_model}; skipping\n: {json.dumps(test_entry, indent=1)}")
         continue

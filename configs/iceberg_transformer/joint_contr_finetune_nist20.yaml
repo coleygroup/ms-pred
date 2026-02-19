@@ -58,10 +58,10 @@ universal_args:
   magma-decay-steps: [5000]
   warmup: [1000]
   binned-targs: [True]
-  inten-loss-fn: [cosine]
+  inten-loss-fn: [entropy]
   contr-loss-fn: [entropy]
   contr-weight: [1]
-  train-checkpoint: [results/joint_train_nist20/split_1_rnd1/version_90/best.ckpt]
+  train-checkpoint: [results/joint_train_nist20/split_1_rnd1/version_99/best.ckpt]
   pubchem-map-path: ['data/retrieval/pubchem/pubchem_formulae_inchikey.hdf5']
 
 

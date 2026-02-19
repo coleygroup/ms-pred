@@ -18,9 +18,3 @@ setup(
     include_package_data=True,
     version="0.0.1",
 )
-
-# setup(name='ms_pred',
-#      packages=find_packages(where="src"),
-#      package_dir={'': "src"}
-#      )
-#
