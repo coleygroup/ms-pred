@@ -1,0 +1,29 @@
+[Unit]
+Description=iceberg atlas webui (Gunicorn)
+After=network.target
+
+[Service]
+Type=simple
+User=coley-group
+Group=coley-group
+WorkingDirectory=/home/coley-group/ms-pred/webui
+
+Environment="FLASK_SECRET_KEY=REPLACE_ME"
+Environment="MSPRED_ATLAS_DIR=/home/coley-group/atlas"
+Environment="MSPRED_JOB_DIR=/var/lib/ms_pred_jobs"
+
+# If using venv:
+ExecStart=/home/coley-group/miniforge3/envs/ms-gen/bin/gunicorn \
+  -w 2 -k gthread --threads 8 \
+  -b 127.0.0.1:4285 wsgi:app
+
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+
+# Hardening (optional but good)
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
