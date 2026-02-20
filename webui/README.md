@@ -117,7 +117,7 @@ Copy the service file:
 sudo cp deploy/systemd-iceberg-webui.service \
   /etc/systemd/system/iceberg-webui.service
 ```
-Please remember to replace the ``FLASK_SECRET_KEY``!
+Please remember to replace the ``FLASK_SECRET_KEY`` and update other parameters accordingly.
 
 Reload and start:
 
