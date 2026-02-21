@@ -129,12 +129,13 @@ def predict():
     model = joint_model.JointModel.load_from_checkpoint(
         checkpoint
     )
+    model = torch.compile(model)
 
     out_name = kwargs["out_name"]
     save_path = save_dir / out_name
     save_dir.mkdir(exist_ok=True)
 
-    with torch.no_grad():
+    with torch.inference_mode():
         model.eval()
         model.freeze()
 

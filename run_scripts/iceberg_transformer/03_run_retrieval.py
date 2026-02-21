@@ -6,12 +6,12 @@ import json
 pred_file = "src/ms_pred/iceberg_transformer/predict_smis_joint.py"
 retrieve_file = "src/ms_pred/retrieval/retrieval_benchmark.py"
 subform_name = "no_subform"
-devices = [0, 1, 2, 3]
+devices = [0, 1]
 vis_devices = ",".join([str(_) for _ in devices])
-num_gpu_workers = len(devices) * 3
+num_gpu_workers = len(devices) * 9
 num_cpu_workers = 64
 max_nodes = 100
-batch_size = 64
+batch_size = 16
 dist = "entropy"
 binned_out = False
 pool_fn = "max"
@@ -55,14 +55,14 @@ for test_entry in test_entries:
     split = test_entry['test_split']
     maxk = test_entry['max_k']
     model_dir = Path(f"results/joint_train_{dataset}")
-    joint_model = model_dir/train_split/"version_109/best.ckpt"
+    joint_model = model_dir/train_split/"version_111/best.ckpt"
     if not joint_model.exists():
         print(f"Could not find model {joint_model}; skipping\n: {json.dumps(test_entry, indent=1)}")
         continue
     
     labels = f"data/spec_datasets/{dataset}/retrieval/cands_df_{split}_{maxk}.tsv"
 
-    save_dir = joint_model.parent.parent / f"retrieval_{dataset}_{split}_{maxk}"
+    save_dir = joint_model.parent.parent / f"retrieval_{dataset}_{split}_{maxk}_entropy"
     save_dir.mkdir(exist_ok=True)
 
     cmd = f"""python {pred_file} \\

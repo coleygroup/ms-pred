@@ -390,7 +390,7 @@ class JointModel(pl.LightningModule):
         
         # Build mask for valid hydrogen shifts using max_add and max_remove
         max_inten_shift = (self.output_size - 1) / 2  # Center shift for hydrogen range
-        max_break_ar = torch.arange(self.output_size, device=device)[None, None, :].to(device)
+        max_break_ar = torch.arange(self.output_size, device=device)[None, None, :]
         max_breaks_ub = max_add_padded + max_inten_shift  # [B, max_frags]
         max_breaks_lb = -max_remove_padded + max_inten_shift  # [B, max_frags]
 
@@ -463,7 +463,7 @@ class JointModel(pl.LightningModule):
         if not is_decoy:
             breakpoints_pred = self.breakpoint_forward(node_embeddings, root_tokens, num_atoms, root_form_vecs)
         else:
-            with torch.no_grad():
+            with torch.inference_mode():
                 breakpoints_pred = self.breakpoint_forward(node_embeddings, root_tokens, num_atoms, root_form_vecs)
         inten_pred_magma = self.inten_calculation(
                                 root_tokens,
@@ -480,7 +480,7 @@ class JointModel(pl.LightningModule):
                             ) if include_magma else None
         frag_logits = breakpoints_pred["frag_logits"][-1]
         frag_card_logits = breakpoints_pred["frag_card_logits"][-1]
-        with torch.no_grad():
+        with torch.inference_mode():
             breakpoints = self.breakpoint_inference(frag_logits, frag_card_logits, num_atoms)
             fragments, fragment_count = self.breakpoints_to_patterns(breakpoints, adj_matrices, num_atoms)
             fragments = nn_utils.pack_padded_tensor(fragments, fragment_count).bool()
@@ -731,66 +731,60 @@ class JointModel(pl.LightningModule):
         collision_engs = to_tensor(collision_eng)
         mols = [Chem.MolFromSmiles(rsmi) for rsmi in root_smi]
         graphormer_inputs = [self.tree_processor.create_graphormer_input(mol=m, multi_hop_max_dist=self.tree_processor.multi_hop_max_dist) for m in mols]
-        num_atoms = torch.tensor([gf['num_atoms'] for gf in graphormer_inputs], dtype=torch.long).to(device)
+        num_atoms = torch.tensor([gf['num_atoms'] for gf in graphormer_inputs], dtype=torch.long, device=device)
         max_nodes_gf = max(gf['x'].shape[0] for gf in graphormer_inputs)
         max_dist = max(gf['edge_input'].shape[2] for gf in graphormer_inputs)
         node_feat_dim = graphormer_inputs[0]['x'].shape[1]
         edge_feat_dim = graphormer_inputs[0]['attn_edge_type'].shape[2]
         batch_size = len(graphormer_inputs)
-        x_batch = torch.zeros([batch_size, max_nodes_gf, node_feat_dim], dtype=torch.float32)
-        attn_bias_batch = torch.full([batch_size, max_nodes_gf + 1, max_nodes_gf + 1], -99999, dtype=torch.float32)
-        attn_edge_type_batch = torch.zeros([batch_size, max_nodes_gf, max_nodes_gf, edge_feat_dim], dtype=torch.float32)
-        spatial_pos_batch = torch.zeros([batch_size, max_nodes_gf, max_nodes_gf], dtype=torch.long)
-        degree_batch = torch.zeros([batch_size, max_nodes_gf], dtype=torch.long)
-        edge_input_batch = torch.zeros([batch_size, max_nodes_gf, max_nodes_gf, max_dist, edge_feat_dim], dtype=torch.float32)
+        x_batch = torch.zeros([batch_size, max_nodes_gf, node_feat_dim], dtype=torch.float32, device=device)
+        attn_bias_batch = torch.full([batch_size, max_nodes_gf + 1, max_nodes_gf + 1], -99999, dtype=torch.float32, device=device)
+        attn_edge_type_batch = torch.zeros([batch_size, max_nodes_gf, max_nodes_gf, edge_feat_dim], dtype=torch.float32, device=device)
+        spatial_pos_batch = torch.zeros([batch_size, max_nodes_gf, max_nodes_gf], dtype=torch.long, device=device)
+        degree_batch = torch.zeros([batch_size, max_nodes_gf], dtype=torch.long, device=device)
+        edge_input_batch = torch.zeros([batch_size, max_nodes_gf, max_nodes_gf, max_dist, edge_feat_dim], dtype=torch.float32, device=device)
         adj_matrices = [Chem.rdmolops.GetAdjacencyMatrix(mol, useBO=True) for mol in mols]
-        adj_matrices = [torch.from_numpy(adj_matrix).float() for adj_matrix in adj_matrices]
+        adj_matrices = [torch.from_numpy(adj_matrix).float().to(device) for adj_matrix in adj_matrices]
         max_nodes = torch.max(num_atoms).item()
-        padded_adj_matrices = []
-        for adj in adj_matrices:
-            if adj.shape[0] < max_nodes:
-                pad_size = max_nodes - adj.shape[0]
-                padded_adj = torch.nn.functional.pad(adj, (0, pad_size, 0, pad_size), value=0)
-            else:
-                padded_adj = adj
-            padded_adj_matrices.append(padded_adj)
-        adj_matrices_batch = torch.stack(padded_adj_matrices, dim=0).to(device)
+        adj_matrices_batch = torch.zeros([batch_size, max_nodes, max_nodes], dtype=torch.float32, device=device)
+        for i, adj in enumerate(adj_matrices):
+            adj_matrices_batch[i, :adj.shape[0], :adj.shape[1]] = adj
         for i, gf_input in enumerate(graphormer_inputs):
             num_nodes = gf_input['x'].shape[0]
             edge_dist = gf_input['edge_input'].shape[2]
-            x_batch[i, :num_nodes] = gf_input['x']
-            attn_bias_batch[i, :num_nodes+1, :num_nodes+1] = gf_input['attn_bias']
-            attn_edge_type_batch[i, :num_nodes, :num_nodes] = gf_input['attn_edge_type']
-            spatial_pos_batch[i, :num_nodes, :num_nodes] = gf_input['spatial_pos']
-            degree_batch[i, :num_nodes] = gf_input['degree']
-            edge_input_batch[i, :num_nodes, :num_nodes, :edge_dist] = gf_input['edge_input']
+            x_batch[i, :num_nodes] = gf_input['x'].to(device)
+            attn_bias_batch[i, :num_nodes+1, :num_nodes+1] = gf_input['attn_bias'].to(device)
+            attn_edge_type_batch[i, :num_nodes, :num_nodes] = gf_input['attn_edge_type'].to(device)
+            spatial_pos_batch[i, :num_nodes, :num_nodes] = gf_input['spatial_pos'].to(device)
+            degree_batch[i, :num_nodes] = gf_input['degree'].to(device)
+            edge_input_batch[i, :num_nodes, :num_nodes, :edge_dist] = gf_input['edge_input'].to(device)
 
         graphormer_batch = {
-            'x': x_batch.to(device),
-            'attn_bias': attn_bias_batch.to(device),
-            'attn_edge_type': attn_edge_type_batch.to(device),
-            'spatial_pos': spatial_pos_batch.to(device),
-            'degree': degree_batch.to(device),
-            'edge_input': edge_input_batch.to(device),
+            'x': x_batch,
+            'attn_bias': attn_bias_batch,
+            'attn_edge_type': attn_edge_type_batch,
+            'spatial_pos': spatial_pos_batch,
+            'degree': degree_batch,
+            'edge_input': edge_input_batch,
         }
         adduct_mass_shift = torch.tensor([[
             common.ion2mass[mol_adduct],
             -common.ELECTRON_MASS if common.is_positive_adduct(mol_adduct) else common.ELECTRON_MASS,
-        ] for mol_adduct in adduct]).to(device)
+        ] for mol_adduct in adduct], device=device)
         engines = [fragmentation.FragmentEngine(mol_str=rsmi, mol_str_type="smiles", mol_str_canonicalized=True) for rsmi in root_smi]
         total_atom_masses = [torch.from_numpy(engine.atom_weights_h).to(device) for engine in engines]
         masses_padded = torch.nn.utils.rnn.pad_sequence(total_atom_masses, batch_first=True)
         root_forms = [common.form_from_smi(rsmi) for rsmi in root_smi]
-        root_form_vecs = torch.stack([torch.from_numpy(common.formula_to_dense(root_form)) for root_form in root_forms]).to(device)
-        atom_hs_list = [torch.tensor(engine.atom_hs) for engine in engines]
-        atom_hs_padded = torch.nn.utils.rnn.pad_sequence(atom_hs_list, batch_first=True).to(device)
-        total_hs = torch.LongTensor([engine.total_hs for engine in engines]).to(device)
+        root_form_vecs = torch.stack([torch.from_numpy(common.formula_to_dense(root_form)) for root_form in root_forms]).to(device, non_blocking=True)
+        atom_hs_list = [torch.tensor(engine.atom_hs, device=device) for engine in engines]
+        atom_hs_padded = torch.nn.utils.rnn.pad_sequence(atom_hs_list, batch_first=True)
+        total_hs = torch.tensor([engine.total_hs for engine in engines], device=device, dtype=torch.long)
 
         atom_symbols_batch = [engine.atom_symbols for engine in engines]
         atom_form_vecs_np = [[common.formula_to_dense(f"{s}H{h}") for s, h in zip(atom_symbols, num_hs)] for atom_symbols, num_hs in zip(atom_symbols_batch, atom_hs_list)]
-        atom_form_vecs_padded = torch.nn.utils.rnn.pad_sequence([torch.from_numpy(np.stack(atom_form_vec_np, axis=0)) for atom_form_vec_np in atom_form_vecs_np], batch_first=True).to(device)
+        atom_form_vecs_padded = torch.nn.utils.rnn.pad_sequence([torch.from_numpy(np.stack(atom_form_vec_np, axis=0)).to(device) for atom_form_vec_np in atom_form_vecs_np], batch_first=True)
         atom_form_vecs = nn_utils.pack_padded_tensor(atom_form_vecs_padded, lengths=num_atoms)
-        with torch.no_grad():
+        with torch.inference_mode():
             pred = self.forward(
                 graphormer_batch,
                 num_atoms,

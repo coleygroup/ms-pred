@@ -22,14 +22,14 @@ for test_entry in test_entries:
 
     base_formula_folder = Path(f"results/frag_only_{dataset}")
     res_folder = Path(f"results/joint_train_{dataset}/")
-    model = res_folder / folder / "version_109/best.ckpt"  # if no contrastive finetuning, change version_1 to version_0
+    model = res_folder / folder / "version_99/best.ckpt"  # if no contrastive finetuning, change version_1 to version_0
 
     if not model.exists(): 
         continue
 
     save_dir = model.parent.parent
 
-    save_dir = save_dir / "preds"
+    save_dir = save_dir / "preds_entropy"
 
     # Note: Must use preds_train_01
     magma_dag_folder = (

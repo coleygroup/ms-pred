@@ -144,7 +144,7 @@ def predict():
         model = model.cuda()
     device = torch.device("cuda") if gpu else torch.device("cpu")
     pred_list = []
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch in tqdm(pred_loader):    
             for k in batch:
                 if isinstance(batch[k], torch.Tensor):
