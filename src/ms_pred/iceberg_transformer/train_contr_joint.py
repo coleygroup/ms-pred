@@ -206,6 +206,7 @@ def train_model():
         num_decoys=num_decoys,
         pubchem_path=pubchem_path,
         all_decoy_nums=all_decoy_nums,
+        fix_decoys=True,  # Ensure val decoys are the same across epochs for consistent validation performance
     )
     test_dataset = IntenContrDataset(
         test_df,
@@ -219,6 +220,7 @@ def train_model():
         num_decoys=num_decoys,
         pubchem_path=pubchem_path,
         all_decoy_nums=all_decoy_nums,
+        fix_decoys=True,  # Ensure test decoys are the same across epochs for consistent test performance
     )
 
     # Define dataloaders

@@ -1,33 +1,30 @@
 launcher_args: {experiment_name: joint_train_nist20,
-  script_name: "src/ms_pred/iceberg_transformer/train_contr_joint.py",
+  script_name: "src/ms_pred/iceberg_transformer/train_joint.py",
   slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,
-  visible_devices: [1, 2]
+  visible_devices: [1]
 }
 universal_args:
   _slurm_args:
   - {_num_gpu: 1, cpus-per-task: 7, job-name: joint_train, mem-per-cpu: 8G,
     time: '1-12:00:00'}
-  debug: [false]
+  debug: [False]
   gpu: [true]
 
   seed: [1]
-  num-workers: [64]
-  batch-size: [16]
-  max-epochs: [20]
+  num-workers: [8]
+  batch-size: [32]
+  max-epochs: [200]
   min-epochs: [0]
 
-  dataset-name: [nist20]
-  dataset-labels: [labels.tsv]
+  dataset-name: [msg]
+  split-name: [split.tsv]
+  dataset-labels: [labels_withev.tsv]
   magma-folder: [magma_outputs]
-  split-name: [split_1.tsv]
 
-  learning-rate: [0.00007]
+  learning-rate: [0.0001]
   lr-decay-rate: [0.95]
-  num-decoys: [3]
-  all-decoy-nums: [10]
   weight-decay: [0.0]
-  grad-accumulate: [2]
 
   inten-dropout: [0.05]
   frag-dropout: [0]
@@ -38,13 +35,14 @@ universal_args:
   add-hs: [True]
   embed-adduct: [True]
   embed-collision: [True]
+  embed-instrument: [True]
   encode-forms: [True]
   inten-decoder-layers: [3]
   inten-encoder-layers: [3]
   frag-encoder-layers: [0]
   frag-decoder-layers: [4]
   max-broken-bonds: [6]
-  max-breakpoints: [100]
+  max-breakpoints: [60]
   multi-hop-max-dist: [10]
   num-edge-dis: [10]
   enable-aux-loss: [True]
@@ -53,17 +51,9 @@ universal_args:
   linsat-tau: [15]
   inten-weight: [1]
   frag-weight: [0.1]
-  magma-warmup-steps: [5000]
-  magma-decay-rate: [0.9]
-  magma-decay-steps: [5000]
   warmup: [1000]
   binned-targs: [True]
   inten-loss-fn: [cosine]
-  contr-loss-fn: [entropy]
-  contr-weight: [1]
-  train-checkpoint: [results/joint_train_nist20/split_1_rnd1/version_99/best.ckpt]
-  pubchem-map-path: ['data/retrieval/pubchem/pubchem_formulae_inchikey.hdf5']
-
 
 iterative_args:
   -  split-name: [split_1.tsv]

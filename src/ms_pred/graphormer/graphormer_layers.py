@@ -11,9 +11,6 @@ import math
 
 import torch
 import torch.nn as nn
-import ms_pred.nn_utils as nn_utils
-
-
 
 def init_params(module, n_layers):
     if isinstance(module, nn.Linear):

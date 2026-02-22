@@ -529,9 +529,10 @@ class IntenDataset(DAGDataset):
     def __getitem__(self, idx: int):
         name = self.spec_names[idx]
         adduct = self.name_to_adducts[name]
+        instrument = self.name_to_instruments[name]
         precursor = self.name_to_precursors[name]
         entry = self.read_fn(name)
-        outdict = {"name": name, "adduct": adduct, "precursor": precursor}
+        outdict = {"name": name, "adduct": adduct, "precursor": precursor, 'instrument': instrument}
         outdict.update(entry)
         return outdict
 
@@ -569,7 +570,10 @@ class IntenDataset(DAGDataset):
             batched_reprs = None
         adducts = torch.FloatTensor([item["adduct"] for item in batch])
         collision_engs = torch.FloatTensor([float(item["collision_energy"]) for item in batch])
-
+        supply_instrument = "instrument" in batch[0]
+        if supply_instrument:
+            instruments = [j["instrument"] for j in batch]
+            instruments = torch.FloatTensor(instruments)
         if batch[0]["frag_targs"] is not None:
             frag_targs = [item["frag_targs"] for item in batch]
             num_frags = torch.LongTensor([t.shape[0] for t in frag_targs])
@@ -671,6 +675,7 @@ class IntenDataset(DAGDataset):
             "total_hs": total_hs_list,
             "graphormer_input": graphormer_batch,
             "num_atoms": num_atoms,
+            "instruments": instruments if supply_instrument else None,
         }
         return output
     
@@ -688,6 +693,7 @@ class IntenContrDataset(IntenDataset):
         num_decoys: int = 7,
         pubchem_path: str = 'data/pubchem/pubchem_formulae_inchikey.hdf5',
         all_decoy_nums: int=10,
+        fix_decoys: bool = False,
         **kwargs,
     ):
         super().__init__(
@@ -704,7 +710,9 @@ class IntenContrDataset(IntenDataset):
         self.pubchem_path = pubchem_path
         self.all_decoy_nums = all_decoy_nums
         self.num_decoys = num_decoys
-        self.fixed_decoys = {}
+        self.fix_decoys = fix_decoys
+        if self.fix_decoys:
+            self.fixed_decoys = {}
 
     @classmethod
     def get_collate_fn(cls):
@@ -743,8 +751,6 @@ class IntenContrDataset(IntenDataset):
         mol = common.smi_inchi_round_mol(smi)
         smi = Chem.MolToSmiles(mol)  # canonical smiles
         inchikey = Chem.MolToInchiKey(mol)
-        if inchikey in self.fixed_decoys:
-            return self.fixed_decoys[inchikey]
         pubchem_rate = 0.5
         formula = common.uncharged_formula(mol, mol_type='mol')
         h5obj = common.HDF5Dataset(self.pubchem_path)
@@ -776,7 +782,6 @@ class IntenContrDataset(IntenDataset):
             if '.' not in new_smi:
                 if new_inchikey != inchikey:
                     decoy_smis.append(new_smi)
-        self.fixed_decoys[inchikey] = decoy_smis
         return decoy_smis
     def __getitem__(self, idx: int):
 
@@ -784,23 +789,28 @@ class IntenContrDataset(IntenDataset):
         colli_eng = common.get_collision_energy(name)
         adduct = self.name_to_adducts[name]
         precursor = self.name_to_precursors[name]
+        instrument = self.name_to_instruments[name]
         dataset_smi = self.name_to_smiles[name]
         entry = self.read_fn(name)
-        outdict = {"name": name, "adduct": adduct, "precursor": precursor,  'smiles': dataset_smi, 'decoy': 0}
+        outdict = {"name": name, "adduct": adduct, "precursor": precursor, "instrument": instrument, 'smiles': dataset_smi, 'decoy': 0}
         outdict.update(entry)
 
         outlist = [outdict]
-
-        decoy_smis = self.generate_decoys(dataset_smi)
+        if self.fix_decoys and name in self.fixed_decoys:
+            decoy_smis = self.fixed_decoys[name]
+        else:
+            decoy_smis = self.generate_decoys(dataset_smi)
+            if len(decoy_smis) > self.num_decoys:
+                decoy_smis = random.sample(decoy_smis, self.num_decoys)
+            if self.fix_decoys:
+                self.fixed_decoys[name] = decoy_smis
         decoy_outlist = []
         if len(decoy_smis) > 0:
-            if self.num_decoys < len(decoy_smis):
-                decoy_smis = random.sample(decoy_smis, self.num_decoys)
             for decoy_smi in decoy_smis:
                 decoy_data = common.MassSpec(colli_eng, decoy_smi, common.onehot_pos2ion[adduct])
                 trees = self.tree_processor.featurize_tree(decoy_data, include_inten_targs= False, include_frag_targs=False)
                 trees.update(
-                    {"name": name + '_decoy', "adduct": adduct, "precursor": precursor, 
+                    {"name": name + '_decoy', "adduct": adduct, "precursor": precursor, "instument": instrument,
                      "collision_energy": colli_eng, "smiles": decoy_data})
                 decoy_outlist.append(trees)
         outlist.append(decoy_outlist)

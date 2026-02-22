@@ -107,7 +107,7 @@ def train_model():
     kwargs = args.__dict__
 
     save_dir = kwargs["save_dir"]
-    common.setup_logger(save_dir, log_name="joint_train_entropy.log", debug=kwargs["debug"])
+    common.setup_logger(save_dir, log_name=f"joint_train_{kwargs['max_breakpoints']}.log", debug=kwargs["debug"])
     pl.seed_everything(kwargs.get("seed"))
 
     # Dump args

@@ -165,6 +165,7 @@ def predict():
                 batch["adj_matrices"],
                 batch["atom_hs"],
                 batch["total_hs"],
+                batch["instruments"] if model.embed_instrument else None
                 binned_out=binned_out,
             )     
             spec_names = batch["names"]

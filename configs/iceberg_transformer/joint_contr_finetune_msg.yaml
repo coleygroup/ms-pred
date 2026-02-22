@@ -38,6 +38,7 @@ universal_args:
   add-hs: [True]
   embed-adduct: [True]
   embed-collision: [True]
+  embed-instrument: [True]
   encode-forms: [True]
   inten-decoder-layers: [3]
   inten-encoder-layers: [3]

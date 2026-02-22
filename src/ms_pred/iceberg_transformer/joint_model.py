@@ -24,7 +24,6 @@ import numpy as np
 from ms_pred.iceberg_transformer.dataset import TreeProcessor
 import dgl
 from rdkit import Chem  # type: ignore
-from ms_pred.common import CompositeMassSpec, bin_spectra
 import functools
 
 class JointModel(pl.LightningModule):
@@ -40,6 +39,7 @@ class JointModel(pl.LightningModule):
             embed_adduct: bool = False,
             embed_collision: bool = False,
             embed_elem_group: bool = False,
+            embed_instrument: bool = False, 
             encode_forms: bool = False,
             linsat_tau: float = 0.01,
             max_broken_bonds: int = 6,
@@ -83,6 +83,7 @@ class JointModel(pl.LightningModule):
         self.embed_collision = embed_collision
         self.embed_elem_group = embed_elem_group
         self.encode_forms = encode_forms
+        self.embed_instrument = embed_instrument
         self.linsat_tau = linsat_tau
         self.max_broken_bonds = max_broken_bonds
         self.pe_embed_k = pe_embed_k
@@ -102,6 +103,14 @@ class JointModel(pl.LightningModule):
         self.graphormer_layers = graphormer_layers
         self.hidden_size=hidden_size
         self.nhead=8
+
+
+        self.tree_processor = TreeProcessor(
+            pe_embed_k=pe_embed_k,
+            root_encode="graphormer",
+            embed_elem_group=embed_elem_group,
+            multi_hop_max_dist=multi_hop_max_dist,
+        )
 
         if self.embed_adduct:
             adduct_types = len(set(common.ion2onehot_pos.values()))
@@ -131,9 +140,16 @@ class JointModel(pl.LightningModule):
 
             self.collision_embed_merged = nn.Parameter(torch.zeros(pe_dim))
             self.collision_embed_merged.requires_grad = False
-        self.cos_fn = nn.CosineSimilarity()
+
+        instrument_shift = 0
+        if self.embed_instrument:
+            instrument_types = len(set(common.instrument2onehot_pos.values()))
+            onehot_types = torch.eye(instrument_types)
+            self.instrument_embedder = nn.Parameter(onehot_types.float())
+            self.instrument_embedder.requires_grad = False
+            instrument_shift = instrument_types
         self.root_module = GraphormerGraphEncoder(
-            num_atom_features=node_feats+adduct_shift+collision_shift,
+            num_atom_features=node_feats+adduct_shift+collision_shift+instrument_shift,
             num_degree=8,  # Sufficient for molecular graphs
             num_edge_features=edge_feats, 
             num_spatial=1025,  # spatial_pos_max + 1 for padding
@@ -143,7 +159,7 @@ class JointModel(pl.LightningModule):
             num_encoder_layers=self.graphormer_layers,  # Use layers parameter
             embedding_dim=self.hidden_size,
             ffn_embedding_dim=4*self.hidden_size,
-            num_attention_heads=8,
+            num_attention_heads=self.nhead,
             dropout=self.graphormer_dropout,
             attention_dropout=self.graphormer_dropout,
             activation_dropout=self.graphormer_dropout,
@@ -205,6 +221,7 @@ class JointModel(pl.LightningModule):
         self.output_size = (self.max_broken_bonds) * 2 + 1
         self.output_map = nn.Linear(self.hidden_size, self.output_size * 2)
         self.isomer_attn_out = copy.deepcopy(self.output_map)
+        self.cos_fn = nn.CosineSimilarity()
         self.inten_weight = inten_weight
         self.frag_weight = frag_weight
         self.magma_warmup_steps = magma_warmup_steps
@@ -233,7 +250,7 @@ class JointModel(pl.LightningModule):
         else:
             raise NotImplementedError()
 
-    def molecular_embedding(self, adducts, collision_engs, graphormer_input=None):
+    def molecular_embedding(self, adducts, collision_engs, graphormer_input=None, instruments=None):
         embed_adducts = self.adduct_embedder[adducts.long()]
         batch_size = collision_engs.shape[0]
         # Use Graphormer for encoding
@@ -268,6 +285,11 @@ class JointModel(pl.LightningModule):
                 embed_collision_expanded = embed_collision.unsqueeze(1).expand(batch_size, max_nodes, -1)
                 node_features = torch.cat([node_features, embed_collision_expanded], dim=-1)
             
+            if self.embed_instrument:
+                embed_instruments = self.instrument_embedder[instruments.long()]
+                embed_instruments_expanded = embed_instruments.unsqueeze(1).expand(batch_size, max_nodes, -1)
+                node_features = torch.cat([node_features, embed_instruments_expanded], dim=-1)
+
             # Update the modified graphormer input with enriched node features
             graphormer_input['x'] = node_features
             
@@ -346,7 +368,7 @@ class JointModel(pl.LightningModule):
         fragment_form_vecs_flat = torch.sum(masked_form_vecs, dim=1)  # [N1, form_dim]
         
         # Reshape back to batch format [B, max_frags, form_dim]
-        max_frags = max(num_frag_targs).item()
+        max_frags = frag_targs_padded.shape[1]
         fragment_form_vecs = nn_utils.pad_packed_tensor(fragment_form_vecs_flat, num_frag_targs, 0)
         root_tokens_expanded = root_tokens.expand(batch_size, max_frags, self.hidden_size)
         diffs = root_form_vecs[:, None, :] - fragment_form_vecs
@@ -455,51 +477,188 @@ class JointModel(pl.LightningModule):
         return {"output_binned": output_binned, "output": output_unbinned}
 
     def forward(self, graphormer_input, num_atoms, adducts, collision_engs, root_form_vecs, masses, 
-                adduct_mass_shifts, atom_form_vecs, adj_matrices, atom_hs, total_hs, 
+                adduct_mass_shifts, atom_form_vecs, adj_matrices, atom_hs, total_hs, instruments=None,
                 include_magma=False, frag_targs=None, num_frag_targs=None, is_decoy=False):
-        mol_embeddings = self.molecular_embedding(adducts, collision_engs, graphormer_input=graphormer_input)
+        mol_embeddings = self.molecular_embedding(adducts, collision_engs, graphormer_input=graphormer_input, instruments=instruments)
         root_tokens = mol_embeddings["root_tokens"]
         node_embeddings = mol_embeddings["node_embeddings"]
         if not is_decoy:
             breakpoints_pred = self.breakpoint_forward(node_embeddings, root_tokens, num_atoms, root_form_vecs)
         else:
-            with torch.inference_mode():
+            with torch.no_grad():
                 breakpoints_pred = self.breakpoint_forward(node_embeddings, root_tokens, num_atoms, root_form_vecs)
-        inten_pred_magma = self.inten_calculation(
-                                root_tokens,
-                                node_embeddings,
-                                frag_targs,
-                                num_frag_targs,
-                                root_form_vecs,
-                                atom_form_vecs,
-                                num_atoms, atom_hs, 
-                                total_hs, 
-                                adj_matrices, 
-                                adduct_mass_shifts,
-                                masses,
-                            ) if include_magma else None
         frag_logits = breakpoints_pred["frag_logits"][-1]
         frag_card_logits = breakpoints_pred["frag_card_logits"][-1]
-        with torch.inference_mode():
+        with torch.no_grad():
             breakpoints = self.breakpoint_inference(frag_logits, frag_card_logits, num_atoms)
             fragments, fragment_count = self.breakpoints_to_patterns(breakpoints, adj_matrices, num_atoms)
             fragments = nn_utils.pack_padded_tensor(fragments, fragment_count).bool()
-        inten_pred_end_to_end = self.inten_calculation(
-                                root_tokens,
-                                node_embeddings,
-                                fragments,
-                                fragment_count,
-                                root_form_vecs,
-                                atom_form_vecs,
-                                num_atoms, atom_hs, 
-                                total_hs, 
-                                adj_matrices, 
-                                adduct_mass_shifts,
-                                masses,
-                            )
+        if include_magma:
+            batch_size = root_tokens.shape[0]
+            all_frag_targs = torch.cat([frag_targs, fragments], dim=0)
+            root_tokens = root_tokens[None, :, :].expand(2, -1, 1, -1).reshape(-1, 1, root_tokens.shape[2])
+            node_embeddings = node_embeddings[None, :, :, :].expand(2, -1, -1, -1).reshape(-1, node_embeddings.shape[1], node_embeddings.shape[2])
+            all_num_frag_targs = torch.cat([num_frag_targs, fragment_count], dim=0)
+            root_form_vecs = root_form_vecs[None, :, :].expand(2, -1, -1).reshape(-1, root_form_vecs.shape[1])
+            atom_form_vecs = atom_form_vecs[None, :, :].expand(2, -1, -1).reshape(-1, atom_form_vecs.shape[1])
+            num_atoms = num_atoms[None, :].expand(2, -1).reshape(-1)
+            atom_hs = atom_hs[None, :, :].expand(2, -1, -1).reshape(-1, atom_hs.shape[1])
+            total_hs = total_hs[None, :].expand(2, -1).reshape(-1)
+            adj_matrices = adj_matrices[None, :, :, :].expand(2, -1, -1, -1).reshape(-1, adj_matrices.shape[1], adj_matrices.shape[2])
+            adduct_mass_shifts = adduct_mass_shifts[None, :, :].expand(2, -1, -1).reshape(-1, adduct_mass_shifts.shape[1])
+            masses = masses[None, :, :].expand(2, -1, -1).reshape(-1, masses.shape[1])
+            inten_pred = self.inten_calculation(
+                root_tokens,
+                node_embeddings,
+                all_frag_targs,
+                all_num_frag_targs,
+                root_form_vecs,
+                atom_form_vecs,
+                num_atoms, atom_hs,
+                total_hs,
+                adj_matrices,
+                adduct_mass_shifts,
+                masses,
+            )
+            inten_pred_magma = {k: v[:batch_size] for k, v in inten_pred.items()}
+            inten_pred_end_to_end = {k: v[batch_size:] for k, v in inten_pred.items()}
+        else:
+            inten_pred_magma=None
+            inten_pred_end_to_end = self.inten_calculation(
+                                    root_tokens,
+                                    node_embeddings,
+                                    fragments,
+                                    fragment_count,
+                                    root_form_vecs,
+                                    atom_form_vecs,
+                                    num_atoms, atom_hs, 
+                                    total_hs, 
+                                    adj_matrices, 
+                                    adduct_mass_shifts,
+                                    masses,
+                                )
         frags_pred = {"fragments":fragments, "fragment_count":fragment_count}
         return {"breakpoints_pred":breakpoints_pred, "inten_pred_end_to_end":inten_pred_end_to_end, "inten_pred_magma":inten_pred_magma, "frags_pred":frags_pred}
     
+    def node_ranking(self, breakpoint_logit, num_atoms):
+        B, N, N_atom = breakpoint_logit.shape
+        n_atom_mask = torch.arange(N_atom, device=breakpoint_logit.device).unsqueeze(0) >= num_atoms.unsqueeze(1)  # [B, N_atom]
+        dummy_val = -1e9
+        breakpoint_logit = breakpoint_logit.masked_fill(n_atom_mask.unsqueeze(1), dummy_val)
+        breakpoint_logit = breakpoint_logit.reshape(B * N, N_atom)
+        E = torch.ones((1, N_atom), device=breakpoint_logit.device)
+        f_1 = torch.ones((1,), device=breakpoint_logit.device)
+        f_2 = torch.full_like(f_1, 2)
+        f_3 = torch.full_like(f_1, 3)
+        output_logit_1 = linsat_layer(breakpoint_logit, E=E, f=f_1, no_warning=True, max_iter=1, tau=self.linsat_tau).reshape(B, N, N_atom)
+        output_logit_2 = linsat_layer(breakpoint_logit, E=E, f=f_2, no_warning=True, max_iter=1, tau=self.linsat_tau).reshape(B, N, N_atom)
+        output_logit_3 = linsat_layer(breakpoint_logit, E=E, f=f_3, no_warning=True, max_iter=1, tau=self.linsat_tau).reshape(B, N, N_atom)
+        logit_0 = torch.zeros_like(output_logit_1)
+        logits = torch.stack([logit_0, output_logit_1, output_logit_2, output_logit_3], dim=-1)
+        # breakpoint_preds = torch.sum(breakpoint_card.unsqueeze(2) * logits, dim=-1)
+        # loss = torch.sum((breakpoint_preds.unsqueeze(2) - breakpoint_targs.unsqueeze(1)) ** 2, dim=-1)
+        # return {"loss":loss, "preds":breakpoint_preds}
+        return logits
+
+    def breakpoint_inference(self, breakpoint_logit, breakpoint_card, num_atoms, debug=False):
+        """
+        Returns a binary tensor of shape [B, N, N_atom] with k positive entries per last axis,
+        where k is the predicted cardinality for each pattern (from breakpoint_card).
+        Batchified implementation.
+        """
+        logits = self.node_ranking(breakpoint_logit, num_atoms)  # [B, N, N_atom, 4]
+        B, N, N_atom, _ = logits.shape
+        k = torch.argmax(breakpoint_card, dim=-1)  # [B, N]
+        breakpoint_preds = torch.gather(logits, index=k[:, :, None, None].expand(B, N, N_atom, 1), dim=-1).squeeze(-1)  # [B, N, N_atom]
+        # Flatten for batch processing
+        flat_preds = breakpoint_preds.reshape(-1, N_atom)  # [(B*N), N_atom]
+        flat_k = k.reshape(-1)  # [(B*N)]
+        patterns = torch.zeros_like(flat_preds, dtype=torch.bool)  # [(B*N), N_atom]
+        max_flat_k = flat_k.max().item()
+        if max_flat_k > 0:
+            topk_vals, topk_idx = torch.topk(flat_preds, k=max_flat_k, dim=-1)
+            arange_k = torch.arange(max_flat_k, device=breakpoint_preds.device).unsqueeze(0)  # [1, max_k]
+            valid_mask = arange_k < flat_k.unsqueeze(1)  # [(B*N), max_k]
+            batch_idx = torch.arange(flat_preds.shape[0], device=breakpoint_preds.device).unsqueeze(1).expand(-1, max_flat_k)  # [(B*N), max_k]
+            patterns[batch_idx[valid_mask], topk_idx[valid_mask]] = True
+        out = patterns.view(B, N, N_atom)
+        return out
+    
+    def breakpoints_to_patterns(self, mask, A, num_nodes=None):
+        B, M, N = mask.shape
+        BM = B * M
+
+        # Base adjacency expansion (B*M, N, N)
+        A_exp = A.unsqueeze(1).expand(-1, M, -1, -1).reshape(BM, N, N)
+        mask_exp = mask.reshape(BM, N)
+
+        # Compute reachability matrix R for each masked adjacency (boolean closure)
+        R = self.compute_reachability(A_exp, mask_exp, num_nodes=num_nodes)  # shape (BM, N, N), dtype=bool
+
+        # Create batch index that stays constant across M patterns
+        batch_ids = torch.arange(B, device=R.device).repeat_interleave(M)  # (BM,)
+
+        # Expand per node
+        batch_idx = batch_ids.unsqueeze(1).expand(-1, N)  # (BM, N)
+
+        # Append batch index as first bit
+        row_repr = torch.cat([
+            batch_idx.unsqueeze(-1).to(torch.int64),   # (BM, N, 1)
+            R.to(torch.int64)                          # (BM, N, N)
+        ], dim=-1)  # (BM, N, N+1)
+
+        # Flatten rows to (BM*N, N+1)
+        flat_rows = row_repr.view(BM*N, N+1)
+
+        # Unique per batch (batch id is part of the row)
+        unique_rows, inv = torch.unique(flat_rows, dim=0, return_inverse=True)
+        is_empty = (unique_rows[:, 1:].sum(dim=-1) == 0)
+        unique_rows = unique_rows[~is_empty]
+        batch_ids_unique = unique_rows[:, 0]
+        pattern_counts = torch.bincount(batch_ids_unique, minlength=B)
+        padded_pattern = nn_utils.pad_packed_tensor(
+            unique_rows[:, 1:], pattern_counts, 0
+        )  # (B, max_patterns, N)
+        return padded_pattern, pattern_counts
+    
+    def compute_reachability(self, A: torch.Tensor, mask: torch.Tensor = None, num_nodes: torch.Tensor = None) -> torch.Tensor:
+        """
+        Compute transitive closure (reachability matrix) for a batch of adjacency matrices.
+
+        Args:
+            A: (B, N, N) adjacency matrices (bool or int)
+            mask: (B, N) boolean tensor of nodes to keep (optional)
+                If provided, edges touching unkept nodes will be zeroed out.
+
+        Returns:
+            R: (B, N, N) boolean reachability matrices,
+            where R[b,i,j] == True means node i can reach node j (including itself).
+        """
+        device = A.device
+        B, N, _ = A.shape
+        A = A > 0
+        # mask out removed nodes (optional)
+        if mask is not None:
+            row_mask = mask.unsqueeze(-1)
+            col_mask = mask.unsqueeze(-2)
+            A = A & ~row_mask & ~col_mask  # zero edges touching removed nodes
+
+
+        # Floyd-Warshall style reachability: A[i,j] = A[i,j] or (A[i,k] and A[k,j]) for all k
+        for k in range(N):
+            A = A | (A[:, :, k:k+1] & A[:, k:k+1, :])
+
+        if num_nodes is not None:
+            # mask out rows/cols beyond num_nodes
+            row_idx = torch.arange(N, device=device).unsqueeze(0)  # (1, N)
+            col_idx = torch.arange(N, device=device).unsqueeze(0)  # (1, N)
+            valid_row = row_idx < num_nodes.unsqueeze(1)  # (B, N)
+            valid_col = col_idx < num_nodes.unsqueeze(1)  # (B, N)
+            valid_matrix = valid_row.unsqueeze(-1) & valid_col.unsqueeze(-2)  # (B, N, N)
+            valid_matrix = torch.repeat_interleave(valid_matrix, repeats=A.shape[0]//valid_matrix.shape[0], dim=0)
+            A = A & valid_matrix
+
+        return A
 
     def _common_step(self, batch, name="train"):
         if "decoy" not in batch:
@@ -515,6 +674,7 @@ class JointModel(pl.LightningModule):
                 adj_matrices=batch["adj_matrices"],
                 atom_hs=batch["atom_hs"],
                 total_hs=batch["total_hs"],
+                instruments=batch["instruments"] if self.embed_instrument else None,
                 include_magma=name=="train",
                 frag_targs=batch["frag_targs"] if name=="train" else None,
                 num_frag_targs=batch["num_frag_targs"] if name=="train" else None,
@@ -589,6 +749,7 @@ class JointModel(pl.LightningModule):
                 adj_matrices=targ_batch["adj_matrices"],
                 atom_hs=targ_batch["atom_hs"],
                 total_hs=targ_batch["total_hs"],
+                instruments=targ_batch["instruments"] if self.embed_instrument else None,
                 include_magma=False,
                 frag_targs=None,
                 num_frag_targs=None,
@@ -605,6 +766,7 @@ class JointModel(pl.LightningModule):
                 adj_matrices=decoy_batch["adj_matrices"],
                 atom_hs=decoy_batch["atom_hs"],
                 total_hs=decoy_batch["total_hs"],
+                instruments=decoy_batch["instruments"] if self.embed_instrument else None,
                 include_magma=False,
                 is_decoy=True,
                 frag_targs=None,
@@ -713,7 +875,7 @@ class JointModel(pl.LightningModule):
         # For LambdaLR, just call step() without arguments
         scheduler.step()
 
-    def predict_mol(self, smi, collision_eng, adduct, device, binned_out=False):
+    def predict_mol(self, smi, collision_eng, adduct, device, instrument=None, binned_out=False):
         self.eval()
         self.freeze()
         root_smi = smi
@@ -723,8 +885,12 @@ class JointModel(pl.LightningModule):
             collision_eng = [collision_eng]
             precursor_mz = [precursor_mz]
             adduct = [adduct]
+            if self.embed_instrument:
+                instrument = [instrument]
         else:
             batched_input = True
+        instruments = to_tensor([common.instrument2onehot_pos[i] for i in instrument]) if self.embed_instrument else None
+
         batch_size = len(root_smi)
         to_tensor = lambda x: torch.tensor(x, device=device, dtype=torch.float) if x is not None else x
         adducts = to_tensor([common.ion2onehot_pos[a] for a in adduct])
@@ -797,6 +963,7 @@ class JointModel(pl.LightningModule):
                 adj_matrices=adj_matrices_batch,
                 atom_hs=atom_hs_padded,
                 total_hs=total_hs,
+                instruments=instruments if self.embed_instrument else None,
             )
             out=pred["inten_pred_end_to_end"]
             frags_pred = pred["frags_pred"]
@@ -845,7 +1012,7 @@ class JointModel(pl.LightningModule):
                 return {k: v[0] for k, v in out.items()}
     
     def predict_inten(self, graphormer_input, num_atoms, adducts, collision_engs, root_form_vecs, masses, 
-                adduct_mass_shifts, atom_form_vecs, adj_matrices, atom_hs, total_hs, binned_out=False):
+                adduct_mass_shifts, atom_form_vecs, adj_matrices, atom_hs, total_hs, instruments=None, binned_out=False):
         predict_obj = self.forward(graphormer_input, 
                         num_atoms, adducts, 
                         collision_engs, 
@@ -855,7 +1022,8 @@ class JointModel(pl.LightningModule):
                         atom_form_vecs, 
                         adj_matrices, 
                         atom_hs, 
-                        total_hs
+                        total_hs,
+                        instruments=instruments if self.embed_instrument else None,
                     )
         out = predict_obj["inten_pred_end_to_end"]
         num_frag_targs = predict_obj["frags_pred"]["fragment_count"]
@@ -910,11 +1078,12 @@ class JointModel(pl.LightningModule):
         flat_preds = breakpoint_preds.reshape(-1, N_atom)  # [(B*N), N_atom]
         flat_k = k.reshape(-1)  # [(B*N)]
         patterns = torch.zeros_like(flat_preds, dtype=torch.bool)  # [(B*N), N_atom]
-        if flat_k.max().item() > 0:
-            topk_vals, topk_idx = torch.topk(flat_preds, k=flat_k.max().item(), dim=-1)
-            arange_k = torch.arange(flat_k.max().item(), device=breakpoint_preds.device).unsqueeze(0)  # [1, max_k]
+        max_flat_k = flat_k.max().item()
+        if max_flat_k > 0:
+            topk_vals, topk_idx = torch.topk(flat_preds, k=max_flat_k, dim=-1)
+            arange_k = torch.arange(max_flat_k, device=breakpoint_preds.device).unsqueeze(0)  # [1, max_k]
             valid_mask = arange_k < flat_k.unsqueeze(1)  # [(B*N), max_k]
-            batch_idx = torch.arange(flat_preds.size(0), device=breakpoint_preds.device).unsqueeze(1).expand(-1, flat_k.max().item())  # [(B*N), max_k]
+            batch_idx = torch.arange(flat_preds.shape[0], device=breakpoint_preds.device).unsqueeze(1).expand(-1, max_flat_k)  # [(B*N), max_k]
             patterns[batch_idx[valid_mask], topk_idx[valid_mask]] = True
         out = patterns.view(B, N, N_atom)
         return out
@@ -978,26 +1147,10 @@ class JointModel(pl.LightningModule):
             col_mask = mask.unsqueeze(-2)
             A = A & ~row_mask & ~col_mask  # zero edges touching removed nodes
 
-        # initialize reachability
-        R = A.clone()
 
-        # iterative doubling to compute closure efficiently
-        # after log2(N) iterations, R will contain all reachabilities
-        step = 1
-        while step < N:
-            # boolean matmul: (R @ R) > 0
-            RR = (R.float() @ R.float()) > 0
-            R = R | RR
-            step *= 2
-
-        # add self-reachability
-        # eye = torch.eye(N, dtype=torch.bool, device=device).unsqueeze(0)
-        # R = R | eye
-
-        # if mask is not None:
-        #     row_mask = mask.unsqueeze(-1)
-        #     col_mask = mask.unsqueeze(-2)
-        #     A = A & ~row_mask & ~col_mask  # zero edges touching removed nodes
+        # Floyd-Warshall style reachability: A[i,j] = A[i,j] or (A[i,k] and A[k,j]) for all k
+        for k in range(N):
+            A = A | (A[:, :, k:k+1] & A[:, k:k+1, :])
 
         if num_nodes is not None:
             # mask out rows/cols beyond num_nodes
@@ -1006,10 +1159,11 @@ class JointModel(pl.LightningModule):
             valid_row = row_idx < num_nodes.unsqueeze(1)  # (B, N)
             valid_col = col_idx < num_nodes.unsqueeze(1)  # (B, N)
             valid_matrix = valid_row.unsqueeze(-1) & valid_col.unsqueeze(-2)  # (B, N, N)
-            valid_matrix = torch.repeat_interleave(valid_matrix, repeats=R.shape[0]//valid_matrix.shape[0], dim=0)
-            R = R & valid_matrix
+            valid_matrix = torch.repeat_interleave(valid_matrix, repeats=A.shape[0]//valid_matrix.shape[0], dim=0)
+            A = A & valid_matrix
 
-        return R
+        # return 
+        return A
 
     def cross_entropy(self, preds, targets, weights=None, normalized=True):
         if normalized:
@@ -1022,41 +1176,74 @@ class JointModel(pl.LightningModule):
         cross_entropy = -torch.sum(loss, dim=-1)
         return cross_entropy
     
-    def boundary_nodes(self, A: torch.Tensor, subgraph_mask: torch.Tensor) -> torch.Tensor:
+    def boundary_nodes(self, A: torch.Tensor, subgraph_mask: torch.Tensor):
         """
-        A: (B, N, N) adjacency matrices
-        subgraph_mask: (B, M, N) boolean mask for M subgraphs per graph
-        
-        Returns:
-            boundary_mask: (B, M, N) boolean mask of boundary nodes for each subgraph
+        A: (B, N, N) bool
+        subgraph_mask: (B, M, N) bool
         """
+
         B, N, _ = A.shape
         _, M, _ = subgraph_mask.shape
-        
-        # Reshape adjacency for broadcasting: (B, 1, N, N)
-        A_exp = A.unsqueeze(1)  
-        
-        # (B, M, N) -> (B, M, 1, N)
-        subgraph_mask_exp = subgraph_mask.float().unsqueeze(2)
-        
-        # Matrix multiplication: (B, M, 1, N) x (B, 1, N, N) -> (B, M, 1, N)
-        neighbors = torch.matmul(subgraph_mask_exp, A_exp) > 0
-        neighbors = neighbors.squeeze(2)  # (B, M, N)
-        
-        # Remove nodes already in subgraph
-        boundary_mask = neighbors & ~subgraph_mask
-        # Count boundary nodes per fragment and assert the maximum is reasonable
-        max_boundary_nodes = int(boundary_mask.sum(dim=-1).max().item())
-        assert max_boundary_nodes <= 3, max_boundary_nodes
-        batch_num = torch.arange(B, device=A.device, dtype=torch.float32)[:, None, None].expand(B, M, 1)
-        boundary_mask_batch_num = torch.cat([batch_num, boundary_mask], dim=-1).reshape(B*M, -1)
-        boundary_mask_batch_num_unique = torch.unique(boundary_mask_batch_num, dim=0, sorted=True)
-        batch_num_unique = torch.bincount(boundary_mask_batch_num_unique[:, 0].to(torch.int64), minlength=B)
-        boundary_mask = nn_utils.pad_packed_tensor(
-            boundary_mask_batch_num_unique[:, 1:], batch_num_unique, 0
+        device = A.device
+
+        neighbors = (subgraph_mask.unsqueeze(-1) & A.unsqueeze(1)).any(dim=2)
+        boundary_mask = neighbors & ~subgraph_mask  # (B, M, N)
+
+        chunk_size = 64
+        num_chunks = (N + chunk_size - 1) // chunk_size
+
+        padded_N = num_chunks * chunk_size
+        pad_width = padded_N - N
+
+        if pad_width > 0:
+            boundary_mask = torch.nn.functional.pad(boundary_mask, (0, pad_width))
+
+        boundary_mask = boundary_mask.view(B, M, num_chunks, chunk_size)
+
+        powers = (1 << torch.arange(chunk_size, device=device, dtype=torch.int64))
+        chunks = (boundary_mask.to(torch.int64) * powers).sum(dim=-1)  # (B, M, num_chunks)
+
+        batch_ids = torch.arange(B, device=device).view(B, 1, 1).expand(B, M, 1)
+        combined = torch.cat([batch_ids, chunks], dim=-1)  # (B, M, 1+num_chunks)
+
+        combined_flat = combined.view(-1, 1 + num_chunks)
+
+        unique_combined = torch.unique(combined_flat, dim=0)
+
+        unique_batch_ids = unique_combined[:, 0]
+        unique_chunks = unique_combined[:, 1:]
+
+        unique_boundary_patterns = torch.bincount(
+            unique_batch_ids,
+            minlength=B
         )
-        return {"boundary_mask": boundary_mask, "unique_boundary_patterns":batch_num_unique}
-    
+
+        bits = (unique_chunks.unsqueeze(-1) & powers) > 0
+        recovered = bits.view(-1, padded_N)[..., :N]  # remove padding
+
+        max_unique = unique_boundary_patterns.max().item()
+
+        boundary_mask_out = torch.zeros(
+            B, max_unique, N,
+            dtype=torch.float,
+            device=device
+        )
+
+        counts = unique_boundary_patterns
+        offsets = torch.cumsum(counts, dim=0)
+        starts = offsets - counts
+
+        row_indices = (
+            torch.arange(unique_batch_ids.shape[0], device=device)
+            - starts[unique_batch_ids]
+        )
+
+        boundary_mask_out[unique_batch_ids, row_indices] = recovered.float()
+
+        return {
+            "boundary_mask": boundary_mask_out,
+            "unique_boundary_patterns": unique_boundary_patterns
+        }
     def frag_loss(
         self,
         frags_predicted: torch.Tensor,
@@ -1076,7 +1263,7 @@ class JointModel(pl.LightningModule):
         frag_targs_padded_original = nn_utils.pad_packed_tensor(
             frag_targs, num_frag_targs, False
         )[:, :, :]  # [B, max_targs-1, max_nodes]
-        boundary_info = self.boundary_nodes(adj_matrices, frag_targs_padded_original)
+        boundary_info = self.boundary_nodes(adj_matrices>0, frag_targs_padded_original)
         frag_targs_padded = boundary_info["boundary_mask"]
         num_frag_targs = boundary_info["unique_boundary_patterns"]
 

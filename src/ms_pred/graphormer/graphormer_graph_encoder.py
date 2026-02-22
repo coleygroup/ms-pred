@@ -14,7 +14,6 @@ import torch.nn as nn
 from .multihead_attention import MultiheadAttention
 from .graphormer_layers import GraphNodeFeature, GraphAttnBias
 from .graphormer_graph_encoder_layer import GraphormerGraphEncoderLayer
-from .fairseq_replacements import FairseqDropout, LayerDropModuleList, LayerNorm, apply_quant_noise_
 
 
 def init_graphormer_params(module):
@@ -36,10 +35,7 @@ def init_graphormer_params(module):
         if module.padding_idx is not None:
             module.weight.data[module.padding_idx].zero_()
     if isinstance(module, MultiheadAttention):
-        normal_(module.q_proj.weight.data)
-        normal_(module.k_proj.weight.data)
-        normal_(module.v_proj.weight.data)
-
+        normal_(module.qkv_proj.weight.data)
 
 class GraphormerGraphEncoder(nn.Module):
     def __init__(
@@ -58,7 +54,6 @@ class GraphormerGraphEncoder(nn.Module):
         dropout: float = 0.1,
         attention_dropout: float = 0.1,
         activation_dropout: float = 0.1,
-        layerdrop: float = 0.0,
         encoder_normalize_before: bool = False,
         pre_layernorm: bool = False,
         apply_graphormer_init: bool = False,
@@ -66,17 +61,11 @@ class GraphormerGraphEncoder(nn.Module):
         embed_scale: float = None,
         freeze_embeddings: bool = False,
         n_trans_layers_to_freeze: int = 0,
-        export: bool = False,
         traceable: bool = False,
-        q_noise: float = 0.0,
-        qn_block_size: int = 8,
     ) -> None:
 
         super().__init__()
-        self.dropout_module = FairseqDropout(
-            dropout, module_name=self.__class__.__name__
-        )
-        self.layerdrop = layerdrop
+        self.dropout = nn.Dropout(dropout)
         self.embedding_dim = embedding_dim
         self.apply_graphormer_init = apply_graphormer_init
         self.traceable = traceable
@@ -103,40 +92,25 @@ class GraphormerGraphEncoder(nn.Module):
 
         self.embed_scale = embed_scale
 
-        if q_noise > 0:
-            self.quant_noise = apply_quant_noise_(
-                nn.Linear(self.embedding_dim, self.embedding_dim, bias=False),
-                q_noise,
-                qn_block_size,
-            )
-        else:
-            self.quant_noise = None
-
         if encoder_normalize_before:
-            self.emb_layer_norm = LayerNorm(self.embedding_dim, export=export)
+            self.emb_layer_norm = nn.LayerNorm(self.embedding_dim)
         else:
             self.emb_layer_norm = None
 
         if pre_layernorm:
-            self.final_layer_norm = LayerNorm(self.embedding_dim, export=export)
+            self.final_layer_norm = nn.LayerNorm(self.embedding_dim)
 
-        if self.layerdrop > 0.0:
-            self.layers = LayerDropModuleList(p=self.layerdrop)
-        else:
-            self.layers = nn.ModuleList([])
+        self.layers = nn.ModuleList([])
         self.layers.extend(
             [
                 self.build_graphormer_graph_encoder_layer(
                     embedding_dim=self.embedding_dim,
                     ffn_embedding_dim=ffn_embedding_dim,
                     num_attention_heads=num_attention_heads,
-                    dropout=self.dropout_module.p,
+                    dropout=dropout,
                     attention_dropout=attention_dropout,
                     activation_dropout=activation_dropout,
                     activation_fn=activation_fn,
-                    export=export,
-                    q_noise=q_noise,
-                    qn_block_size=qn_block_size,
                     pre_layernorm=pre_layernorm,
                 )
                 for _ in range(num_encoder_layers)
@@ -167,9 +141,6 @@ class GraphormerGraphEncoder(nn.Module):
         attention_dropout,
         activation_dropout,
         activation_fn,
-        export,
-        q_noise,
-        qn_block_size,
         pre_layernorm,
     ):
         return GraphormerGraphEncoderLayer(
@@ -180,9 +151,6 @@ class GraphormerGraphEncoder(nn.Module):
             attention_dropout=attention_dropout,
             activation_dropout=activation_dropout,
             activation_fn=activation_fn,
-            export=export,
-            q_noise=q_noise,
-            qn_block_size=qn_block_size,
             pre_layernorm=pre_layernorm,
         )
 
@@ -192,7 +160,6 @@ class GraphormerGraphEncoder(nn.Module):
         perturb=None,
         last_state_only: bool = False,
         token_embeddings: Optional[torch.Tensor] = None,
-        attn_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         is_tpu = False
 
@@ -213,13 +180,10 @@ class GraphormerGraphEncoder(nn.Module):
         if self.embed_scale is not None:
             x = x * self.embed_scale
 
-        if self.quant_noise is not None:
-            x = self.quant_noise(x)
-
         if self.emb_layer_norm is not None:
             x = self.emb_layer_norm(x)
 
-        x = self.dropout_module(x)
+        x = self.dropout(x)
 
         # account for padding while computing the representation
 
@@ -231,9 +195,8 @@ class GraphormerGraphEncoder(nn.Module):
             inner_states.append(x)
 
         for layer in self.layers:
-            x, _ = layer(
+            x = layer(
                 x,
-                self_attn_mask=attn_mask,
                 self_attn_bias=attn_bias,
             )
             if not last_state_only:
