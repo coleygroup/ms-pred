@@ -84,9 +84,13 @@ def add_joint_train_args(parser):
     # Other params
     parser.add_argument("--inten-weight", default=1, type=float)
     parser.add_argument("--frag-weight", default=0.1, type=float)
+    parser.add_argument("--magma-warmup-steps", default=100, type=int)
+    parser.add_argument("--magma-decay-rate", default=0.1, type=float)
+    parser.add_argument("--magma-decay-steps", default=5000, type=int)
 
     parser.add_argument("--warmup", default=1000, action="store", type=int)
     parser.add_argument("--binned-targs", default=False, action="store_true")
+    parser
     parser.add_argument(
         "--inten-loss-fn",
         default="cosine",
@@ -107,7 +111,7 @@ def train_model():
     kwargs = args.__dict__
 
     save_dir = kwargs["save_dir"]
-    common.setup_logger(save_dir, log_name=f"joint_train_{kwargs['max_breakpoints']}.log", debug=kwargs["debug"])
+    common.setup_logger(save_dir, log_name=f"joint_train_fixed_{kwargs['max_breakpoints']}.log", debug=kwargs["debug"])
     pl.seed_everything(kwargs.get("seed"))
 
     # Dump args
@@ -250,6 +254,9 @@ def train_model():
         ppm_tol=kwargs["ppm_tol"],
         inten_weight=kwargs["inten_weight"],
         frag_weight = kwargs["frag_weight"],
+        magma_warmup_steps=kwargs["magma_warmup_steps"],
+        magma_decay_rate=kwargs["magma_decay_rate"],
+        magma_decay_steps=kwargs["magma_decay_steps"],
         lr=kwargs["learning_rate"],
         lr_decay_rate=kwargs["lr_decay_rate"],
         weight_decay=kwargs["weight_decay"],

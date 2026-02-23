@@ -2,7 +2,7 @@ launcher_args: {experiment_name: joint_train_nist20,
   script_name: "src/ms_pred/iceberg_transformer/train_joint.py",
   slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,
-  visible_devices: [1]
+  visible_devices: [2]
 }
 universal_args:
   _slurm_args:
@@ -41,7 +41,7 @@ universal_args:
   frag-encoder-layers: [0]
   frag-decoder-layers: [4]
   max-broken-bonds: [6]
-  max-breakpoints: [60]
+  max-breakpoints: [100]
   multi-hop-max-dist: [10]
   num-edge-dis: [10]
   enable-aux-loss: [True]
@@ -50,6 +50,9 @@ universal_args:
   linsat-tau: [15]
   inten-weight: [1]
   frag-weight: [0.1]
+  magma-warmup-steps: [5000]
+  magma-decay-rate: [0.9]
+  magma-decay-steps: [5000]
   warmup: [1000]
   binned-targs: [True]
   inten-loss-fn: [cosine]
