@@ -1063,8 +1063,8 @@ def api_retrieve_start():
             preloaded_spectra = build_preloaded_spectra_from_form_lists(
                 [spectrum_texts[i] for i in kept_indices],
                 [spectrum_nces[i] for i in kept_indices],
-                [spectrum_evs[i] for i in kept_indices],
-                [spectrum_nce_conts[i] for i in kept_indices],
+                [spectrum_evs[i] for i in kept_indices] if len(spectrum_evs) > 0 else [],
+                [spectrum_nce_conts[i] for i in kept_indices] if len(spectrum_nce_conts) > 0 else [],
                 [spectrum_modes[i] for i in kept_indices],
                 [spectrum_stepped_nces[i] for i in kept_indices],
             )
