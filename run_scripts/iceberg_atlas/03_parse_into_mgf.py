@@ -27,7 +27,7 @@ def read_pred(batch_path):
                         form_meta_spec[form] = []
 
                     form_meta_spec[form].append(({
-                        'CHARGE': '1+',
+                        'CHARGE': '1' + adduct[-1],
                         'PEPMASS': spec.parent_mass,
                         'DESCRIPTION': 'ICEBERG prediction',
                         'FORMULA': form,
