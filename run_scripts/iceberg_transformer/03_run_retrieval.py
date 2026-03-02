@@ -55,14 +55,14 @@ for test_entry in test_entries:
     split = test_entry['test_split']
     maxk = test_entry['max_k']
     model_dir = Path(f"results/joint_train_{dataset}")
-    joint_model = model_dir/train_split/"version_111/best.ckpt"
+    joint_model = model_dir/train_split/"version_207/best.ckpt"
     if not joint_model.exists():
         print(f"Could not find model {joint_model}; skipping\n: {json.dumps(test_entry, indent=1)}")
         continue
     
     labels = f"data/spec_datasets/{dataset}/retrieval/cands_df_{split}_{maxk}.tsv"
 
-    save_dir = joint_model.parent.parent / f"retrieval_{dataset}_{split}_{maxk}_entropy"
+    save_dir = joint_model.parent.parent / f"retrieval_{dataset}_{split}_{maxk}_debug"
     save_dir.mkdir(exist_ok=True)
 
     cmd = f"""python {pred_file} \\

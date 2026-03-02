@@ -27,6 +27,8 @@ from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 import ms_pred.common as common
 from ms_pred.iceberg_transformer.dataset import IntenDataset, TreeProcessor
 from ms_pred.iceberg_transformer.joint_model import JointModel
+from pytorch_lightning.strategies import DDPStrategy
+
 
 
 
@@ -63,6 +65,7 @@ def add_joint_train_args(parser):
     parser.add_argument("--inten-dropout", default=0.2, type=float)
     parser.add_argument("--frag-dropout", default=0.2, type=float)
     parser.add_argument("--embed-elem-group", default=True, action="store_true")
+    parser.add_argument("--embed-instrument", default=False, action="store_true")
     parser.add_argument("--add-hs", default=True, action="store_true")
     parser.add_argument("--embed-adduct", default=True, action="store_true")
     parser.add_argument("--embed-collision", default=True, action="store_true")
@@ -111,7 +114,7 @@ def train_model():
     kwargs = args.__dict__
 
     save_dir = kwargs["save_dir"]
-    common.setup_logger(save_dir, log_name=f"joint_train_fixed_{kwargs['max_breakpoints']}.log", debug=kwargs["debug"])
+    common.setup_logger(save_dir, log_name=f"joint_train_{kwargs['dataset_name']}.log", debug=kwargs["debug"])
     pl.seed_everything(kwargs.get("seed"))
 
     # Dump args
@@ -239,6 +242,7 @@ def train_model():
         embed_adduct=kwargs["embed_adduct"],
         embed_collision=kwargs["embed_collision"],
         embed_elem_group=embed_elem_group,
+        embed_instrument=kwargs["embed_instrument"],
         encode_forms=kwargs["encode_forms"],
         linsat_tau=kwargs["linsat_tau"],
         max_broken_bonds=kwargs["max_broken_bonds"],
@@ -289,7 +293,8 @@ def train_model():
     trainer = pl.Trainer(
         logger=[tb_logger, console_logger],
         accelerator="gpu" if kwargs["gpu"] else "cpu",
-        devices=1 if kwargs["gpu"] else 0,
+        strategy=DDPStrategy(find_unused_parameters=False),
+        devices=torch.cuda.device_count() if kwargs["gpu"] else 0,
         callbacks=callbacks,
         gradient_clip_val=5,
         min_epochs=kwargs["min_epochs"],

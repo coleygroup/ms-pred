@@ -619,6 +619,10 @@ class JointModel(pl.LightningModule):
         padded_pattern = nn_utils.pad_packed_tensor(
             unique_rows[:, 1:], pattern_counts, 0
         )  # (B, max_patterns, N)
+        debug_mask = torch.arange(mask.shape[-1], device=mask.device)[None, :] < num_nodes[:, None]
+        debug_mask = torch.logical_and(debug_mask, pattern_counts[:, None]==0)
+        padded_pattern[:, 0, :] = torch.logical_or(padded_pattern[:, 0, :], debug_mask)
+        pattern_counts = torch.clamp(pattern_counts, min=1)
         return padded_pattern, pattern_counts
     
     def compute_reachability(self, A: torch.Tensor, mask: torch.Tensor = None, num_nodes: torch.Tensor = None) -> torch.Tensor:
@@ -704,6 +708,7 @@ class JointModel(pl.LightningModule):
                 inten_loss_fn = self.inten_loss_fn
                 end_to_end_inten_loss = inten_loss_fn(pred_inten, batch["inten_targs"], parent_mass=batch["precursor_mzs"])["loss"].mean()
                 magma_inten_loss = inten_loss_fn(pred_inten_magma, batch["inten_targs"], parent_mass=batch["precursor_mzs"])["loss"].mean()
+
                 breakpoints_pred = pred["breakpoints_pred"]
                 if self.enable_aux_loss:
                     frag_loss = 0
@@ -718,13 +723,16 @@ class JointModel(pl.LightningModule):
                         batch["frag_targs"], batch["num_frag_targs"], batch["num_atoms"], batch["adj_matrices"],
                     )
                 self.step += 1
-                self.log("train_end_to_end_inten_loss", end_to_end_inten_loss, batch_size=batch_size, on_epoch=True)
-                self.log("train_magma_inten_loss", magma_inten_loss, batch_size=batch_size, on_epoch=True)
-                self.log("train_frag_loss", frag_loss, batch_size=batch_size, on_epoch=True)
+                self.log("train_end_to_end_inten_loss", end_to_end_inten_loss, batch_size=batch_size, on_step=True)
+                self.log("train_magma_inten_loss", magma_inten_loss, batch_size=batch_size, on_step=True)
+                self.log("train_frag_loss", frag_loss, batch_size=batch_size, on_step=True)
                 
                 magma_weight = self.magma_weight_scheduler()
-                loss = self.inten_weight * (magma_weight * magma_inten_loss + (1-magma_weight)*end_to_end_inten_loss) + self.frag_weight * magma_weight * frag_loss
-                self.log("train_loss", loss, batch_size=batch_size, on_epoch=True)
+                if magma_weight == 1:
+                    loss = magma_inten_loss * self.inten_weight + self.frag_weight * frag_loss
+                else:
+                    loss = self.inten_weight * (magma_weight * magma_inten_loss + (1-magma_weight)*end_to_end_inten_loss) + self.frag_weight * magma_weight * frag_loss
+                self.log("train_loss", loss, batch_size=batch_size, on_step=True)
                 return {"loss":loss}
         else:
             batch_size = batch["num_decoys_per_entry"].shape[0]
@@ -1059,9 +1067,6 @@ class JointModel(pl.LightningModule):
         output_logit_3 = linsat_layer(breakpoint_logit, E=E, f=f_3, no_warning=True, max_iter=1, tau=self.linsat_tau).reshape(B, N, N_atom)
         logit_0 = torch.zeros_like(output_logit_1)
         logits = torch.stack([logit_0, output_logit_1, output_logit_2, output_logit_3], dim=-1)
-        # breakpoint_preds = torch.sum(breakpoint_card.unsqueeze(2) * logits, dim=-1)
-        # loss = torch.sum((breakpoint_preds.unsqueeze(2) - breakpoint_targs.unsqueeze(1)) ** 2, dim=-1)
-        # return {"loss":loss, "preds":breakpoint_preds}
         return logits
 
     def breakpoint_inference(self, breakpoint_logit, breakpoint_card, num_atoms, debug=False):
@@ -1087,83 +1092,6 @@ class JointModel(pl.LightningModule):
             patterns[batch_idx[valid_mask], topk_idx[valid_mask]] = True
         out = patterns.view(B, N, N_atom)
         return out
-    
-    def breakpoints_to_patterns(self, mask, A, num_nodes=None):
-        B, M, N = mask.shape
-        BM = B * M
-
-        # Base adjacency expansion (B*M, N, N)
-        A_exp = A.unsqueeze(1).expand(-1, M, -1, -1).reshape(BM, N, N)
-        mask_exp = mask.reshape(BM, N)
-
-        # Compute reachability matrix R for each masked adjacency (boolean closure)
-        R = self.compute_reachability(A_exp, mask_exp, num_nodes=num_nodes)  # shape (BM, N, N), dtype=bool
-
-        # Create batch index that stays constant across M patterns
-        batch_ids = torch.arange(B, device=R.device).repeat_interleave(M)  # (BM,)
-
-        # Expand per node
-        batch_idx = batch_ids.unsqueeze(1).expand(-1, N)  # (BM, N)
-
-        # Append batch index as first bit
-        row_repr = torch.cat([
-            batch_idx.unsqueeze(-1).to(torch.int64),   # (BM, N, 1)
-            R.to(torch.int64)                          # (BM, N, N)
-        ], dim=-1)  # (BM, N, N+1)
-
-        # Flatten rows to (BM*N, N+1)
-        flat_rows = row_repr.view(BM*N, N+1)
-
-        # Unique per batch (batch id is part of the row)
-        unique_rows, inv = torch.unique(flat_rows, dim=0, return_inverse=True)
-        is_empty = (unique_rows[:, 1:].sum(dim=-1) == 0)
-        unique_rows = unique_rows[~is_empty]
-        batch_ids_unique = unique_rows[:, 0]
-        pattern_counts = torch.bincount(batch_ids_unique, minlength=B)
-        padded_pattern = nn_utils.pad_packed_tensor(
-            unique_rows[:, 1:], pattern_counts, 0
-        )  # (B, max_patterns, N)
-        return padded_pattern, pattern_counts
-    
-    def compute_reachability(self, A: torch.Tensor, mask: torch.Tensor = None, num_nodes: torch.Tensor = None) -> torch.Tensor:
-        """
-        Compute transitive closure (reachability matrix) for a batch of adjacency matrices.
-
-        Args:
-            A: (B, N, N) adjacency matrices (bool or int)
-            mask: (B, N) boolean tensor of nodes to keep (optional)
-                If provided, edges touching unkept nodes will be zeroed out.
-
-        Returns:
-            R: (B, N, N) boolean reachability matrices,
-            where R[b,i,j] == True means node i can reach node j (including itself).
-        """
-        device = A.device
-        B, N, _ = A.shape
-        A = A > 0
-        # mask out removed nodes (optional)
-        if mask is not None:
-            row_mask = mask.unsqueeze(-1)
-            col_mask = mask.unsqueeze(-2)
-            A = A & ~row_mask & ~col_mask  # zero edges touching removed nodes
-
-
-        # Floyd-Warshall style reachability: A[i,j] = A[i,j] or (A[i,k] and A[k,j]) for all k
-        for k in range(N):
-            A = A | (A[:, :, k:k+1] & A[:, k:k+1, :])
-
-        if num_nodes is not None:
-            # mask out rows/cols beyond num_nodes
-            row_idx = torch.arange(N, device=device).unsqueeze(0)  # (1, N)
-            col_idx = torch.arange(N, device=device).unsqueeze(0)  # (1, N)
-            valid_row = row_idx < num_nodes.unsqueeze(1)  # (B, N)
-            valid_col = col_idx < num_nodes.unsqueeze(1)  # (B, N)
-            valid_matrix = valid_row.unsqueeze(-1) & valid_col.unsqueeze(-2)  # (B, N, N)
-            valid_matrix = torch.repeat_interleave(valid_matrix, repeats=A.shape[0]//valid_matrix.shape[0], dim=0)
-            A = A & valid_matrix
-
-        # return 
-        return A
 
     def cross_entropy(self, preds, targets, weights=None, normalized=True):
         if normalized:
@@ -1283,7 +1211,7 @@ class JointModel(pl.LightningModule):
         assign = pygm.hungarian(
             -cost, backend="pytorch", n2=num_frag_targs
         )  # [B, max_targs, max_breakpoints]
-       
+        
         node_rank_reshape = node_rank.reshape(B, max_breakpoints, -1)
         node_rank_assigned = torch.matmul(node_rank_reshape.transpose(1, 2), assign).transpose(1, 2)
         node_rank_assigned = node_rank_assigned.reshape(B, max_targs, max_nodes, -1)

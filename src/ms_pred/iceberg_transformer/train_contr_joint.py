@@ -72,6 +72,7 @@ def add_joint_train_args(parser):
     parser.add_argument("--add-hs", default=True, action="store_true")
     parser.add_argument("--embed-adduct", default=True, action="store_true")
     parser.add_argument("--embed-collision", default=True, action="store_true")
+    parser.add_argument("--embed-instrument", default=False, action="store_true")
     parser.add_argument("--encode-forms", default=True, action="store_true")
     parser.add_argument("--inten-decoder-layers", default=6, type=int)
     parser.add_argument("--inten-encoder-layers", default=6, type=int)
@@ -113,6 +114,7 @@ def add_joint_train_args(parser):
     )
     parser.add_argument("--pubchem-map-path", default='data/pubchem/pubchem_formulae_inchikey.hdf5')
     parser.add_argument("--num-decoys", default=3, type=int)
+    parser.add_argument("--num-fixed-decoys", default=7, action="store", type=int) 
     parser.add_argument("--all-decoy-nums", default=10, type=int)
     parser.add_argument("--grad-accumulate", default=1, type=int, action="store")
 
@@ -130,7 +132,7 @@ def train_model():
     kwargs = args.__dict__
 
     save_dir = kwargs["save_dir"]
-    common.setup_logger(save_dir, log_name="joint_train_entropy.log", debug=kwargs["debug"])
+    common.setup_logger(save_dir, log_name=f"joint_contr_finetune_decoy{kwargs['num_decoys']}_fixed_decoy{kwargs['num_fixed_decoys']}.log", debug=kwargs["debug"])
     pl.seed_everything(kwargs.get("seed"))
 
     # Dump args
@@ -170,6 +172,7 @@ def train_model():
     binned_targs = kwargs["binned_targs"]
     multi_hop_max_dist = kwargs["multi_hop_max_dist"]
     num_decoys = kwargs["num_decoys"]
+    num_fixed_decoys = kwargs["num_fixed_decoys"]
     pubchem_path = kwargs["pubchem_map_path"]
     all_decoy_nums = kwargs["all_decoy_nums"]
 
@@ -203,7 +206,7 @@ def train_model():
         embed_elem_group=embed_elem_group,
         tree_processor=tree_processor,
         datatype="HDF5",
-        num_decoys=num_decoys,
+        num_decoys=num_fixed_decoys,
         pubchem_path=pubchem_path,
         all_decoy_nums=all_decoy_nums,
         fix_decoys=True,  # Ensure val decoys are the same across epochs for consistent validation performance
@@ -217,7 +220,7 @@ def train_model():
         embed_elem_group=embed_elem_group,
         tree_processor=tree_processor,
         datatype="HDF5",
-        num_decoys=num_decoys,
+        num_decoys=num_fixed_decoys,
         pubchem_path=pubchem_path,
         all_decoy_nums=all_decoy_nums,
         fix_decoys=True,  # Ensure test decoys are the same across epochs for consistent test performance
@@ -272,6 +275,7 @@ def train_model():
         embed_adduct=kwargs["embed_adduct"],
         embed_collision=kwargs["embed_collision"],
         embed_elem_group=embed_elem_group,
+        embed_instrument=kwargs["embed_instrument"],
         encode_forms=kwargs["encode_forms"],
         linsat_tau=kwargs["linsat_tau"],
         max_broken_bonds=kwargs["max_broken_bonds"],
