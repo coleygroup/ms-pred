@@ -14,3 +14,4 @@ example reported in the paper on the identification of GABA-Arg, with step-by-st
   * ``iceberg_pesticide_kinetics.ipynb`` plots the kinetics of carbendazim 
   * ``iceberg_pooled_cn_coupling.ipynb`` plots the results for the pooled C-N coupling experiment
   * ``iceberg_withanolide_elucidation.ipynb`` plots the results for the biosynthesis pathway elucidation for withanolides
+  * ``sirius_eval_msnlib.ipynp`` plots the results for head-to-head comparison with SIRIUS on MSnLib
