@@ -477,7 +477,7 @@
 
                 const rank = cells[0].textContent.trim();
                 const similarity = cells[1].textContent.trim();
-                const formula = cells[2].textContent.trim();
+                const formula = cells[5].textContent.trim();
 
                 // use full SMILES from data-smiles if available
                 const smiles = row.getAttribute("data-smiles") ||
@@ -489,9 +489,9 @@
                 const inchikeyFull = inchikeyCell.getAttribute("data-inchikey") ||
                                      inchikeyCell.textContent.trim();
 
-                const adduct = cells[5].textContent.trim();
-                const collision = cells[6].textContent.trim();
-                const desc = cells[7].textContent.trim();
+                const adduct = cells[6].textContent.trim();
+                const collision = cells[7].textContent.trim();
+                const desc = cells[8].textContent.trim();
 
                 const values = [
                     rank,
