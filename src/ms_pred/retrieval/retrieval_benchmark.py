@@ -24,6 +24,31 @@ import pandas as pd
 import ms_pred.common as common
 
 
+_WORKER_PREDSPEC_DB = None
+
+
+def _read_and_bin_pred_spec_name(entry, pred_file: str, pool_fn: str = "add"):
+    global _WORKER_PREDSPEC_DB
+    if _WORKER_PREDSPEC_DB is None:
+        _WORKER_PREDSPEC_DB = common.PredSpecDB(h5_path=Path(pred_file), mode='r')
+
+    spec_name = entry
+    spec_dict, has_remark = _WORKER_PREDSPEC_DB.read_from_name(spec_name)
+    output = []
+
+    if not has_remark:
+        return output
+
+    for cand_ikey, ce_spec_dict in spec_dict.items():
+        pred_spec = {
+            ce: spec_data.bin_spectrum(pool_fn=pool_fn).astype(np.float32, copy=False)
+            for ce, spec_data in ce_spec_dict.items()
+            if 'nan' not in ce
+        }
+        output.append((pred_spec, cand_ikey.strip('ikey '), spec_name.strip('pred_')))
+    return output
+
+
 def get_args():
     """get_args."""
     parser = argparse.ArgumentParser()
@@ -45,6 +70,7 @@ def get_args():
     parser.add_argument("--upper-limit", default=1500, help="Largest m/z value")
     parser.add_argument("--binned-pred", action="store_true", default=False)
     parser.add_argument("--pool-fn", default="add", choices=["add", "max"])
+    parser.add_argument("--num-cpu-workers", default=16, type=int)
     return parser.parse_args()
 
 
@@ -65,14 +91,14 @@ def process_spec_file(spec_name, name_to_colli: dict, spec_dir: Path, num_bins: 
             spec_file = f"{spec_name}_collision {colli_label}.json"
             if not spec_file in spec_h5:
                 print(f"Cannot find spec {spec_file}")
-                return_dict[colli_label] = np.zeros(num_bins) if binned_spec else np.zeros((0, 2))
+                return_dict[colli_label] = np.zeros(num_bins, dtype=np.float32) if binned_spec else np.zeros((0, 2), dtype=np.float32)
                 continue
             loaded_json = json.loads(spec_h5.read_str(spec_file))
         else: # is directory
             spec_file = spec_dir / f"{spec_name}.json"
             if not spec_file.exists():
                 print(f"Cannot find spec {spec_file}")
-                return np.zeros(num_bins) if binned_spec else np.zeros((0, 2))
+                return np.zeros(num_bins, dtype=np.float32) if binned_spec else np.zeros((0, 2), dtype=np.float32)
             loaded_json = json.load(open(spec_file, "r"))
 
         if loaded_json.get("output_tbl") is None:
@@ -85,7 +111,7 @@ def process_spec_file(spec_name, name_to_colli: dict, spec_dir: Path, num_bins: 
         spec_ar = np.vstack([mz, inten]).transpose(1, 0)
         if binned_spec:
             binned = common.bin_spectra([spec_ar], num_bins, upper_limit)
-            avged = binned[0]
+            avged = binned[0].astype(np.float32, copy=False)
             return_dict[colli_label] = avged
         else:
             return_dict[colli_label] = spec_ar
@@ -110,8 +136,7 @@ def dist_bin(cand_preds_dict: List[Dict], true_spec_dict: dict, sparse=True, ign
 
     # standardize keys to str
     true_spec_dict = {f'{float(k):.0f}': v for k, v in true_spec_dict.items()}
-    cand_preds_dict = [{f'{float(k):.0f}': v for k, v in cand_dict.items()} for cand_dict in cand_preds_dict]
-
+    cand_preds_dict = [{f'{float(k.split()[1]):.0f}': v for k, v in cand_dict.items()} for cand_dict in cand_preds_dict]
     for idx, colli_eng in enumerate(true_spec_dict.keys()): # TODO: sample
         cand_preds = np.stack([i[colli_eng] for i in cand_preds_dict], axis=0)
         true_spec = true_spec_dict[colli_eng]
@@ -400,30 +425,36 @@ def main(args):
 
     pred_spec_ars = []
     pred_ikeys = []
-    pred_spec_names = []
-    for spec_id, cand_ikey, spec_dict in pred_specs.get_all_specs():
-        pred_spec = {}
-        for ce, spec_data in spec_dict.items():
-            pred_spec[ce] = spec_data.bin_spectrum(pool_fn=pool_fn)
-        pred_spec_ars.append(pred_spec)
-        pred_ikeys.append(cand_ikey.strip('ikey '))
-        pred_spec_names.append(spec_id.strip('pred_'))
-    pred_spec_ars = np.array(pred_spec_ars)
+    pred_name_to_indices = defaultdict(list)
+
+    def collect_pred_outputs(out_iter):
+        for out_list in out_iter:
+            for pred_spec, pred_ikey, pred_name in out_list:
+                pred_idx = len(pred_spec_ars)
+                pred_spec_ars.append(pred_spec)
+                pred_ikeys.append(pred_ikey)
+                pred_name_to_indices[pred_name].append(pred_idx)
+
+    pred_names = list(pred_specs.get_all_names())
+    bin_name_fn = partial(_read_and_bin_pred_spec_name, pred_file=str(pred_file), pool_fn=pool_fn)
+    common.chunked_parallel(
+        pred_names,
+        bin_name_fn,
+        chunks=1000,
+        max_cpu=args.num_cpu_workers,
+        task_name="Binning predicted spectra",
+        output_func=collect_pred_outputs,
+    )
     pred_ikeys = np.array(pred_ikeys)
-    pred_spec_names = np.array(pred_spec_names)
-    pred_spec_names_unique = np.unique(pred_spec_names)
+    pred_spec_names_unique = sorted(pred_name_to_indices.keys())
 
     # only keep collision_energy != nan
-    for spec_name in name_to_colli.keys():  # filter true spec
-        colli_engs = ast.literal_eval(name_to_colli[spec_name])
-        new_colli_engs = []
-        for colli_key in colli_engs:
-            if 'nan' not in colli_key:
-                new_colli_engs.append(colli_key)
-        name_to_colli[spec_name] = new_colli_engs
-
-    for idx in range(len(pred_spec_ars)):  # filter predicted spec
-        pred_spec_ars[idx] = {k: v for k, v in pred_spec_ars[idx].items() if 'nan' not in k}
+    parsed_colli_cache = {}
+    for spec_name, colli_raw in name_to_colli.items():  # filter true spec
+        if colli_raw not in parsed_colli_cache:
+            colli_engs = ast.literal_eval(colli_raw)
+            parsed_colli_cache[colli_raw] = [colli_key for colli_key in colli_engs if 'nan' not in colli_key]
+        name_to_colli[spec_name] = parsed_colli_cache[colli_raw]
 
     read_spec = partial(
         process_spec_file,
@@ -434,56 +465,53 @@ def main(args):
         binned_spec=True,  # load binned true spectrum
     )
 
-    true_specs = common.chunked_parallel(
-        pred_spec_names_unique,
-        read_spec,
-        chunks=100,
-        max_cpu=16,
-    )
-    name_to_spec = dict(zip(pred_spec_names_unique, true_specs))
-
-    # Create a list of dicts, bucket by mass, etc.
-    all_entries = []
-    for spec_name in tqdm(pred_spec_names_unique):
-
-        # Get candidates
-        bool_sel = pred_spec_names == spec_name
-        cand_ikeys = pred_ikeys[bool_sel]
-        cand_preds = np.array(pred_spec_ars)[bool_sel]
-        true_spec = name_to_spec[spec_name]
-        true_smi = name_to_smi[spec_name]
-        true_ion = name_to_ion[spec_name]
-        parent_mass = common.mass_from_smi(true_smi) + common.ion2mass[true_ion]
-        new_entry = {
-            "cand_ikeys": cand_ikeys,
-            "cand_preds": cand_preds,
-            "true_spec": true_spec,
-            "true_smiles": true_smi,
-            "true_ikey": name_to_ikey[spec_name],
-            "spec_name": spec_name,
-            "parent_mass_idx": (parent_mass - 1) * num_bins / upper_limit if ignore_parent_peak else None,
-            "parent_mass": parent_mass,
-        }
-
-        if true_spec is None:
-            continue
-        all_entries.append(new_entry)
-
-    rank_test_entry_ = partial(rank_test_entry, dist_fn=dist_fn, binned_pred=True)
-    all_out = [rank_test_entry_(**test_entry) for test_entry in all_entries]
-
     # Compute avg and individual stats
     k_vals = list(range(1, 11))
     running_lists = defaultdict(lambda: [])
     output_entries = []
-    for out in all_out:
-        output_entries.append(out)
-        for k in k_vals:
-            below_k = out["ind_recovered"] <= k
-            running_lists[f"top_{k}"].append(below_k)
-            out[f"top_{k}"] = below_k
-        running_lists["total_decoys"].append(out["total_decoys"])
-        running_lists["true_dist"].append(out["true_dist"])
+
+    rank_test_entry_ = partial(rank_test_entry, dist_fn=dist_fn, binned_pred=True)
+
+    def score_true_specs(true_spec_iter):
+        for spec_name, true_spec in zip(pred_spec_names_unique, true_spec_iter):
+            if true_spec is None:
+                continue
+
+            selected_indices = pred_name_to_indices[spec_name]
+            cand_ikeys = pred_ikeys[selected_indices]
+            cand_preds = np.asarray([pred_spec_ars[i] for i in selected_indices], dtype=object)
+
+            true_smi = name_to_smi[spec_name]
+            true_ion = name_to_ion[spec_name]
+            parent_mass = common.mass_from_smi(true_smi) + common.ion2mass[true_ion]
+
+            out = rank_test_entry_(
+                cand_ikeys=cand_ikeys,
+                cand_preds=cand_preds,
+                true_spec=true_spec,
+                true_ikey=name_to_ikey[spec_name],
+                spec_name=spec_name,
+                true_smiles=true_smi,
+                parent_mass=parent_mass,
+                parent_mass_idx=(parent_mass - 1) * num_bins / upper_limit if ignore_parent_peak else None,
+            )
+            output_entries.append(out)
+
+            for k in k_vals:
+                below_k = out["ind_recovered"] <= k
+                running_lists[f"top_{k}"].append(below_k)
+                out[f"top_{k}"] = below_k
+            running_lists["total_decoys"].append(out["total_decoys"])
+            running_lists["true_dist"].append(out["true_dist"])
+
+    common.chunked_parallel(
+        pred_spec_names_unique,
+        read_spec,
+        chunks=1000,
+        max_cpu=args.num_cpu_workers,
+        task_name="Loading true spectra",
+        output_func=score_true_specs,
+    )
 
     final_output = {
         "dataset": dataset,

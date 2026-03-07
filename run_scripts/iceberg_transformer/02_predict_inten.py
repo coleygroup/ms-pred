@@ -6,12 +6,12 @@ python_file = "src/ms_pred/iceberg_transformer/predict_inten_joint.py"
 node_num = 100
 num_workers = 64
 test_entries = [
-    {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd1"},
+    # {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd1"},
     # {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd2"},
     # {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd3"},
-    # {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd1"},
-    # {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd2"},
-    # {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd3"},
+    {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd1"},
+    {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd2"},
+    {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd3"},
 ]
 devices = ",".join([str(_) for _ in [0, 1, 2]])
 
@@ -20,9 +20,8 @@ for test_entry in test_entries:
     dataset = test_entry['dataset']
     folder = test_entry['folder']
 
-    base_formula_folder = Path(f"results/frag_only_{dataset}")
     res_folder = Path(f"results/joint_train_{dataset}/")
-    model = res_folder / folder / "version_203/best.ckpt"  # if no contrastive finetuning, change version_1 to version_0
+    model = res_folder / folder / "version_0/best.ckpt"  # if no contrastive finetuning, change version_1 to version_0
 
     if not model.exists(): 
         continue
@@ -31,11 +30,6 @@ for test_entry in test_entries:
 
     save_dir = save_dir / "preds"
 
-    # Note: Must use preds_train_01
-    magma_dag_folder = (
-        base_formula_folder / folder / f"preds_train_{node_num}_inten.hdf5"
-    )
-    print(magma_dag_folder)
     cmd = f"""python {python_file} \\
     --batch-size {num_workers} \\
     --dataset-name {dataset} \\
@@ -44,7 +38,6 @@ for test_entry in test_entries:
     --save-dir {save_dir} \\
     --gpu \\
     --num-workers {num_workers} \\
-    --magma-dag-folder {magma_dag_folder} \\
     --subset-datasets test_only \\
     --binned-out \\
     """

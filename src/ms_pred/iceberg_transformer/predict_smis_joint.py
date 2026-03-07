@@ -30,6 +30,9 @@ rdBase.DisableLog("rdApp.error")
 RDLogger.DisableLog("rdApp.*")
 
 
+_WORKER_MODELS = {}
+
+
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", default=False, action="store_true")
@@ -37,7 +40,6 @@ def get_args():
     parser.add_argument("--seed", default=42, action="store", type=int)
     parser.add_argument("--sparse-out", default=False, action="store_true")
     parser.add_argument("--sparse-k", default=100, action="store", type=int)
-    parser.add_argument('--adduct-shift',default=False, action="store_true")
     parser.add_argument("--num-gpu-workers", default=0, action="store", type=int)
     parser.add_argument("--num-cpu-workers", default=32, action="store", type=int)
     parser.add_argument("--batch-size", default=64, action="store", type=int)
@@ -129,15 +131,13 @@ def predict():
     model = joint_model.JointModel.load_from_checkpoint(
         checkpoint
     )
-    model = torch.compile(model)
 
     out_name = kwargs["out_name"]
     save_path = save_dir / out_name
     save_dir.mkdir(exist_ok=True)
 
     with torch.inference_mode():
-        model.eval()
-        model.freeze()
+        model_by_device = {}
 
         def prepare_entry(entry):
             smi = entry["smiles"]
@@ -177,6 +177,7 @@ def predict():
         ]
 
         def producer_func(batch):
+            global _WORKER_MODELS
             torch.set_num_threads(1)
             if use_gpu:
                 if kwargs["num_gpu_workers"] > 0:
@@ -187,30 +188,47 @@ def predict():
                 device = f"cuda:{gpu_id}"
             else:
                 device = "cpu"
-            model.to(device)
+
+            if kwargs["num_gpu_workers"] > 0:
+                worker_key = f"{multiprocess.process.current_process().pid}:{device}"
+                if worker_key not in _WORKER_MODELS:
+                    worker_model = joint_model.JointModel.load_from_checkpoint(checkpoint)
+                    worker_model.eval()
+                    worker_model.freeze()
+                    worker_model = worker_model.to(device)
+                    _WORKER_MODELS[worker_key] = worker_model
+                local_model = _WORKER_MODELS[worker_key]
+            else:
+                if device not in model_by_device:
+                    local_model = model.to(device)
+                    model_by_device[device] = local_model
+                    local_model.eval()
+                    local_model.freeze()
+                else:
+                    local_model = model_by_device[device]
 
             # for batch in batched_entries:
             smis, spec_names, colli_eng_vals, adducts, ikeys = list(zip(*batch))
             try:
-                full_outputs = model.predict_mol(
+                full_outputs = local_model.predict_mol(
                     smis,
                     collision_eng=colli_eng_vals,
                     adduct=adducts,
                     device=device,
                 )
-            except:
+            except Exception:
                 logging.error(f'Prediction failed, SMILES: {smis}')
+                return []
 
             return_list = []
             for output_spec, spec_name, smi, ikey, adduct, pred_frag, collision_energy in \
                     zip(full_outputs["spec"], spec_names, smis, ikeys, adducts, full_outputs["frag"], colli_eng_vals):
                 assert kwargs["sparse_out"], 'sparse_out must be True'
-                output_spec = output_spec.cpu().numpy()
-                pred_frag = pred_frag.cpu().numpy()
                 sparse_k = kwargs["sparse_k"]
-                best_inds = np.argsort(output_spec[:, 1], -1)[::-1][:sparse_k]
-                output_spec = output_spec[best_inds, :]
-                pred_frag = np.array(pred_frag)[best_inds]
+                top_k = min(sparse_k, output_spec.shape[0])
+                best_inds = torch.topk(output_spec[:, 1], k=top_k, largest=True).indices
+                output_spec = output_spec.index_select(0, best_inds).cpu().numpy()
+                pred_frag = pred_frag.index_select(0, best_inds).cpu().numpy()
                 masses = output_spec[:, 0]
                 intens = output_spec[:, 1]
                 pred_ms = common.MassSpec(

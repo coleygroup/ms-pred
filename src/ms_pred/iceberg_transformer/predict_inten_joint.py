@@ -36,10 +36,6 @@ def get_args():
         help="name of checkpoint file",
         default="results/2022_06_22_pretrain/version_3/epoch=99-val_loss=0.87.ckpt",
     )
-    parser.add_argument(
-        "--magma-dag-folder",
-        help="Folder to have outputs",
-    )
     parser.add_argument("--dataset-name", default="gnps2015_debug")
     parser.add_argument("--dataset-labels", default="labels.tsv")
     parser.add_argument("--split-name", default="split_22.tsv")
@@ -103,24 +99,15 @@ def predict():
 
     pe_embed_k = model.pe_embed_k
     embed_elem_group = model.embed_elem_group
-    magma_dag_folder = Path(kwargs["magma_dag_folder"])
-    magma_tree_h5 = common.PredSpecDB(magma_dag_folder)
-    name_to_keys = {}
-    for name in magma_tree_h5.get_all_names():
-        ces, remarks = magma_tree_h5.get_entries(name)
-        for ce, r in zip(ces, remarks):
-            name_to_keys[f'{name.replace("pred_", "")}_collision {ce}'] = (name, ce, r)
-
+   
     num_workers = kwargs.get("num_workers", 0)
 
     tree_processor = dataset.TreeProcessor(
         pe_embed_k=pe_embed_k, root_encode="graphormer", 
         embed_elem_group=embed_elem_group, multi_hop_max_dist=model.multi_hop_max_dist
     )
-    pred_dataset = dataset.IntenDataset(
+    pred_dataset = dataset.IntenPredDataset(
         df,
-        magma_h5=magma_dag_folder,
-        magma_map=name_to_keys,
         root_encode="graphormer",
         embed_elem_group=embed_elem_group,
         tree_processor=tree_processor,

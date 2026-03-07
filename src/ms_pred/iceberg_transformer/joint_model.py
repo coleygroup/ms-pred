@@ -884,23 +884,23 @@ class JointModel(pl.LightningModule):
         scheduler.step()
 
     def predict_mol(self, smi, collision_eng, adduct, device, instrument=None, binned_out=False):
-        self.eval()
-        self.freeze()
+        if not getattr(self, "_predict_prepared", False):
+            self.eval()
+            self.freeze()
+            self._predict_prepared = True
         root_smi = smi
         if type(root_smi) is str:
             batched_input = False
             root_smi = [root_smi]
             collision_eng = [collision_eng]
-            precursor_mz = [precursor_mz]
             adduct = [adduct]
             if self.embed_instrument:
                 instrument = [instrument]
         else:
             batched_input = True
-        instruments = to_tensor([common.instrument2onehot_pos[i] for i in instrument]) if self.embed_instrument else None
-
         batch_size = len(root_smi)
         to_tensor = lambda x: torch.tensor(x, device=device, dtype=torch.float) if x is not None else x
+        instruments = to_tensor([common.instrument2onehot_pos[i] for i in instrument]) if self.embed_instrument else None
         adducts = to_tensor([common.ion2onehot_pos[a] for a in adduct])
         collision_engs = to_tensor(collision_eng)
         mols = [Chem.MolFromSmiles(rsmi) for rsmi in root_smi]

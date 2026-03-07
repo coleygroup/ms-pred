@@ -7,6 +7,7 @@
 
 from pathlib import Path
 import random
+import ast
 from typing import Dict, Any, List
 import logging
 
@@ -25,6 +26,7 @@ from ms_pred.dag_pred.dag_data import DAGDataset, _collate_root, _unroll_pad
 import torch.nn.functional as F
 import json
 from ms_pred.dag_pred.graph_mutate import mutate
+from torch.utils.data import Dataset
 
 class TreeProcessor:
     def __init__(
@@ -831,3 +833,114 @@ class IntenContrDataset(IntenDataset):
                 except ValueError:
                     logging.warning(f"Bad smiles")
         return new_mol_list
+
+class IntenPredDataset(Dataset):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        tree_processor: TreeProcessor,
+        root_encode: str = "gnn",
+        embed_elem_group: bool = False,
+        num_workers: int = 0,
+        **kwargs,
+    ):
+        self.df = df.copy()
+        self.tree_processor = tree_processor
+        self.root_encode = root_encode
+        self.embed_elem_group = embed_elem_group
+        self.num_workers = num_workers
+
+        if "instrument" not in self.df.columns:
+            self.df["instrument"] = "Unknown"
+
+        required_cols = ["spec", "smiles", "ionization", "collision_energies"]
+        missing_cols = [col for col in required_cols if col not in self.df.columns]
+        if len(missing_cols) > 0:
+            raise ValueError(f"Missing required columns for IntenPredDataset: {missing_cols}")
+
+        self.entries = []
+        self.spec_names = []
+        self.name_to_smiles = {}
+        self.name_to_adducts = {}
+        self.name_to_instruments = {}
+        self.name_to_precursors = {}
+
+        for _, row in self.df.iterrows():
+            spec_name = row["spec"]
+            instrument = row["instrument"]
+            adduct = row["ionization"]
+            smi = row["smiles"]
+
+            if instrument not in common.instrument2onehot_pos:
+                continue
+            if adduct not in common.ion2onehot_pos:
+                continue
+            if not isinstance(smi, str) or len(smi) == 0:
+                continue
+
+            ce_raw = row["collision_energies"]
+            try:
+                ce_list = ast.literal_eval(ce_raw) if isinstance(ce_raw, str) else ce_raw
+            except (SyntaxError, ValueError):
+                ce_list = []
+
+            if ce_list is None:
+                ce_list = []
+
+            for ce in ce_list:
+                ce_val = common.collision_energy_to_float(ce)
+                if np.isnan(ce_val):
+                    continue
+
+                entry_name = f"{spec_name}_collision {ce_val:.0f}"
+                precursor = row["precursor"] if "precursor" in row and pd.notna(row["precursor"]) else None
+                if precursor is None:
+                    precursor = common.mass_from_smi(smi) + common.ion2mass[adduct]
+
+                self.entries.append(
+                    {
+                        "name": entry_name,
+                        "spec": spec_name,
+                        "smiles": smi,
+                        "adduct": adduct,
+                        "instrument": instrument,
+                        "precursor": float(precursor),
+                        "collision_energy": float(ce_val),
+                    }
+                )
+
+                self.spec_names.append(entry_name)
+                self.name_to_smiles[entry_name] = smi
+                self.name_to_adducts[entry_name] = common.ion2onehot_pos[adduct]
+                self.name_to_instruments[entry_name] = common.instrument2onehot_pos[instrument]
+                self.name_to_precursors[entry_name] = float(precursor)
+
+        logging.info(f"Prepared {len(self.entries)} prediction entries from {len(self.df)} labels rows.")
+
+    def __len__(self):
+        return len(self.entries)
+
+    def __getitem__(self, idx: int):
+        entry = self.entries[idx]
+        tree = {
+            "root_canonical_smiles": entry["smiles"],
+            "adduct": entry["adduct"],
+            "collision_energy": entry["collision_energy"],
+        }
+        feat = self.tree_processor.featurize_tree(
+            tree,
+            include_inten_targs=False,
+            include_frag_targs=False,
+        )
+        outdict = {
+            "name": entry["name"],
+            "adduct": self.name_to_adducts[entry["name"]],
+            "precursor": self.name_to_precursors[entry["name"]],
+            "instrument": self.name_to_instruments[entry["name"]],
+        }
+        outdict.update(feat)
+        return outdict
+
+    @classmethod
+    def get_collate_fn(cls):
+        return IntenDataset.collate_fn

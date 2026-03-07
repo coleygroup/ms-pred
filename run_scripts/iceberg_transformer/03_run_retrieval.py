@@ -9,10 +9,9 @@ subform_name = "no_subform"
 devices = [0, 1]
 vis_devices = ",".join([str(_) for _ in devices])
 num_gpu_workers = len(devices) * 9
-num_cpu_workers = 64
+num_cpu_workers = 32
 max_nodes = 100
 batch_size = 16
-dist = "entropy"
 binned_out = False
 pool_fn = "max"
 
@@ -32,16 +31,17 @@ test_entries = [
     #  "test_split": "split_1",
     #  "max_k": 50},
     #
+    
     # {"dataset": "nist20",
     #  "train_split": "scaffold_1_rnd1",
     #  "test_split": "scaffold_1",
     #  "max_k": 50},
-    #
+    
     # {"dataset": "nist20",
     #  "train_split": "scaffold_1_rnd2",
     #  "test_split": "scaffold_1",
     #  "max_k": 50},
-    #
+    
     # {"dataset": "nist20",
     #  "train_split": "scaffold_1_rnd3",
     #  "test_split": "scaffold_1",
@@ -55,14 +55,14 @@ for test_entry in test_entries:
     split = test_entry['test_split']
     maxk = test_entry['max_k']
     model_dir = Path(f"results/joint_train_{dataset}")
-    joint_model = model_dir/train_split/"version_207/best.ckpt"
+    joint_model = model_dir/train_split/"version_2/best.ckpt"
     if not joint_model.exists():
         print(f"Could not find model {joint_model}; skipping\n: {json.dumps(test_entry, indent=1)}")
         continue
     
     labels = f"data/spec_datasets/{dataset}/retrieval/cands_df_{split}_{maxk}.tsv"
 
-    save_dir = joint_model.parent.parent / f"retrieval_{dataset}_{split}_{maxk}_debug"
+    save_dir = joint_model.parent.parent / f"retrieval_{dataset}_{split}_{maxk}_pre_finetune"
     save_dir.mkdir(exist_ok=True)
 
     cmd = f"""python {pred_file} \\
@@ -77,7 +77,6 @@ for test_entry in test_entries:
     --num-cpu-workers {num_cpu_workers} \\
     --num-gpu-workers {num_gpu_workers} \\
     --gpu \\
-    --adduct-shift \\
     """
     if binned_out:
         cmd += "--binned-out"
@@ -91,8 +90,9 @@ for test_entry in test_entries:
     --dataset {dataset} \\
     --formula-dir-name {subform_name}.hdf5 \\
     --pred-file {save_dir / pred_filename} \\
-    --dist-fn {dist} \\
-    --pool-fn {pool_fn}
+    --dist-fn entropy \\
+    --pool-fn {pool_fn} \\
+    --num-cpu-workers {num_cpu_workers} \\
     """
     if binned_out:
         cmd += "--binned-pred"
@@ -105,7 +105,8 @@ for test_entry in test_entries:
     --formula-dir-name {subform_name}.hdf5 \\
     --pred-file {save_dir / pred_filename} \\
     --dist-fn cos \\
-    --pool-fn {pool_fn}
+    --pool-fn {pool_fn} \\
+    --num-cpu-workers {num_cpu_workers} \\
     """
     if binned_out:
         cmd += "--binned-pred"

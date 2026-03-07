@@ -58,27 +58,27 @@ universal_args:
   inten-loss-fn: [cosine]
 
 iterative_args:
-  # -  split-name: [split_1.tsv]
-  #    save-dir: [split_1_rnd1]
-  #    seed: [1]
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd1]
+     seed: [1]
      
-  # -  split-name: [split_1.tsv]
-  #    save-dir: [split_1_rnd2]
-  #    seed: [2]
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd2]
+     seed: [2]
 
-  # -  split-name: [split_1.tsv]
-  #    save-dir: [split_1_rnd3]
-  #    seed: [3]
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd3]
+     seed: [3]
 
-  # -  split-name: [scaffold_1.tsv]
-  #    save-dir: [scaffold_1_rnd1]
-  #    seed: [1]
+  -  split-name: [scaffold_1.tsv]
+     save-dir: [scaffold_1_rnd1]
+     seed: [1]
 
   -  split-name: [scaffold_1.tsv]
      save-dir: [scaffold_1_rnd2]
      seed: [2]
 
-  # -  split-name: [scaffold_1.tsv]
-  #    save-dir: [scaffold_1_rnd3]
-  #    seed: [3]
+  -  split-name: [scaffold_1.tsv]
+     save-dir: [scaffold_1_rnd3]
+     seed: [3]
 
