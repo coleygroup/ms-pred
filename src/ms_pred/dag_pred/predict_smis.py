@@ -188,8 +188,6 @@ def predict():
             predict_entries[i: i + batch_size] for i in range(0, len(predict_entries), batch_size)
         ]
 
-        print("# gpus", avail_gpu_num)
-
         def producer_func(batch):
             torch.set_num_threads(1)
             if use_gpu:
@@ -202,7 +200,7 @@ def predict():
             else:
                 device = "cpu"
             model.to(device)
-            # avoids error in pe_embedding under multithreading. 
+            # avoids error in pe_embedding under multithreading.
             torch.cuda.set_device(gpu_id)
 
             # for batch in batched_entries:

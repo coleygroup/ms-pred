@@ -20,6 +20,7 @@ import pygmtools as pygm
 import yaml
 import socket
 from collections.abc import Iterable
+import joblib
 
 import ms_pred.common as common
 
@@ -271,7 +272,8 @@ def iceberg_prediction(
     # generate temp directory
     param_str = exp_name + '|'
     for cand_smi, adduct, instrument, ce in sorted(zip(candidate_smiles, adducts, instruments, collision_energies)):
-        param_str += '|' + cand_smi + ';' + str(common.ion2onehot_pos[adduct]) + ';' + str(common.instrument2onehot_pos[instrument]) + ';' + ','.join(sorted(ce))
+        param_str += '|' + cand_smi + ';' + str(common.ion2onehot_pos[adduct]) + ';' + \
+                     str(common.instrument2onehot_pos[instrument]) + ';' + ','.join(sorted(ce))
     param_str += '||' + str(gen_ckpt.absolute()) + '||' + str(inten_ckpt.absolute()) + '||' + cuda_devices + \
                  '||' + f'{batch_size:d}-{sparse_k:d}-{max_nodes:d}||' + f'{threshold:.2f}' + \
                  '||' + ('binned_out' if binned_out else "")
@@ -335,6 +337,7 @@ def load_real_spec(
     nist_path:str='data/spec_datasets/nist20/spec_files.hdf5',
     denoise_spectrum:bool=False,
     intensity_threshold:float=0.05,
+    mgf_query_dict:dict=None,
     **kwargs,
 ) -> common.CompositeMassSpec:
     if real_spec_type == 'raw':
@@ -348,17 +351,38 @@ def load_real_spec(
         nist_h5 = common.HDF5Dataset(nist_path)
         real_spec = nist_h5.read_str(f"{real_spec}.ms").split("\n")
         meta, real_spec = common.parse_spectra(real_spec)
+    elif real_spec_type == 'mgf':
+        mgf_specs = common.parse_spectra_mgf(real_spec)
+        if mgf_query_dict is None or len(mgf_query_dict) == 0:  # single-element MGF
+            if len(mgf_specs) != 1:
+                raise ValueError('mgf_query_dict must be specified for MGF with multiple entries')
+            meta, real_spec = mgf_specs[0]
+        else:
+            meta, real_spec = None, None
+            for mgf_meta, mgf_spec in mgf_specs:
+                if all([qk in mgf_meta and str(mgf_meta[qk]).upper() == str(qv).upper() for qk, qv in mgf_query_dict.items()]):  # match
+                    meta, real_spec = mgf_meta, mgf_spec
+                    break
+            if meta is None or real_spec is None:
+                raise ValueError('No matched entry found from MGF')
+        real_spec = common.MassSpec(
+            collision_energy='nan',
+            masses=real_spec[:, 0],
+            intens=real_spec[:, 1],
+        )
+        real_spec = common.CompositeMassSpec([real_spec])
     else:
         raise ValueError(f'Unkown spectrum type {real_spec_type}')
 
-    if 'parentmass' in meta:
+    if 'parentmass' in meta or 'PEPMASS' in meta:
+        meta_pmass = meta.get('parentmass', meta.get('PEPMASS'))
         if precursor_mass is not None:
             precursor_mass = common.merge_mz(precursor_mass, ppm)
             # check if meta is matched
-            if np.abs(precursor_mass - float(meta['parentmass'])) > precursor_mass * ppm * 1e-6:
-                raise ValueError(f'Precursor mass is different from loaded spectrum metadata! Got m/z={precursor_mass}, loaded from spec={meta["parentmass"]}')
+            if np.abs(precursor_mass - float(meta_pmass)) > precursor_mass * ppm * 1e-6:
+                raise ValueError(f'Precursor mass is different from loaded spectrum metadata! Got m/z={precursor_mass}, loaded from spec={meta_pmass}')
         else:
-            precursor_mass = float(meta['parentmass'])
+            precursor_mass = float(meta_pmass)
     assert precursor_mass is not None
 
     real_spec.process_spec_file(parentmass=precursor_mass, denoise=denoise_spectrum,
@@ -397,6 +421,10 @@ def elucidation_over_candidates(
     ignore_precursor:bool=True,
     dist_func:str='entropy',
     nist_path:str='data/spec_datasets/nist20/spec_files.hdf5',
+    conf_dist_topk:int=15,
+    adduct:str='[M+H]+',
+    conf_models:dict={},
+    conf_thresholds:dict={},
     **kwargs,
 ):
     """
@@ -428,7 +456,7 @@ def elucidation_over_candidates(
     # hack the precursor mz if there are multiple formulae within tolerance
     precursor_mass = common.merge_mz(precursor_mass, ppm)
 
-    real_spec = load_real_spec(real_spec, real_spec_type, precursor_mass, nce, ppm, nist_path)
+    real_spec = load_real_spec(real_spec, real_spec_type, precursor_mass, nce, ppm, nist_path, **kwargs)
     smiles, pred_specs = load_pred_spec(load_dir)
 
     # transform spec to binned spectrum
@@ -443,8 +471,7 @@ def elucidation_over_candidates(
         target_inchikey = None
 
     if step_collision_energy:
-        assert len(real_spec.values()) == 1
-        real_spec = list(real_spec.values())[0]
+        assert len(real_spec) == 1
         merge_method = 'stepped'
     else:
         merge_method = 'unmerged'
@@ -455,6 +482,37 @@ def elucidation_over_candidates(
            for pred_spec in pred_specs]
 
     sorted_indices = np.argsort(sim)[::-1]
+
+    # confidence prediction
+    conf_feature = build_conf_feature(
+        [1 - sim[i] for i in sorted_indices[:conf_dist_topk]],  # dists
+        adduct,
+        precursor_mass,  # mass
+        np.mean(real_spec.num_peaks),  # num_peaks_avg
+        len(real_spec),  # num_collision_engs
+        conf_dist_topk,
+    )
+
+    conf_probs = {}
+    for k, model_path in conf_models.items():
+        obj = joblib.load(model_path)
+
+        # support two common save formats:
+        # (a) joblib.dump(pipe)
+        # (b) joblib.dump({"pipeline": pipe, ...})
+        pipe = obj["pipeline"] if isinstance(obj, dict) and "pipeline" in obj else obj
+
+        p = pipe.predict_proba(conf_feature.reshape(1, -1))[0, 1]
+        conf_probs[k] = p
+
+    for k, p in conf_probs.items():
+        if p < conf_thresholds[k][0]:  # low conf
+            conf_label = 'Low'
+        elif p < conf_thresholds[k][1]:  # mid conf
+            conf_label = 'Medium'
+        else:  # high conf
+            conf_label = 'High'
+        print(f'{conf_label} confidence of true structure in top-{k} (LR score: {p:.4f})')
 
     found_true = False
     true_idx = -1
@@ -469,6 +527,26 @@ def elucidation_over_candidates(
         if idx >= topk and found_true:
             break
     return [(smiles[i], 1 - sim[i], i == true_idx) for i in sorted_indices[:topk]]
+
+
+def ion_onehot(ion: str) -> np.ndarray:
+    """One-hot with all-zeros fallback for unknown/None ions."""
+    n_ions = max(common.ion2onehot_pos.values()) + 1
+    vec = np.zeros(n_ions, dtype=np.float32)
+    if ion is None:
+        return vec
+    idx = common.ion2onehot_pos.get(ion)
+    if idx is None:
+        return vec
+    vec[idx] = 1.0
+    return vec
+
+
+def build_conf_feature(dists, adduct, mass, num_peaks_avg, num_collision_engs, topk_features) -> np.ndarray:
+    X_num = [dists[1] if i < len(dists) else np.nan for i in range(topk_features)]
+    X_num += [mass, num_peaks_avg, num_collision_engs]
+    return np.concatenate([X_num, ion_onehot(adduct)], axis=0)
+
 
 def elucidation_over_energies(
     load_dir,
@@ -499,7 +577,7 @@ def elucidation_over_energies(
     # hack the precursor mz if there are multiple formulae within tolerance
     precursor_mass = common.merge_mz(precursor_mass, ppm)
 
-    real_spec = load_real_spec(real_spec, real_spec_type, precursor_mass, nce, ppm, nist_path)
+    real_spec = load_real_spec(real_spec, real_spec_type, precursor_mass, nce, ppm, nist_path, **kwargs)
     smiles, pred_specs, pred_frags = load_pred_spec(load_dir, step_collision_energy)
 
     # Only one SMILES, so just use the first (or only) one
@@ -666,7 +744,7 @@ def explain_peaks(
         all_ces = list(pred_spec.keys())
         real_spec = None
     else:
-        real_spec = load_real_spec(real_spec, real_spec_type, precursor_mass, nce, ppm)
+        real_spec = load_real_spec(real_spec, real_spec_type, precursor_mass, nce, ppm, **kwargs)
         all_ces = set(pred_spec.keys()).intersection(real_spec.keys())
         if merge_spec:
             real_spec = {'nan': real_spec.merge_spectra()}

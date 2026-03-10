@@ -14,6 +14,7 @@ import h5py
 import hashlib
 import torch
 import math
+from collections import defaultdict
 
 import ms_pred.common.chem_utils as chem_utils
 from ms_pred.common.denoising_utils import electronic_denoising
@@ -30,6 +31,9 @@ from pytorch_lightning.utilities import rank_zero_only
 NIST_COLLISION_ENERGY_MEAN = 40.260853377886264
 NIST_COLLISION_ENERGY_STD = 31.604227557486197
 
+_MANIFEST_GROUP = "__predspec_manifest__"
+_MANIFEST_VERSION = 1
+_MANIFEST_LAYOUT_VERSION = 2  # resizable datasets for incremental append
 
 def get_data_dir(dataset_name: str) -> Path:
     return Path("data/spec_datasets") / dataset_name
@@ -258,7 +262,7 @@ class MassSpec:
 
     @property
     def num_peaks(self):
-        return len(self.intens)  # peaks must have intensities
+        return np.sum(self.intens > 0)  # peaks must have intensities
 
     def __repr__(self):
         _repr = f'MassSpec ('
@@ -522,10 +526,13 @@ class CompositeMassSpec:
                 assert self.root_canonical_smiles == ms_obj.root_canonical_smiles
 
     def __repr__(self):
-        _repr = f'CompositeMassSpec ['
-        _repr += ', '.join([ms.__repr__() for ms in self.values()])
+        _repr = f'CompositeMassSpec [\n'
+        _repr += ';\n'.join(['  ' + ms.__repr__() for ms in self.values()])
         _repr += ']'
         return _repr
+
+    def __len__(self):
+        return len(self.ce_to_ms)
 
     @staticmethod
     def _standardize_ce(ce: Union[str, float]):
@@ -545,6 +552,10 @@ class CompositeMassSpec:
 
     def __getitem__(self, item):
         return self.ce_to_ms[self._standardize_ce(item)]
+
+    @property
+    def num_peaks(self):
+        return [v.num_peaks for v in self.values()]
 
     def process_spec_file(self, parentmass=None, denoise=False, max_num_inten=20, inten_thresh=0.05):
         self.ce_to_merged_ms = {}
@@ -618,6 +629,9 @@ class CompositeMassSpec:
                         raise ValueError(f'Collision energy does not match. Stepped energies: {stepped_ce}, '
                                          f'compared energies: {self.keys()}')
             merged_spec = self.merge_spectra(stepped_ce)
+            if isinstance(other, CompositeMassSpec) and len(other) == 1:
+                other = list(other.values())[0]
+            assert isinstance(other, MassSpec)
             sim = merged_spec.similarity(other, ignore_mass, metric)
             if return_ce:
                 return sim, [float(_) for _ in stepped_ce]
@@ -643,6 +657,217 @@ class CompositeMassSpec:
         else:
             raise ValueError(f'Unknown merge method {merge_method}')
 
+def _encode_str_array_py(strings):
+    # Store as variable-length bytes in npz for portability.
+    # Use UTF-8; represent None as empty string.
+    out = []
+    for s in strings:
+        if s is None:
+            s = ""
+        out.append(s.encode("utf-8"))
+    return np.array(out, dtype=object)
+
+def _decode_str_array_py(arr):
+    # arr may be dtype object bytes; convert to Python str; empty => None
+    out = []
+    for b in arr.tolist():
+        if b is None:
+            out.append(None)
+            continue
+        if isinstance(b, str):
+            s = b
+        else:
+            s = b.decode("utf-8")
+        out.append(None if s == "" else s)
+    return out
+
+def _is_h5_writable(h5f: h5py.File) -> bool:
+    # h5py File.mode examples: 'r', 'r+', 'w', 'w-', 'x', 'a'
+    # Writable modes: r+, w, w-, x, a
+    return h5f.mode in ("r+", "w", "w-", "x", "a")
+
+def _parse_leaf_path(rel_path: str):
+    """
+    Old layout leaf groups look like:
+      name/collision XX
+      name/<remark>/collision XX
+
+    Return: (name, remark_or_None, collision_key_str)
+    """
+    parts = rel_path.split("/")
+    if len(parts) == 2:
+        name, ce = parts[0], parts[1]
+        remark = None
+    elif len(parts) == 3:
+        name, remark, ce = parts[0], parts[1], parts[2]
+    else:
+        raise ValueError(f"Unexpected leaf path format: {rel_path}")
+    return name, remark if remark != "" else None, ce
+
+def _build_manifest_from_old_structure(h5f: h5py.File):
+    """
+    Traverse once, collect leaf groups tagged with attrs["override"].
+    Returns dict with arrays:
+      - leaf_path: full leaf group path relative to root (e.g., 'C10H10/.../collision 40')
+      - name
+      - remark (None or str)
+      - ce_key (e.g., 'collision 40')
+    """
+    leaf_paths = []
+
+    def visitor(name, obj):
+        # name is path relative to the group called on (we call on root)
+        # obj can be Dataset or Group
+        if isinstance(obj, h5py.Group):
+            # leaf "data group" marker in old code
+            if obj.attrs and "override" in obj.attrs:
+                leaf_paths.append(name)
+
+    h5f.visititems(visitor)
+
+    names = []
+    remarks = []
+    ce_keys = []
+    for lp in leaf_paths:
+        n, r, ce = _parse_leaf_path(lp)
+        names.append(n)
+        remarks.append(r)
+        ce_keys.append(ce)
+
+    return {
+        "version": _MANIFEST_VERSION,
+        "leaf_path": leaf_paths,
+        "name": names,
+        "remark": remarks,      # list[str|None]
+        "ce_key": ce_keys,      # list[str]
+    }
+
+def _embed_manifest_into_h5(h5f: h5py.File, manifest: dict, h5_path: Path):
+    """
+    Store manifest under a dedicated group in the HDF5 file.
+    Safe to overwrite existing manifest group.
+    """
+    if _MANIFEST_GROUP in h5f:
+        del h5f[_MANIFEST_GROUP]
+    grp = h5f.create_group(_MANIFEST_GROUP)
+
+    # Attach metadata
+    grp.attrs["version"] = int(manifest["version"])
+    grp.attrs["layout_version"] = int(_MANIFEST_LAYOUT_VERSION)
+
+    # Datasets (variable length strings)
+    vlen_bytes = h5py.special_dtype(vlen=bytes)
+
+    leaf_path_b = _encode_str_array_py(manifest["leaf_path"])
+    name_b = _encode_str_array_py(manifest["name"])
+    remark_b = _encode_str_array_py(manifest["remark"])
+    ce_key_b = _encode_str_array_py(manifest["ce_key"])
+
+    # Create RESIZABLE datasets so we can append inside write().
+    # Use chunking for efficient append.
+    n = len(leaf_path_b)
+    chunk = (max(1, min(4096, n)),)
+    grp.create_dataset(
+        "leaf_path", data=leaf_path_b, dtype=vlen_bytes,
+        maxshape = (None,), chunks = chunk
+    )
+    grp.create_dataset(
+        "name", data=name_b, dtype=vlen_bytes,
+        maxshape = (None,), chunks = chunk
+    )
+    grp.create_dataset(
+        "remark", data=remark_b, dtype=vlen_bytes,
+        maxshape = (None,), chunks = chunk
+    )
+    grp.create_dataset(
+        "ce_key", data=ce_key_b, dtype=vlen_bytes,
+        maxshape = (None,), chunks = chunk
+    )
+    grp.attrs["count"] = int(n)
+
+def _load_embedded_manifest(h5f: h5py.File, h5_path: Path):
+    if _MANIFEST_GROUP not in h5f:
+        return None
+
+    grp = h5f[_MANIFEST_GROUP]
+    try:
+        version = int(grp.attrs.get("version", -1))
+        if version != _MANIFEST_VERSION:
+            return None
+
+        leaf_path = _decode_str_array_py(grp["leaf_path"][()])
+        names = _decode_str_array_py(grp["name"][()])
+        remarks = _decode_str_array_py(grp["remark"][()])
+        ce_keys = _decode_str_array_py(grp["ce_key"][()])
+
+        return {
+            "version": version,
+            "leaf_path": leaf_path,
+            "name": names,
+            "remark": remarks,
+            "ce_key": ce_keys,
+        }
+    except Exception:
+        return None
+
+def _manifest_can_append(grp: h5py.Group) -> bool:
+    """
+    Return True if manifest datasets are present and resizable (maxshape None).
+    Older manifests may exist but not be resizable.
+    """
+    try:
+        for k in ("leaf_path", "name", "remark", "ce_key"):
+            ds = grp[k]
+            # must be 1D and resizable along axis 0
+            if ds.ndim != 1:
+                return False
+            if ds.maxshape is None:
+                return False
+            if ds.maxshape[0] is not None:
+                return False
+        return True
+    except Exception:
+        return False
+
+def _manifest_append_one(h5f: h5py.File, leaf_path: str, name: str, remark, ce_key: str):
+    """
+    Append a single entry into the embedded manifest group.
+    Assumes file is writable.
+    """
+    vlen_bytes = h5py.special_dtype(vlen=bytes)
+    if remark is None:
+        remark = ""
+    # Ensure group exists and is appendable
+    if _MANIFEST_GROUP not in h5f:
+        grp = h5f.create_group(_MANIFEST_GROUP)
+        grp.attrs["version"] = int(_MANIFEST_VERSION)
+        grp.attrs["layout_version"] = int(_MANIFEST_LAYOUT_VERSION)
+        # start empty, chunked, resizable
+        chunk = (4096,)
+        for k in ("leaf_path", "name", "remark", "ce_key"):
+            grp.create_dataset(k, shape=(0,), maxshape=(None,), chunks=chunk, dtype=vlen_bytes)
+        grp.attrs["count"] = 0
+    grp = h5f[_MANIFEST_GROUP]
+
+    # If not appendable (old layout), rebuild to new layout first.
+    if not _manifest_can_append(grp):
+        manifest = _build_manifest_from_old_structure(h5f)
+        _embed_manifest_into_h5(h5f, manifest, Path(getattr(h5f, "filename", "")))
+        grp = h5f[_MANIFEST_GROUP]
+
+    # Append
+    idx = int(grp.attrs.get("count", grp["leaf_path"].shape[0]))
+    new_n = idx + 1
+    for k, val in (
+        ("leaf_path", leaf_path),
+        ("name", name),
+        ("remark", remark),
+        ("ce_key", ce_key),
+    ):
+        ds = grp[k]
+        ds.resize((new_n,))
+        ds[idx] = val.encode("utf-8")
+    grp.attrs["count"] = int(new_n)
 
 class PredSpecDB:
     """
@@ -688,7 +913,7 @@ class PredSpecDB:
             h5_dataset_0.update_attr('.', self.root_key_dict)
             if self.h5_persistent is None:
                 self.h5_persistent = True  # default persistent H5 objects for write mode
-        elif self.mode == 'r':
+        elif self.mode == 'r' or self.mode == 'r+' or self.mode == 'a':
             self.root_key_dict = h5_dataset_0.read_attr('.')
             safe_root_key_get = lambda x: self.root_key_dict[x] if x in self.root_key_dict else None
             self.has_probs            = safe_root_key_get('probs')
@@ -757,7 +982,25 @@ class PredSpecDB:
             h5_dataset.update_attr(full_name, {"frag_bits": spec.frags.shape[-1]})
         h5_dataset.update_attr(full_name, spec.info)
 
-    def read(self, name, collision_energy=None, remark=None):
+        # ---- update embedded manifest incrementally ----
+        # The leaf group path in old/new layout is exactly full_name
+        # e.g. "C10H10/remarkA/collision 40" or "C10H10/collision 40"
+        try:
+            if _is_h5_writable(h5_dataset.h5_obj):
+                ce_key = self._get_collision_str(spec.collision_energy)
+                _manifest_append_one(
+                    h5_dataset.h5_obj,
+                    leaf_path = full_name,
+                    name = name,
+                    remark = spec.remark,
+                    ce_key = ce_key,
+                )
+                h5_dataset.h5_obj.flush()
+        except Exception:
+            # Fail-open: do not break writes if manifest update fails.
+            pass
+
+    def read(self, name, collision_energy=None, remark=None, ignore_keys=None):
         """read a specific spectrum"""
         h5_dataset = self._get_h5_dataset(name)
         full_name  = self._get_full_name(name, collision_energy, remark)
@@ -768,7 +1011,12 @@ class PredSpecDB:
 
         del key_dict["override"]
 
-        in_key_dict = lambda x: x in key_dict and key_dict[x]
+        def in_key_dict(x):
+            if ignore_keys is not None:
+                assert is_iterable(ignore_keys)
+                if x in ignore_keys:
+                    return False
+            return x in key_dict and key_dict[x]
 
         spec_dict = {}
         spec_dict.update(key_dict)
@@ -905,24 +1153,124 @@ class PredSpecDB:
 
         return colli_engs, remarks
 
-    def get_all_specs(self) -> Tuple[str, str, CompositeMassSpec]:
-        """return all spectra in the database
-        if the dataset has remarks, it returns (name, remark, {colli_eng: spec})
-        otherwise, if does not have remarks, it returns (name, {colli_eng: spec})
+    def _ensure_manifest_for_h5(self, h5_dataset: "HDF5Dataset"):
+        """
+        Return a manifest dict for this HDF5Dataset.
+        Priority:
+          1) embedded manifest in HDF5 (if valid)
+          2) sidecar manifest file (if valid)
+          3) build from old structure, then cache (embed if possible else sidecar)
+        """
+        h5_path = Path(h5_dataset.path)
+
+        # 1) Load from embedded
+        manifest = _load_embedded_manifest(h5_dataset.h5_obj, h5_path)
+        if manifest is not None:
+            return manifest
+
+        # 2) Build from missing structure
+        manifest = _build_manifest_from_old_structure(h5_dataset.h5_obj)
+
+        # Cache it
+        try:
+            if _is_h5_writable(h5_dataset.h5_obj):
+                _embed_manifest_into_h5(h5_dataset.h5_obj, manifest, h5_path)
+                h5_dataset.h5_obj.flush()
+            else:
+                print('writing manifest into h5 object failed. Please open h5 object in \'r+\' or \'a\' mode')
+        except Exception:
+            # If caching fails, still return the in-memory manifest
+            pass
+
+        return manifest
+
+    def _iter_manifest_grouped(self, h5_dataset: "HDF5Dataset"):
+        """
+        Yield groups of entries: (name, remark, [ce_key...]) for a single HDF5 file.
+        """
+        manifest = self._ensure_manifest_for_h5(h5_dataset)
+        # Group collision energies by (name, remark)
+        buckets = defaultdict(list)
+        for n, r, ce in zip(manifest["name"], manifest["remark"], manifest["ce_key"]):
+            buckets[(n, r)].append(ce)
+        for (n, r), ces in buckets.items():
+            # Keep stable ordering for determinism (collision energies are strings 'collision 40')
+            # Note: you can do a numeric sort if you want, but not required.
+            yield n, r, sorted(ces)
+
+    class _AllSpecsIterable:
+        def __init__(self, db: "PredSpecDB", h5_list, ignore_keys):
+            self.db = db
+            self.h5_list = h5_list
+            self.ignore_keys = ignore_keys
+
+            # Precompute group counts using manifest (O(#entries), very cheap)
+            self._groups = []
+            for h5 in h5_list:
+                for name, remark, ce_keys in db._iter_manifest_grouped(h5):
+                    self._groups.append((h5, name, remark, ce_keys))
+
+        def __len__(self):
+            return len(self._groups)
+
+        def __iter__(self):
+            for i in range(self.__len__()):
+                yield self.__getitem__(i)
+
+        def __getitem__(self, index):
+            n = len(self)
+
+            # --- int indexing ---
+            if isinstance(index, int):
+                if index < 0:
+                    index += n
+                if index < 0 or index >= n:
+                    raise IndexError(f"index {index} out of range for length {n}")
+                return self.__get_one_item(index)
+
+            # --- slice indexing ---
+            if isinstance(index, slice):
+                # Range handles all slice semantics, including negative step.
+                rng = range(*index.indices(n))
+                # Return a list, like normal sequences do.
+                return [self.__get_one_item(i) for i in rng]
+
+            # --- optional: fancy indexing (list/tuple/ndarray of ints) ---
+            if isinstance(index, (list, tuple)):
+                return [self[i] for i in index]
+
+            raise TypeError(
+                f"indices must be int or slice (or list/tuple of ints), not {type(index).__name__}"
+            )
+
+        def __get_one_item(self, index):
+            h5, name, remark, ce_keys = self._groups[index]
+            colli_spec_dict = {}
+            for ce_key in ce_keys:
+                ce_val = chem_utils.get_collision_energy(ce_key)
+                colli_spec_dict[ce_key] = self.db.read(name, ce_val, remark, self.ignore_keys)
+
+            cms = CompositeMassSpec(colli_spec_dict)
+
+            if remark is None:
+                return name, cms
+            else:
+                return name, remark, cms
+
+    def get_all_specs(self, ignore_keys=None):
+        """
+        return all spectra in the database
+
+        Yields:
+            - If remarks exist for a name: (name, remark, CompositeMassSpec)
+            - Else: (name, CompositeMassSpec)
         """
         if self.h5_persistent:
             all_h5s = self.h5datasets
         else:
             all_h5s = [HDF5Dataset(p, self.mode) for p in self.all_h5_paths]
 
-        for h5 in all_h5s:
-            for name in h5.h5_obj:
-                spec_dict, has_remark = self.read_from_name(name)
-                if has_remark:
-                    for remark, colli_spec_dict in spec_dict.items():
-                        yield name, remark, CompositeMassSpec(colli_spec_dict)
-                else:
-                    yield name, CompositeMassSpec(spec_dict)
+        return PredSpecDB._AllSpecsIterable(self, all_h5s, ignore_keys)
 
     def close(self):
         for ds in self.h5datasets:
@@ -934,7 +1282,7 @@ class HDF5Dataset:
     A dataset as a HDF5 file
     """
     def __init__(self, path, mode="r"):
-        self.path = path
+        self.path = Path(path)
         self.h5_obj = h5py.File(path, mode=mode)
         self.attrs = self.h5_obj.attrs
 
@@ -1548,7 +1896,7 @@ def bin_spectra(
     bins = np.linspace(0, upper_limit, num=num_bins)
     binned_spec = np.zeros((len(spectras), len(bins)))
     for spec_index, spec in enumerate(spectras):
-        if isinstance(spec, MassSpec):
+        if isinstance(spec, MassSpec) or hasattr(spec, 'spec'):
             spec = spec.spec
 
         # Convert to digitized spectra

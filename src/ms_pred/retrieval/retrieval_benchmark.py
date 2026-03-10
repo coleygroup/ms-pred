@@ -9,10 +9,6 @@ from collections import defaultdict
 from functools import partial
 from typing import Dict, List
 import copy
-import requests, threading
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pygmtools as pygm
 
@@ -275,80 +271,27 @@ def rank_test_entry(
         num_peaks_avg = np.mean([np.sum(sp > 0) for sp in true_spec.values()])
     else:
         num_peaks_avg = np.mean([np.sum(sp[:, 1] > 0) for sp in true_spec.values()])
+    num_collision_engs = len(true_spec)
     peak_bin_avg = common.bin_peak_results(true_spec, binned_spec=binned_pred, reduction='mean')
     peak_bin_max = common.bin_peak_results(true_spec, binned_spec=binned_pred, reduction='max')
     peak_bin_min = common.bin_peak_results(true_spec, binned_spec=binned_pred, reduction='min')
 
-    return {
+    return_dict = {
         "ind_recovered": float(ind_found),
         "total_decoys": len(resorted_ikeys),
         "mass": float(true_mass),
         "mass_bin": mass_bin,
         "num_peaks_avg": float(num_peaks_avg),
+        "num_collision_engs": int(num_collision_engs),
         "peak_bin_avg": peak_bin_avg,
         "peak_bin_max": peak_bin_max,
         "peak_bin_min": peak_bin_min,
         "true_dist": float(true_dist),
         "spec_name": str(spec_name),
     }
-
-
-BASE_URL = "https://npclassifier.gnps2.org/classify"
-
-# ---- Thread-safe session factory (one Session per thread) ----
-_tls = threading.local()
-def get_session():
-    if getattr(_tls, "session", None) is None:
-        s = requests.Session()
-        retry = Retry(
-            total=3, backoff_factor=0.3,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods={"GET"},
-        )
-        # Increase pool_maxsize so multiple threads can reuse connections
-        s.mount("https://", HTTPAdapter(max_retries=retry, pool_connections=100, pool_maxsize=100))
-        s.headers.update({"User-Agent": "npclassifier-python-demo/0.2"})
-        _tls.session = s
-    return _tls.session
-
-def classify_smiles(smiles: str, timeout: float = 10.0) -> dict:
-    sess = get_session()
-    resp = sess.get(BASE_URL, params={"smiles": smiles}, timeout=timeout)
-    resp.raise_for_status()
-    return resp.json()
-
-def classify_name_to_smi(name_to_smi: dict[str, str], max_workers: int = 16) -> dict[str, dict]:
-    # 1) De-duplicate identical SMILES to avoid paying for repeats
-    unique = {}
-    for name, smi in name_to_smi.items():
-        unique.setdefault(smi, []).append(name)
-
-    # 2) Parallel fetch unique SMILES
-    smi_to_result: dict[str, dict] = {}
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(classify_smiles, smi): smi for smi in unique}
-        for fut in tqdm(as_completed(futures), total=len(futures), desc="Classifying"):
-            smi = futures[fut]
-            try:
-                smi_to_result[smi] = fut.result()
-            except requests.HTTPError as e:
-                smi_to_result[smi] = {"error": f"HTTP {e.response.status_code}", "details": str(e)}
-            except requests.RequestException as e:
-                smi_to_result[smi] = {"error": "request-failed", "details": str(e)}
-
-    # 3) Expand back to name→result (keep only pathway_results if you prefer)
-    name_to_result = {}
-    for smi, names in unique.items():
-        for name in names:
-            name_to_result[name] = smi_to_result[smi]
-    return name_to_result
-
-def name_to_superclass(name_to_smi: dict[str, str], **kwargs) -> dict[str, list[str] | None]:
-    raw = classify_name_to_smi(name_to_smi, **kwargs)
-    return {
-        name: (res.get("superclass_results") if isinstance(res, dict) and "superclass_results" in res else None)
-        for name, res in raw.items()
-    }
+    for k in range(0, min(50, len(resorted_dist))):
+        return_dict[f'top_{k+1}_dist'] = resorted_dist[k].item()
+    return return_dict
 
 
 def main(args):
@@ -362,13 +305,13 @@ def main(args):
     data_folder = Path(f"data/spec_datasets/{dataset}")
     form_folder = data_folder / f"subformulae/{formula_dir_name}/"
     data_df = pd.read_csv(data_folder / "labels.tsv", sep="\t")
+    class_df = pd.read_csv(data_folder / "chemical_class_labels.tsv", sep='\t')
 
     name_to_ikey = dict(data_df[["spec", "inchikey"]].values)
     name_to_smi = dict(data_df[["spec", "smiles"]].values)
     name_to_ion = dict(data_df[["spec", "ionization"]].values)
     name_to_colli = dict(data_df[["spec", "collision_energies"]].values)
-    name_to_class = name_to_superclass(name_to_smi, max_workers=16)
-    name_to_class = {name: (cls[0] if len(cls) == 1 else None) for name, cls in name_to_class.items()}
+    name_to_class = dict(class_df[["spec", "class"]].values)
 
     pred_file = Path(args.pred_file)
     outfile = args.outfile
@@ -398,13 +341,36 @@ def main(args):
     pred_spec_ars = []
     pred_ikeys = []
     pred_spec_names = []
-    for spec_id, cand_ikey, spec_dict in pred_specs.get_all_specs():
-        pred_spec = {}
-        for ce, spec_data in spec_dict.items():
-            pred_spec[common.get_collision_energy(ce)] = spec_data.bin_spectrum()
-        pred_spec_ars.append(pred_spec)
-        pred_ikeys.append(cand_ikey.strip('ikey '))
-        pred_spec_names.append(spec_id.strip('pred_'))
+
+    all_pred_iter = pred_specs.get_all_specs()
+    num_pred_spec = len(all_pred_iter)
+    print('loading predictions')
+    def load_pred_spec(ind_tup):
+        start, end = ind_tup
+        pred_specs = common.PredSpecDB(h5_path=pred_file, mode='r')
+        all_pred_iter = pred_specs.get_all_specs(ignore_keys=['frags'])
+        return_list = []
+        for i in range(start, end):
+            if i >= num_pred_spec:
+                break
+            spec_id, cand_ikey, spec_dict = all_pred_iter[i]
+            pred_spec = {ce: spec_data.bin_spectrum() for ce, spec_data in spec_dict.items()}
+            return_list.append((pred_spec, cand_ikey.strip('ikey '), spec_id.strip('pred_')))
+        return return_list
+
+    nchunks = 256
+    step = int(np.ceil(num_pred_spec / nchunks))
+    pred_spec_tups = common.simple_parallel(
+        [(step * i, step * (i + 1)) for i in range(nchunks)],
+        load_pred_spec,
+        max_cpu=16,
+    )
+    pred_spec_tups = [i for j in pred_spec_tups for i in j]  # unroll
+
+    for tup in pred_spec_tups:
+        pred_spec_ars.append(tup[0])
+        pred_ikeys.append(tup[1])
+        pred_spec_names.append(tup[2])
 
     pred_spec_ars = np.array(pred_spec_ars)
     pred_ikeys = np.array(pred_ikeys)
@@ -447,7 +413,7 @@ def main(args):
         # Get candidates
         bool_sel = pred_spec_names == spec_name
         cand_ikeys = pred_ikeys[bool_sel]
-        cand_preds = np.array(pred_spec_ars)[bool_sel]
+        cand_preds = pred_spec_ars[bool_sel]
         true_spec = name_to_spec[spec_name]
         true_smi = name_to_smi[spec_name]
         true_ion = name_to_ion[spec_name]

@@ -82,6 +82,7 @@ class JointModel(pl.LightningModule):
         Args:
             smi (str): smi
             adduct
+            instrument
             threshold (float): threshold
             device (str): device
             max_nodes (int): max_nodes
@@ -100,7 +101,7 @@ class JointModel(pl.LightningModule):
             precursor_mz = [precursor_mz]
             adduct = [adduct]
             if self.embed_instrument:
-                instrument = [instrument] 
+                instrument = [instrument]
         else:
             batched_input = True
         batch_size = len(root_smi)
@@ -150,7 +151,7 @@ class JointModel(pl.LightningModule):
         adducts = to_tensor([common.ion2onehot_pos[a] for a in adduct])
         collision_engs = to_tensor(collision_eng)
         precursor_mzs = to_tensor(precursor_mz)
-        # TODO: unsure if needs to be converted. 
+        # TODO: unsure if needs to be converted.
         instruments = to_tensor([common.instrument2onehot_pos[i] for i in instrument]) if self.embed_instrument else None
         root_forms = frag_preds['root_form_vec']
         frag_forms = frag_preds['frag_form_vecs'][:, :max_nfrags]
