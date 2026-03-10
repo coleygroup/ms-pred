@@ -195,18 +195,6 @@ class JointModel(pl.LightningModule):
                 out["frag"].append(out_frag)
 
         if batched_input:
-            # need to return to original order, using valid_mask
-            if not canonical_root_smi and sum(valid_mask) < batch_size:
-                rebatched_out = dict()
-                rebatched_out["spec"] = []
-                for elem in valid_mask:
-                    if elem:
-                        rebatched_out['spec'].append(out['spec'].pop(0))
-                    else:
-                        # TODO: ensure that this binsize is not hardcoded
-                        rebatched_out['spec'].append(np.zeros((15000,)))
-                return rebatched_out
-            else:
-                return out
+            return out
         else:
             return {k: v[0] for k, v in out.items()}
