@@ -36,6 +36,7 @@ def get_args():
     parser.add_argument("--gpu", default=False, action="store_true")
     parser.add_argument("--seed", default=42, action="store", type=int)
     parser.add_argument("--sparse-out", default=False, action="store_true")
+    parser.add_argument("--binned-out", default=False, action="store_true")
     parser.add_argument("--sparse-k", default=100, action="store", type=int)
     parser.add_argument('--adduct-shift',default=False, action="store_true")
     parser.add_argument("--num-gpu-workers", default=0, action="store", type=int)
@@ -154,7 +155,7 @@ def predict():
             smi = entry["smiles"]
             adduct = entry["ionization"]
             precursor_mz = entry["precursor"]
-            instrument = entry["instrument"]
+            instrument = entry["instrument"] if "instrument" in entry else "Orbitrap"  # fallback to Orbitrap
             name = entry["spec"]
             inchikey = common.inchikey_from_smiles(smi)
             smi = Chem.MolToSmiles(Chem.MolFromSmiles(smi))  # canonicalize
@@ -217,6 +218,7 @@ def predict():
                     max_nodes=kwargs["max_nodes"],
                     adduct_shift=kwargs["adduct_shift"],
                     canonical_root_smi=True,
+                    binned_out=kwargs["binned_out"],
                 )
             except:
                 logging.error(
@@ -224,8 +226,8 @@ def predict():
                 )
                 raise
             return_list = []
-            for output_spec, spec_name, smi, ikey, adduct, pred_frag, collision_energy in \
-                    zip(full_outputs["spec"], spec_names, smis, ikeys, adducts, full_outputs["frag"], colli_eng_vals):
+            for output_ind, (output_spec, spec_name, smi, ikey, adduct, pred_frag, collision_energy) in enumerate(
+                    zip(full_outputs["spec"], spec_names, smis, ikeys, adducts, full_outputs["frag"], colli_eng_vals)):
                 assert kwargs["sparse_out"], 'sparse_out must be True'
                 output_spec = output_spec.cpu().numpy()
                 pred_frag = pred_frag.cpu().numpy()
@@ -243,6 +245,7 @@ def predict():
                     intens=intens,
                     frags=pred_frag,
                     remark=ikey,
+                    binned_spec=full_outputs["binned_spec"][output_ind] if kwargs["binned_out"] else None
                 )
                 return_list.append((spec_name, pred_ms))
             return return_list
@@ -251,7 +254,8 @@ def predict():
             specdb = common.PredSpecDB(
                 h5_path=save_path, mode='w', num_h5s=kwargs["num_h5_chunks"],
                 has_probs=False, has_brokens=False, has_masses=True, has_masses_no_adduct=False, has_frag_form_vecs=False,
-                has_frags=True, has_intens=True, has_pulled_atoms=False)
+                has_frags=True, has_intens=True, has_pulled_atoms=False,
+                has_binned_spec=kwargs["binned_out"])
             for out_batch in out_entries:
                 for out_item in out_batch:
                     name, spec = out_item

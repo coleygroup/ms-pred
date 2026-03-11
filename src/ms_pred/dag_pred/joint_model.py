@@ -168,31 +168,30 @@ class JointModel(pl.LightningModule):
             masses=masses,
             root_forms=root_forms,
             frag_forms=frag_forms,
-            binned_out=binned_out,
             adducts=adducts,
             collision_engs=collision_engs,
             instruments=instruments if self.embed_instrument else None,
             precursor_mzs=precursor_mzs,
         )
 
+        out = {"spec": [], "frag": []}
+        num_shifts = len(masses[0, 0, :, :].reshape(-1))  # number of shifts,
+                                                          # (1 + h_shift * 2) * 2 if include_unshifted_mz==True
+        if not self.inten_model_obj.include_unshifted_mz:
+            masses = masses[:, :, :1, :].contiguous()  # only keep m/z with adduct shift
+
+        for i, (inten_pred, mass, n) in \
+                enumerate(zip(inten_preds["spec"], masses, num_frags)):
+            out_mass = mass[:n].reshape(-1)
+            out_inten = inten_pred.reshape(-1)
+            out_frag = frag_preds['frags'][i, :n].repeat_interleave(num_shifts, dim=0)
+
+            # add to output dict
+            out["spec"].append(torch.stack((out_mass, out_inten), dim=1))
+            out["frag"].append(out_frag)
+
         if binned_out:
-            out = inten_preds
-        else:
-            out = {"spec": [], "frag": []}
-            num_shifts = len(masses[0, 0, :, :].reshape(-1))  # number of shifts,
-                                                              # (1 + h_shift * 2) * 2 if include_unshifted_mz==True
-            if not self.inten_model_obj.include_unshifted_mz:
-                masses = masses[:, :, :1, :].contiguous()  # only keep m/z with adduct shift
-
-            for i, (inten_pred, mass, n) in \
-                    enumerate(zip(inten_preds["spec"], masses, num_frags)):
-                out_mass = mass[:n].reshape(-1)
-                out_inten = inten_pred.reshape(-1)
-                out_frag = frag_preds['frags'][i, :n].repeat_interleave(num_shifts, dim=0)
-
-                # add to output dict
-                out["spec"].append(torch.stack((out_mass, out_inten), dim=1))
-                out["frag"].append(out_frag)
+            out["binned_spec"] = inten_preds["binned_spec"]
 
         if batched_input:
             return out

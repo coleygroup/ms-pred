@@ -187,12 +187,11 @@ def predict():
                 masses=masses,
                 root_forms=root_forms,
                 frag_forms=frag_forms,
-                binned_out=binned_out,
             )
 
-            outputs = outputs["spec"].cpu().numpy()
+            output_specs = outputs["binned_spec"].cpu().numpy() if binned_out else outputs["spec"].cpu().numpy()
             for spec, inten_frag_id, collision_energy, output_spec in zip(
-                spec_names, inten_frag_ids, collision_energies, outputs
+                spec_names, inten_frag_ids, collision_energies, output_specs
             ):
                 output_obj = {
                     "spec_name": spec,
