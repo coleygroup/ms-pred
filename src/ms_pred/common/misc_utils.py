@@ -45,11 +45,11 @@ class MassSpec:
     def __init__(self, collision_energy: Union[str, float], root_canonical_smiles=None, adduct=None, remark=None,
                  probs=None, brokens=None, masses=None, masses_no_adduct=None,
                  frag_form_vecs=None, frags=None, intens=None, pulled_atoms=None, int_frags=None,
-                 **kwargs):
+                 binned_spec=None, num_bins=None, upper_limit=None, **kwargs):
         self._engine = None
         self._binned_spec = None
-        self._mass_upper_limit = None
-        self._num_bins = None
+        self._mass_upper_limit = upper_limit
+        self._num_bins = num_bins
 
         if isinstance(collision_energy, str) and 'collision' in collision_energy:
             self.collision_energy = chem_utils.get_collision_energy(collision_energy)
@@ -90,6 +90,9 @@ class MassSpec:
         self.frags = safe_assign(frags, bool)
         self.intens = safe_assign(intens, np.floating)
         self.pulled_atoms = safe_assign(pulled_atoms, bool)
+        self._binned_spec = safe_assign(binned_spec, np.floating)
+        if self._binned_spec is not None and self._num_bins is None:
+            self._num_bins = len(self._binned_spec)
         self.meta = kwargs
 
     def add_hydrogen_shift(self):
@@ -259,6 +262,10 @@ class MassSpec:
         if self._binned_spec is None:
             self.bin_spectrum()  # use default parameters (0.1 bin)
         return self._binned_spec
+
+    @property
+    def has_binned_spec(self):
+        return self._binned_spec is not None
 
     @property
     def num_peaks(self):
@@ -873,9 +880,11 @@ class PredSpecDB:
     """
     Data structure for predicted spectrum database
     """
+    _SPECIAL_ROOT_GROUPS = {_MANIFEST_GROUP}
+
     def __init__(self, h5_path, mode="r", num_h5s=1,
                  has_probs=True, has_brokens=True, has_masses=False, has_masses_no_adduct=True, has_frag_form_vecs=True,
-                 has_frags=True, has_intens=False, has_pulled_atoms=False,
+                 has_frags=True, has_intens=False, has_pulled_atoms=False, has_binned_spec=False,
                  h5_persistent=None):
         """
         Args:
@@ -900,6 +909,7 @@ class PredSpecDB:
             self.has_frags   = has_frags
             self.has_intens  = has_intens
             self.has_pulled_atoms = has_pulled_atoms
+            self.has_binned_spec = has_binned_spec
             self.root_key_dict = {
                 "probs": self.has_probs,
                 "masses": self.has_masses,
@@ -909,6 +919,7 @@ class PredSpecDB:
                 "frag_form_vecs": self.has_frag_form_vecs,
                 "frags": self.has_frags,
                 "pulled_atoms": self.has_pulled_atoms,
+                "binned_spec": self.has_binned_spec,
             }
             h5_dataset_0.update_attr('.', self.root_key_dict)
             if self.h5_persistent is None:
@@ -924,6 +935,7 @@ class PredSpecDB:
             self.has_frag_form_vecs   = safe_root_key_get('frag_form_vecs')
             self.has_frags            = safe_root_key_get('frags')
             self.has_pulled_atoms     = safe_root_key_get('pulled_atoms')
+            self.has_binned_spec      = safe_root_key_get('binned_spec')
             if self.h5_persistent is None:
                 self.h5_persistent = False  # default non-persistent H5 objects for read mode (to support parallel read)
         else:
@@ -933,6 +945,35 @@ class PredSpecDB:
             self.h5datasets = [h5_dataset_0] + [HDF5Dataset(p, self.mode) for p in self.all_h5_paths[1:]]
         else:
             self.h5datasets = None
+
+    @staticmethod
+    def _binned_index_u8_len(num_bins):
+        return max(1, (max(1, int(num_bins) - 1).bit_length() + 7) // 8)
+
+    @classmethod
+    def _encode_binned_indices(cls, indices, num_bins):
+        u8_len = cls._binned_index_u8_len(num_bins)
+        encoded = indices.astype('<u4', copy=False).view(np.uint8).reshape(-1, 4)[:, :u8_len]
+        return encoded, u8_len
+
+    @staticmethod
+    def _decode_binned_indices(encoded, u8_len):
+        padded = np.zeros((encoded.shape[0], 4), dtype=np.uint8)
+        padded[:, :u8_len] = encoded
+        return padded.view('<u4').reshape(-1).astype(np.int64)
+
+    def _read_binned_spec(self, h5_dataset, full_name, key_dict, fdata, udata, float_col, uint_col):
+        if "binned_u8_len" not in key_dict or fdata is None or udata is None:
+            raise ValueError(f"Sparse binned spectrum payload missing for {full_name}")
+
+        binned_rows = int(key_dict.get("binned_rows", 0))
+        u8_len = int(key_dict["binned_u8_len"])
+        out = np.zeros(int(key_dict["num_bins"]), dtype=np.float32)
+        if binned_rows > 0:
+            indices = self._decode_binned_indices(udata[:binned_rows, uint_col:uint_col + u8_len], u8_len)
+            values = fdata[:binned_rows, float_col].astype(np.float32, copy=False)
+            out[indices] = values
+        return out
 
     def write(self, name, spec: MassSpec, replace_name_by_formula=False):
         """write one spectrum"""
@@ -945,6 +986,7 @@ class PredSpecDB:
             "frag_form_vecs": spec.has_frag_form_vecs,
             "frags": spec.has_frags,
             "pulled_atoms": spec.has_pulled_atoms,
+            "binned_spec": spec.has_binned_spec,
         }
         if replace_name_by_formula and spec.root_canonical_smiles is not None:
             name = chem_utils.form_from_smi(spec.root_canonical_smiles)
@@ -961,16 +1003,52 @@ class PredSpecDB:
         if spec.has_masses: float_arrs.append(spec.masses.astype(np.float32))
         if spec.has_masses_no_adduct: float_arrs.append(spec.masses_no_adduct.astype(np.float32))
         if spec.has_intens: float_arrs.append(spec.intens.astype(np.float32))
-        if len(float_arrs) > 0:
-            h5_dataset.write_data(full_name + '/f', np.stack(float_arrs, axis=1))
 
         uint_arrs = []
         if spec.has_brokens: uint_arrs.append(spec.brokens.astype(np.uint8)[:, None])
         if spec.has_frag_form_vecs: uint_arrs.append(spec.frag_form_vecs.astype(np.uint8))
         if spec.has_frags: uint_arrs.append(nn_utils.encode_bin_to_uint8(spec.frags).astype(np.uint8))
         if spec.has_pulled_atoms: uint_arrs.append(nn_utils.encode_bin_to_uint8(spec.pulled_atoms).astype(np.uint8))
-        if len(uint_arrs) > 0:
-            h5_dataset.write_data(full_name + '/u', np.concatenate(uint_arrs, axis=1))
+
+        main_rows = 0
+        if len(float_arrs) > 0:
+            main_rows = len(float_arrs[0])
+        elif len(uint_arrs) > 0:
+            main_rows = uint_arrs[0].shape[0]
+
+        binned_rows = 0
+        binned_u8_len = 0
+        binned_vals = None
+        binned_inds_u8 = None
+        if spec.has_binned_spec:
+            binned_inds = np.flatnonzero(spec.binned_spec > 0).astype(np.uint32)
+            binned_vals = spec.binned_spec[binned_inds].astype(np.float32, copy=False)
+            binned_inds_u8, binned_u8_len = self._encode_binned_indices(binned_inds, spec._num_bins)
+            binned_rows = len(binned_inds)
+
+        num_rows = max(main_rows, binned_rows)
+
+        if len(float_arrs) > 0 or spec.has_binned_spec:
+            num_float_cols = len(float_arrs) + (1 if spec.has_binned_spec else 0)
+            fdata = np.zeros((num_rows, num_float_cols), dtype=np.float32)
+            if len(float_arrs) > 0:
+                fdata[:main_rows, :len(float_arrs)] = np.stack(float_arrs, axis=1)
+            if spec.has_binned_spec and binned_rows > 0:
+                fdata[:binned_rows, len(float_arrs)] = binned_vals
+            h5_dataset.write_data(full_name + '/f', fdata)
+
+        if len(uint_arrs) > 0 or spec.has_binned_spec:
+            base_uint_cols = sum(arr.shape[1] for arr in uint_arrs)
+            num_uint_cols = base_uint_cols + (binned_u8_len if spec.has_binned_spec else 0)
+            udata = np.zeros((num_rows, num_uint_cols), dtype=np.uint8)
+            cur_col = 0
+            for arr in uint_arrs:
+                next_col = cur_col + arr.shape[1]
+                udata[:main_rows, cur_col:next_col] = arr
+                cur_col = next_col
+            if spec.has_binned_spec and binned_rows > 0:
+                udata[:binned_rows, cur_col:cur_col + binned_u8_len] = binned_inds_u8
+            h5_dataset.write_data(full_name + '/u', udata)
 
         if not all([self.root_key_dict[k] == v for k, v in key_dict.items()]):
             # h5 group will have a different attribute if any attribute is different from root
@@ -978,8 +1056,17 @@ class PredSpecDB:
             h5_dataset.update_attr(full_name, key_dict)
         else:
             h5_dataset.update_attr(full_name, {"override": False})
+        attr_updates = {"main_rows": main_rows}
         if spec.has_frags:
-            h5_dataset.update_attr(full_name, {"frag_bits": spec.frags.shape[-1]})
+            attr_updates["frag_bits"] = spec.frags.shape[-1]
+        if spec.has_binned_spec:
+            attr_updates.update({
+                "num_bins": spec._num_bins,
+                "upper_limit": spec._mass_upper_limit,
+                "binned_rows": binned_rows,
+                "binned_u8_len": binned_u8_len,
+            })
+        h5_dataset.update_attr(full_name, attr_updates)
         h5_dataset.update_attr(full_name, spec.info)
 
         # ---- update embedded manifest incrementally ----
@@ -995,7 +1082,6 @@ class PredSpecDB:
                     remark = spec.remark,
                     ce_key = ce_key,
                 )
-                h5_dataset.h5_obj.flush()
         except Exception:
             # Fail-open: do not break writes if manifest update fails.
             pass
@@ -1025,30 +1111,34 @@ class PredSpecDB:
         except:
             #case of no f data
             fdata = None
+        main_rows = int(key_dict.get("main_rows", fdata.shape[0] if fdata is not None else 0))
         cur_idx = 0
         for key in ("probs", "masses", "masses_no_adduct", "intens"):
             if in_key_dict(key):
-                spec_dict[key] = fdata[:, cur_idx]
+                spec_dict[key] = fdata[:main_rows, cur_idx]
                 cur_idx += 1
         try:
             udata = h5_dataset.read_data(full_name + '/u')
         except:
             #case of no u data
             udata = None
-        cur_idx = 0
+        ucur_idx = 0
         if in_key_dict("brokens"):
-            spec_dict["brokens"] = udata[:, cur_idx]
-            cur_idx += 1
+            spec_dict["brokens"] = udata[:main_rows, ucur_idx]
+            ucur_idx += 1
         if in_key_dict("frag_form_vecs"):
-            spec_dict["frag_form_vecs"] = udata[:, cur_idx:cur_idx+chem_utils.ELEMENT_DIM]
-            cur_idx += chem_utils.ELEMENT_DIM
+            spec_dict["frag_form_vecs"] = udata[:main_rows, ucur_idx:ucur_idx+chem_utils.ELEMENT_DIM]
+            ucur_idx += chem_utils.ELEMENT_DIM
         if in_key_dict("frags"):
             frag_u8_len = math.ceil(key_dict["frag_bits"] / 8)
-            spec_dict["frags"] = nn_utils.decode_bin_from_uint8(udata[:, cur_idx:cur_idx+frag_u8_len], key_dict["frag_bits"])
-            cur_idx += frag_u8_len
+            spec_dict["frags"] = nn_utils.decode_bin_from_uint8(udata[:main_rows, ucur_idx:ucur_idx+frag_u8_len], key_dict["frag_bits"])
+            ucur_idx += frag_u8_len
         if in_key_dict("pulled_atoms"):
             assert "frag_bits" in key_dict
-            spec_dict["pulled_atoms"] = nn_utils.decode_bin_from_uint8(udata[:, cur_idx:], key_dict["frag_bits"])
+            spec_dict["pulled_atoms"] = nn_utils.decode_bin_from_uint8(udata[:main_rows, ucur_idx:], key_dict["frag_bits"])
+
+        if in_key_dict("binned_spec"):
+            spec_dict["binned_spec"] = self._read_binned_spec(h5_dataset, full_name, key_dict, fdata, udata, cur_idx, ucur_idx)
 
         return MassSpec(**spec_dict)
 
@@ -1105,7 +1195,7 @@ class PredSpecDB:
         else:
             all_h5s = [HDF5Dataset(p, self.mode) for p in self.all_h5_paths]
         all_names = [h5.get_all_names() for h5 in all_h5s]
-        all_names = [i for j in all_names for i in j]
+        all_names = [i for j in all_names for i in j if i not in self._SPECIAL_ROOT_GROUPS]
         return all_names
 
     def get_entries(self, name, collision_energy=None):
@@ -1273,7 +1363,11 @@ class PredSpecDB:
         return PredSpecDB._AllSpecsIterable(self, all_h5s, ignore_keys)
 
     def close(self):
+        if self.h5datasets is None:
+            return
         for ds in self.h5datasets:
+            if self.mode != 'r':
+                ds.flush()
             ds.close()
 
 
@@ -1886,34 +1980,32 @@ def bin_spectra(
     Return:
         np.ndarray of shape [channels, num_bins]
     """
-    if pool_fn == "add":
-        pool = lambda x, y: x + y
-    elif pool_fn == "max":
-        pool = lambda x, y: max(x, y)
-    else:
-        raise NotImplementedError()
+    binned_spec = []
+    scale = (num_bins - 1) / upper_limit
 
-    bins = np.linspace(0, upper_limit, num=num_bins)
-    binned_spec = np.zeros((len(spectras), len(bins)))
-    for spec_index, spec in enumerate(spectras):
-        if isinstance(spec, MassSpec) or hasattr(spec, 'spec'):
+    for spec in spectras:
+        if isinstance(spec, MassSpec) or hasattr(spec, "spec"):
             spec = spec.spec
 
-        # Convert to digitized spectra
-        digitized_mz = np.digitize(spec[:, 0], bins=bins)
+        mz = spec[:, 0]
+        inten = spec[:, 1]
 
-        # Remove all spectral peaks out of range
-        in_range = digitized_mz < len(bins)
-        digitized_mz, spec = digitized_mz[in_range], spec[in_range, :]
+        bin_idx = np.floor(mz * scale).astype(np.int32) + 1
+        valid = (bin_idx >= 0) & (bin_idx < num_bins)
+        bin_idx = bin_idx[valid]
+        inten = inten[valid]
 
-        # Add the current peaks to the spectra
-        # Use a loop rather than vectorize because certain bins have conflicts
-        # based upon resolution
-        for bin_index, spec_val in zip(digitized_mz, spec[:, 1]):
-            cur_val = binned_spec[spec_index, bin_index]
-            binned_spec[spec_index, bin_index] = pool(spec_val, cur_val)
+        if pool_fn == "add":
+            out = np.bincount(bin_idx, weights=inten, minlength=num_bins).astype(np.float32)
+        elif pool_fn == "max":
+            out = np.zeros(num_bins, dtype=np.float32)
+            np.maximum.at(out, bin_idx, inten)
+        else:
+            raise NotImplementedError()
 
-    return binned_spec
+        binned_spec.append(out)
+
+    return np.stack(binned_spec, axis=0)
 
 
 def digitize_ar(

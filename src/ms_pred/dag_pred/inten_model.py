@@ -366,7 +366,6 @@ class IntenGNN(pl.LightningModule):
         masses=None,
         root_forms=None,
         frag_forms=None,
-        binned_out=False,
     ) -> dict:
         """predict _summary_
 
@@ -425,14 +424,10 @@ class IntenGNN(pl.LightningModule):
             for pred, num_frag in zip(output, num_frags)
         ]
 
-        if binned_out:
-            out_dict = {
-                "spec": out_preds_binned,
-            }
-        else:
-            out_dict = {
-                "spec": out_preds,
-            }
+        out_dict = {
+            "spec": out_preds,
+            "binned_spec": out_preds_binned,
+        }
         return out_dict
 
     def forward(

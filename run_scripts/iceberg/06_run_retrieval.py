@@ -13,7 +13,7 @@ num_cpu_workers = 128
 max_nodes = 100
 batch_size = 64
 dist = "entropy"
-binned_out = False
+binned_out = True
 
 test_entries = [
     {"dataset": "nist20",
@@ -52,7 +52,7 @@ test_entries = [
     #  "max_k": 50},
 ]
 
-pred_filename = "binned_preds.hdf5" if binned_out else "preds.hdf5"
+pred_filename = "preds.hdf5"
 
 for test_entry in test_entries:
     dataset = test_entry['dataset']
@@ -107,8 +107,6 @@ for test_entry in test_entries:
     --pred-file {save_dir / pred_filename} \\
     --dist-fn {dist} \\
     """
-    if binned_out:
-        cmd += "--binned-pred"
 
     print(cmd + "\n")
     subprocess.run(cmd, shell=True)

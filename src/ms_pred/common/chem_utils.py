@@ -717,8 +717,14 @@ def get_collision_energy(filename):
         raise ValueError(f'Multiple collision energies found in {filename}')
     if len(colli_eng) == 1:
         colli_eng = colli_eng[0].split()[-1]
+        colli_eng = f"{float(colli_eng):.0f}"
     else:
-        colli_eng = 'nan'
+        colli_eng = re.findall('([0-9]+\.?[0-9]*|nan).*', filename)
+        if len(colli_eng) == 1:
+            colli_eng = colli_eng[0].split()[-1]
+            colli_eng = f"{float(colli_eng):.0f}"
+        else:
+            colli_eng = 'nan'
     return colli_eng
 
 
