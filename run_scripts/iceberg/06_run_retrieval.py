@@ -13,12 +13,17 @@ num_cpu_workers = 128
 max_nodes = 100
 batch_size = 64
 dist = "entropy"
-binned_out = True
+binned_out = False
 
 test_entries = [
     {"dataset": "nist20",
      "train_split": "split_1_rnd1",
      "test_split": "split_1",
+     "max_k": 50},
+
+    {"dataset": "nist20",
+     "train_split": "split_1_rnd1",
+     "test_split": "split_1_val",
      "max_k": 50},
 
     # {"dataset": "nist20",

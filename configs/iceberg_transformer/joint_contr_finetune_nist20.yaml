@@ -2,7 +2,7 @@ launcher_args: {experiment_name: joint_train_nist20,
   script_name: "src/ms_pred/iceberg_transformer/train_contr_joint.py",
   slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,
-  visible_devices: [1, 2]
+  visible_devices: [0, 1]
 }
 universal_args:
   _slurm_args:
@@ -62,6 +62,7 @@ universal_args:
   inten-loss-fn: [cosine]
   contr-loss-fn: [entropy]
   contr-weight: [1]
+  contr-threshold: [0.4]
   pubchem-map-path: ['data/retrieval/pubchem/pubchem_formulae_inchikey.hdf5']
 
 

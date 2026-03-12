@@ -42,7 +42,7 @@ class IntenGNN(pl.LightningModule):
         embed_adduct: bool = False,
         embed_collision: bool = False,
         embed_elem_group: bool = False,
-        embed_instrument: bool = False, 
+        embed_instrument: bool = False,
         include_unshifted_mz: bool = False,
         binned_targs: bool = True,
         encode_forms: bool = False,
@@ -521,7 +521,7 @@ class IntenGNN(pl.LightningModule):
                     # self.instrument_nansub = nn.Parameter(torch.zeros(len(set(common.instrument2onehot_pos.values()))))
                     # self.instrument_nansub.requires_grad = False
 
-                    # embed_instruments = torch.where(torch.isnan(embed_instruments), 
+                    # embed_instruments = torch.where(torch.isnan(embed_instruments),
                     #                                 self.instrument_nansub.unsqueeze(0),
                     #                                 embed_instruments
                     # )

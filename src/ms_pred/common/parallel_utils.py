@@ -25,12 +25,10 @@ def simple_parallel(
 
     """
     from pathos import multiprocessing as mp
-    if spawn:
-        ctx._force_start_method('spawn')
 
     cpus = min(mp.cpu_count(), max_cpu)
     with mp.ProcessPool(processes=cpus) as pool:
-        results = list(tqdm(pool.imap(function, input_list), desc=task_name))
+        results = list(tqdm(pool.imap(function, input_list), desc=task_name, total=len(input_list)))
 
     return results
 
@@ -161,7 +159,8 @@ def subprocess_parallel(cmd_list, max_parallel=4, max_parallel_per_gpu=None, gpu
             def run_command(cmd_env_id):
                 cmd, new_env, job_id = cmd_env_id
                 if delay_start > 0:
-                    time.sleep(delay_start * job_id)
+                    delay_time = (delay_start * job_id) % 100  # avoid OOM when multiple jobs start together
+                    time.sleep(delay_time)
                 print(cmd + "\n")
                 env = os.environ.copy()
                 for k, v in new_env.items():
@@ -170,7 +169,7 @@ def subprocess_parallel(cmd_list, max_parallel=4, max_parallel_per_gpu=None, gpu
                 process.wait()
 
             with Pool(max_parallel) as pool:
-                pool.map(run_command, zip(cmd_list, env_list, range(len(cmd_list))))
+                pool.map(run_command, zip(cmd_list, env_list, range(len(cmd_list))), chunksize=1)
 
         else:
             gpu_job_count = manager.dict()
@@ -185,7 +184,8 @@ def subprocess_parallel(cmd_list, max_parallel=4, max_parallel_per_gpu=None, gpu
 
             def run_command(cmd, new_env, job_id, gpu_id):
                 if delay_start > 0:
-                    time.sleep(delay_start * gpu_id)
+                    delay_time = (delay_start * job_id) % 100  # avoid OOM when multiple jobs start together
+                    time.sleep(delay_time)
                 print(f"Running on GPU {gpu_id}: {cmd}\n")
                 env = os.environ.copy()
                 env['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
@@ -214,7 +214,7 @@ def subprocess_parallel(cmd_list, max_parallel=4, max_parallel_per_gpu=None, gpu
                         gpu_job_count[selected_gpu] -= 1
 
             with Pool(len(gpus) * max_parallel_per_gpu) as pool:
-                pool.map(wrapper, zip(cmd_list, env_list, range(len(cmd_list))))
+                pool.map(wrapper, zip(cmd_list, env_list, range(len(cmd_list))), chunksize=1)
     except Exception as e:
         terminate_processes()
         raise e

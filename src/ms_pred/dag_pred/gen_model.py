@@ -13,8 +13,6 @@ import ms_pred.nn_utils as nn_utils
 import ms_pred.magma.fragmentation as fragmentation
 import ms_pred.dag_pred.dag_data as dag_data
 
-import time
-
 
 class FragGNN(pl.LightningModule):
     def __init__(
@@ -277,7 +275,7 @@ class FragGNN(pl.LightningModule):
                     embed_adducts_expand = embed_adducts.repeat_interleave(
                         root_repr.batch_num_nodes(), 0
                     )
-                    concat_list.append(embed_adducts_expand)                    
+                    concat_list.append(embed_adducts_expand)
                     # ndata = root_repr.ndata["h"]
                     # ndata = torch.cat([ndata, embed_adducts_expand], -1)
                     # root_repr.ndata["h"] = ndata
@@ -305,7 +303,7 @@ class FragGNN(pl.LightningModule):
                     # self.instrument_nansub = nn.Parameter(torch.zeros(len(set(common.instrument2onehot_pos.values()))))
                     # self.instrument_nansub.requires_grad = False
 
-                    # embed_instruments = torch.where(torch.isnan(embed_instruments), 
+                    # embed_instruments = torch.where(torch.isnan(embed_instruments),
                     #                                 self.instrument_nansub.unsqueeze(0),
                     #                                 embed_instruments
                     # )
@@ -322,7 +320,7 @@ class FragGNN(pl.LightningModule):
                 root_embeddings = self.pool(root_repr, root_embeddings)
         else:
             pass
-        
+
         # Line up the features to be parallel between fragment avgs and root
         # graphs
         ext_root = root_embeddings[ind_maps]
@@ -397,12 +395,11 @@ class FragGNN(pl.LightningModule):
             mlp_cat_vec,
             dim=1,
         )
-        
+
         output = self.output_map(hidden)
         output = self.sigmoid(output)
         padded_out = nn_utils.pad_packed_tensor(output, graphs.batch_num_nodes(), 0)
         padded_out = torch.squeeze(padded_out, -1)
-
         return padded_out
 
     def loss_fn(self, outputs, targets, natoms):
@@ -478,7 +475,7 @@ class FragGNN(pl.LightningModule):
         collision_eng,
         precursor_mz,
         adduct=None,
-        instrument=None, 
+        instrument=None,
         threshold=0,
         device: str = "cpu",
         max_nodes: int = None,
@@ -534,6 +531,7 @@ class FragGNN(pl.LightningModule):
         # Step 2: Featurize the root molecule
         root_graph_dict = [self.tree_processor.featurize_frag(frag=rf, engine=e, add_random_walk=False)  # add random walk feature later in batched
                            for rf, e in zip(root_frag, engine)]
+
         root_repr = None
         if self.root_encode == "gnn":
             root_repr = dgl.batch([rg["graph"] for rg in root_graph_dict]).to(device)
@@ -579,8 +577,8 @@ class FragGNN(pl.LightningModule):
                     broken=broken_nums,  # torch.ones_like(inds) * depth,
                     collision_engs=collision_engs,
                     precursor_mzs=precursor_mzs,
-                    adducts=adducts if self.embed_adduct else None, 
-                    instruments=instruments if self.embed_instrument else None, 
+                    adducts=adducts if self.embed_adduct else None,
+                    instruments=instruments if self.embed_instrument else None,
                     root_forms=root_form_vec,
                     frag_forms=frag_form_vecs,
                 )

@@ -112,6 +112,9 @@ def add_joint_train_args(parser):
     parser.add_argument(
         "--contr-weight", default=1, type=float
     )
+    parser.add_argument(
+        "--contr-threshold", default=0.5, type=float
+    )
     parser.add_argument("--pubchem-map-path", default='data/pubchem/pubchem_formulae_inchikey.hdf5')
     parser.add_argument("--num-decoys", default=3, type=int)
     parser.add_argument("--num-fixed-decoys", default=7, action="store", type=int) 
@@ -132,7 +135,7 @@ def train_model():
     kwargs = args.__dict__
 
     save_dir = kwargs["save_dir"]
-    common.setup_logger(save_dir, log_name=f"joint_contr_finetune_decoy{kwargs['num_decoys']}_fixed_decoy{kwargs['num_fixed_decoys']}.log", debug=kwargs["debug"])
+    common.setup_logger(save_dir, log_name=f"joint_contr_finetune_decoy{kwargs['num_decoys']}_fixed_decoy{kwargs['num_fixed_decoys']}_contr_threshold_{kwargs['contr_threshold']}.log", debug=kwargs["debug"])
     pl.seed_everything(kwargs.get("seed"))
 
     # Dump args
@@ -290,6 +293,7 @@ def train_model():
         sk_tau=kwargs["sk_tau"],
         ppm_tol=kwargs["ppm_tol"],
         contr_weight=kwargs["contr_weight"],
+        contr_threshold=kwargs["contr_threshold"],
         contr_loss_fn=kwargs["contr_loss_fn"],
         inten_weight=kwargs["inten_weight"],
         frag_weight = kwargs["frag_weight"],
@@ -350,6 +354,7 @@ def train_model():
         model.contr_weight = kwargs["contr_weight"]
         model.inten_weight = kwargs["inten_weight"]
         model.frag_weight = kwargs["frag_weight"]
+        model.contr_threshold = kwargs["contr_threshold"]
         model.magma_warmup_steps = kwargs["magma_warmup_steps"]
         model.magma_decay_rate = kwargs["magma_decay_rate"]
         model.magma_decay_steps = kwargs["magma_decay_steps"]

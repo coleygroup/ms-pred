@@ -60,7 +60,7 @@ def process_example(obj, max_k=50) -> dict:
     return obj
 
 
-def main(max_k, workers, input_map, input_dataset_folder, split_file):
+def main(max_k, workers, input_map, input_dataset_folder, split_file, subset='test'):
     """main.
 
     Args:
@@ -87,12 +87,17 @@ def main(max_k, workers, input_map, input_dataset_folder, split_file):
         split_df = pd.read_csv(split_file, sep="\t")
         name_col, split_col = split_df.columns
         split_vals = split_df[split_col].values
-        test_names = split_df[name_col].values[split_vals == "test"]
+        test_names = split_df[name_col].values[split_vals == subset]
+        assert len(test_names) > 0
         df_mask = df["spec"].isin(test_names)
         df = df[df_mask].reset_index()
 
-    output_pickle = retrieval_folder / f"cands_pickled{split_stem}_{max_k}.p"
-    output_df = retrieval_folder / f"cands_df{split_stem}_{max_k}.tsv"
+    if subset == 'test':
+        output_pickle = retrieval_folder / f"cands_pickled{split_stem}_{max_k}.p"
+        output_df = retrieval_folder / f"cands_df{split_stem}_{max_k}.tsv"
+    else:
+        output_pickle = retrieval_folder / f"cands_pickled{split_stem}_{subset}_{max_k}.p"
+        output_df = retrieval_folder / f"cands_df{split_stem}_{subset}_{max_k}.tsv"
 
     # spec, ikey, smiles, formula
     headers = ["spec", "inchikey", "smiles", "formula", "ionization", "precursor", "collision_energies"]
@@ -194,8 +199,10 @@ if __name__ == "__main__":
 
     # Modify here to create various datasets
     compute_entries = [
-        {"dataset": "nist20", "max_k": 50, "split": "split_1.tsv"},
-        {"dataset": "nist20", "max_k": 50, "split": "scaffold_1.tsv"},
+        # {"dataset": "nist20", "max_k": 50, "split": "split_1.tsv", "subset": "test"},
+        # {"dataset": "nist20", "max_k": 50, "split": "scaffold_1.tsv", "subset": "test"},
+        {"dataset": "nist20", "max_k": 50, "split": "split_1.tsv", "subset": "val"},
+        {"dataset": "nist20", "max_k": 50, "split": "scaffold_1.tsv", "subset": "val"},
         # {"dataset": "canopus_train_public", "max_k": 50, "split": "split_1.tsv"},
     ]
 
@@ -203,6 +210,7 @@ if __name__ == "__main__":
         dataset = test_entry['dataset']
         max_k= test_entry['max_k']
         split_file = test_entry['split']
+        subset = test_entry['subset']
 
         input_map = f"data/retrieval/pubchem/pubchem_formula_map_{dataset}.p"
         input_dataset_folder = Path(f"data/spec_datasets/{dataset}/")
@@ -213,4 +221,5 @@ if __name__ == "__main__":
             input_map=input_map,
             input_dataset_folder=input_dataset_folder,
             split_file=split_file,
+            subset=subset,
         )

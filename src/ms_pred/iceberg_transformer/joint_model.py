@@ -54,6 +54,7 @@ class JointModel(pl.LightningModule):
             sk_tau: float = 0.01,
             ppm_tol: float = 20,
             contr_weight: float = 1.0,
+            contr_threshold: float = 0.5,
             contr_loss_fn: str = "entropy",
             inten_weight: float = 1,
             frag_weight: float = 0.1,
@@ -99,6 +100,7 @@ class JointModel(pl.LightningModule):
         self.ppm_tol = ppm_tol
         self.contr_weight = contr_weight
         self.contr_loss_fn = contr_loss_fn
+        self.contr_threshold = contr_threshold
         self.graphormer_dropout = graphormer_dropout
         self.graphormer_layers = graphormer_layers
         self.hidden_size=hidden_size
@@ -792,7 +794,7 @@ class JointModel(pl.LightningModule):
             decoy_spec_loss_sorted = torch.sort(decoy_spec_loss, dim=-1).values.detach()
             ranking_dist = torch.abs(decoy_spec_loss[:, :, None] - decoy_spec_loss_sorted[:, None, :])
             top1_prob = pygm.sinkhorn(-ranking_dist, n1=batch["num_decoys_per_entry"]+1, n2=batch["num_decoys_per_entry"]+1, tau=self.sk_tau, backend='pytorch')[:, 0, 0]
-            contr_loss = torch.relu(-torch.log(top1_prob + 0.5))  # shift & cut ce loss for probs > 0.5
+            contr_loss = torch.relu(-torch.log(top1_prob + self.contr_threshold))  # shift & cut ce loss for probs > 0.5
             if name != "train":  
                 loss = {
                     "spec_loss": end_to_end_inten_loss,
