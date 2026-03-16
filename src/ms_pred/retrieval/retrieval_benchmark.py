@@ -1,30 +1,91 @@
-import ast
-from pathlib import Path
-import json
 import argparse
-import yaml
+import ast
+import json
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from typing import Dict, List
-import copy
-
-import pygmtools as pygm
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
-from numpy.linalg import norm
-
 import pandas as pd
+import torch
+import yaml
+from numpy.linalg import norm
+from torchmetrics.retrieval import RetrievalHitRate
 
 import ms_pred.common as common
 
 
 _WORKER_PREDSPEC_DB = None
-_SCORE_WORKER_STATE = None
 
 
-def _read_and_bin_pred_spec_name(
-    entry,
+def get_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", default="canopus_train_public")
+    parser.add_argument("--formula-dir-name", default="subform_20")
+    parser.add_argument(
+        "--pred-file",
+        default="results/ffn_baseline_cos/retrieval/split_1/fp_preds.p",
+    )
+    parser.add_argument("--outfile", default=None)
+    parser.add_argument("--dist-fn", default="cos", choices=["cos", "entropy", "random"])
+    parser.add_argument(
+        "--ignore-parent-peak",
+        action="store_true",
+        default=False,
+        help="If true, ignore the precursor peak.",
+    )
+    parser.add_argument("--num-bins", default=15000, type=int)
+    parser.add_argument("--upper-limit", default=1500, type=int)
+    parser.add_argument("--pool-fn", default="add", choices=["add", "max"])
+    parser.add_argument("--num-cpu-workers", default=16, type=int)
+    parser.add_argument(
+        "--true-labels",
+        default=None,
+        help="Optional query-label subset.",
+    )
+    parser.add_argument(
+        "--full-labels",
+        default=None,
+        help="Full candidate-label file.",
+    )
+    parser.add_argument(
+        "--binned-pred",
+        action="store_true",
+        default=True,
+        help="Deprecated flag retained for compatibility. Predictions are always evaluated as binned spectra.",
+    )
+    return parser.parse_args()
+
+
+def default_true_labels_path(data_folder: Path) -> Path:
+    labels_path = data_folder / "labels.tsv"
+    if labels_path.exists():
+        return labels_path
+    raise ValueError(
+        "Could not infer --true-labels because data/spec_datasets/<dataset>/labels.tsv does not exist."
+    )
+
+
+def normalize_inchikey(ikey: str) -> str:
+    return str(ikey).replace("ikey ", "").strip()
+
+
+def stereo_group_key(ikey: str) -> str:
+    ikey = normalize_inchikey(ikey)
+    return ikey.split("-")[0]
+
+
+def normalize_collision_dict(spec_dict: Dict) -> Dict[str, np.ndarray]:
+    return {
+        common.get_collision_energy(key): value
+        for key, value in spec_dict.items()
+        if value is not None and "nan" not in str(key)
+    }
+
+
+def _read_pred_spec_name(
+    entry: str,
     pred_file: str,
     num_bins: int,
     upper_limit: int,
@@ -37,14 +98,13 @@ def _read_and_bin_pred_spec_name(
     spec_name = entry
     spec_dict, has_remark = _WORKER_PREDSPEC_DB.read_from_name(spec_name)
     output = []
-
     if not has_remark:
         return output
 
     for cand_ikey, ce_spec_dict in spec_dict.items():
         pred_spec = {}
         for ce, spec_data in ce_spec_dict.items():
-            if "nan" in ce:
+            if "nan" in str(ce):
                 continue
 
             has_matching_bins = (
@@ -53,89 +113,84 @@ def _read_and_bin_pred_spec_name(
                 and getattr(spec_data, "_mass_upper_limit", None) == upper_limit
             )
             if has_matching_bins:
-                binned = spec_data.binned_spec
+                spec_array = spec_data.binned_spec
             else:
-                binned = spec_data.bin_spectrum(
+                spec_array = spec_data.bin_spectrum(
                     mass_upper_limit=upper_limit,
                     num_bins=num_bins,
                     pool_fn=pool_fn,
                 )
-            pred_spec[ce] = binned.astype(np.float32, copy=False)
+            pred_spec[ce] = spec_array.astype(np.float32, copy=False)
 
-        output.append((pred_spec, cand_ikey.strip("ikey "), spec_name.strip("pred_")))
+        output.append(
+            (
+                pred_spec,
+                normalize_inchikey(cand_ikey),
+                spec_name.removeprefix("pred_"),
+            )
+        )
     return output
 
 
-def get_args():
-    """get_args."""
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", default="canopus_train_public")
-    parser.add_argument("--formula-dir-name", default="subform_20")
-    parser.add_argument(
-        "--pred-file",
-        default="results/ffn_baseline_cos/retrieval/split_1/fp_preds.p",
-    )
-    parser.add_argument("--outfile", default=None)
-    parser.add_argument("--dist-fn", default="cos")
-    parser.add_argument(
-        "--ignore-parent-peak",
-        action="store_true",
-        default=False,
-        help="If true, ignore the precursor peak",
-    )
-    parser.add_argument("--num-bins", default=15000, help="Number of bins for spectra")
-    parser.add_argument("--upper-limit", default=1500, help="Largest m/z value")
-    parser.add_argument("--pool-fn", default="add", choices=["add", "max"])
-    parser.add_argument("--num-cpu-workers", default=16, type=int)
-    return parser.parse_args()
-
-
 def process_spec_file(
-    spec_name,
+    spec_name: str,
     name_to_colli: dict,
     spec_dir: Path,
     num_bins: int = -1,
     upper_limit: int = -1,
     binned_spec: bool = True,
+    dataset: str = "nist20",
 ):
-    """process_spec_file."""
     if binned_spec:
         assert num_bins > 0
         assert upper_limit > 0
 
-    if spec_dir.suffix == ".hdf5":
-        spec_h5 = common.HDF5Dataset(spec_dir)
-    else:
-        spec_h5 = None
+    spec_h5 = common.HDF5Dataset(spec_dir) if spec_dir.suffix == ".hdf5" else None
     return_dict = {}
     shared_loaded_json = None
     shared_spec_ar = None
     shared_binned = None
-    for colli_label in name_to_colli[spec_name]:
+
+    for colli_label in name_to_colli.get(spec_name, []):
         if spec_h5 is not None:
-            spec_file = f"{spec_name}_collision {colli_label}.json"
-            if spec_file not in spec_h5:
-                print(f"Cannot find spec {spec_file}")
+            if dataset == "msg":
+                spec_files = [
+                    f"{spec_name}_collision {colli_label} eV.json",
+                    f"{spec_name}_collision {colli_label} eV [imputed].json",
+                ]
+            else:
+                spec_files = [f"{spec_name}_collision {colli_label}.json"]
+
+            loaded_json = None
+            for spec_file in spec_files:
+                if spec_file in spec_h5:
+                    loaded_json = json.loads(spec_h5.read_str(spec_file))
+                    break
+
+            if loaded_json is None:
+                print(f"Cannot find spec for {spec_name} collision {colli_label}")
                 return_dict[colli_label] = (
                     np.zeros(num_bins, dtype=np.float32)
                     if binned_spec
                     else np.zeros((0, 2), dtype=np.float32)
                 )
                 continue
-            loaded_json = json.loads(spec_h5.read_str(spec_file))
         else:
             if shared_loaded_json is None:
                 spec_file = spec_dir / f"{spec_name}.json"
                 if not spec_file.exists():
                     print(f"Cannot find spec {spec_file}")
-                    return (
+                    missing_spec = (
                         np.zeros(num_bins, dtype=np.float32)
                         if binned_spec
                         else np.zeros((0, 2), dtype=np.float32)
                     )
+                    return {
+                        colli_label: missing_spec
+                        for colli_label in name_to_colli.get(spec_name, [])
+                    }
                 with open(spec_file, "r") as fp:
                     shared_loaded_json = json.load(fp)
-
                 if shared_loaded_json.get("output_tbl") is not None:
                     mz = shared_loaded_json["output_tbl"]["mono_mass"]
                     inten = shared_loaded_json["output_tbl"]["ms2_inten"]
@@ -157,60 +212,65 @@ def process_spec_file(
                 mz = loaded_json["output_tbl"]["mono_mass"]
                 inten = loaded_json["output_tbl"]["ms2_inten"]
                 spec_ar = np.vstack([mz, inten]).transpose(1, 0)
-                binned = common.bin_spectra([spec_ar], num_bins, upper_limit)
-                return_dict[colli_label] = binned[0].astype(np.float32, copy=False)
+                binned = common.bin_spectra([spec_ar], num_bins, upper_limit)[0]
+                return_dict[colli_label] = binned.astype(np.float32, copy=False)
         else:
             if spec_h5 is None:
                 return_dict[colli_label] = shared_spec_ar
             else:
                 mz = loaded_json["output_tbl"]["mono_mass"]
                 inten = loaded_json["output_tbl"]["ms2_inten"]
-                spec_ar = np.vstack([mz, inten]).transpose(1, 0)
-                return_dict[colli_label] = spec_ar
+                return_dict[colli_label] = np.vstack([mz, inten]).transpose(1, 0)
     return return_dict
 
 
 def dist_bin(
     cand_preds_dict: List[Dict],
     true_spec_dict: dict,
-    sparse=True,
+    sparse: bool = True,
     ignore_peak=None,
-    func="cos",
-    selected_evs=None,
-    agg=True,
+    func: str = "cos",
+    selected_evs: Optional[Iterable[str]] = None,
+    agg: bool = True,
 ) -> np.ndarray:
-    """distance function for binned spectrum"""
     dist = []
     true_npeaks = []
-    if selected_evs:
+
+    true_spec_dict = normalize_collision_dict(true_spec_dict)
+    cand_preds_dict = [normalize_collision_dict(cand_dict) for cand_dict in cand_preds_dict]
+
+    if selected_evs is not None:
+        selected_evs = {str(common.get_collision_energy(ev)) for ev in selected_evs}
         true_spec_dict = {
-            k: v for k, v in true_spec_dict.items() if str(k) in selected_evs
+            key: value for key, value in true_spec_dict.items() if str(key) in selected_evs
         }
 
-    true_spec_dict = {common.get_collision_energy(k): v for k, v in true_spec_dict.items()}
-    cand_preds_dict = [
-        {common.get_collision_energy(k): v for k, v in cand_dict.items()}
-        for cand_dict in cand_preds_dict
-    ]
-
-    for _, colli_eng in enumerate(true_spec_dict.keys()):
-        cand_preds = np.stack([i[colli_eng] for i in cand_preds_dict], axis=0)
-        true_spec = true_spec_dict[colli_eng]
-
+    for colli_eng, true_spec in true_spec_dict.items():
         if sparse:
-            pred_specs = np.zeros((cand_preds.shape[0], true_spec.shape[0]))
-            inds = cand_preds[:, :, 0].astype(int)
-            pos_1 = np.ones(inds.shape) * np.arange(inds.shape[0])[:, None]
-            pred_specs[pos_1.flatten().astype(int), inds.flatten()] = cand_preds[
-                :, :, 1
-            ].flatten()
+            pred_specs = np.zeros((len(cand_preds_dict), true_spec.shape[0]), dtype=np.float32)
+            for pred_idx, cand_dict in enumerate(cand_preds_dict):
+                cand_pred = cand_dict.get(colli_eng)
+                if cand_pred is None or cand_pred.size == 0:
+                    continue
+                if cand_pred.ndim == 1:
+                    pred_specs[pred_idx] = cand_pred.astype(np.float32, copy=False)
+                    continue
+                inds = cand_pred[:, 0].astype(int)
+                valid_mask = (inds >= 0) & (inds < pred_specs.shape[1])
+                pred_specs[pred_idx, inds[valid_mask]] = cand_pred[valid_mask, 1]
         else:
-            pred_specs = cand_preds
+            pred_specs = np.stack(
+                [
+                    cand_dict.get(colli_eng, np.zeros_like(true_spec, dtype=np.float32))
+                    for cand_dict in cand_preds_dict
+                ],
+                axis=0,
+            ).astype(np.float32, copy=False)
 
-        if ignore_peak:
-            pred_specs[:, int(ignore_peak):] = 0
-            true_spec = copy.deepcopy(true_spec)
-            true_spec[int(ignore_peak):] = 0
+        if ignore_peak is not None:
+            pred_specs[:, int(ignore_peak) :] = 0
+            true_spec = true_spec.copy()
+            true_spec[int(ignore_peak) :] = 0
 
         true_npeaks.append(np.sum(true_spec > 0))
 
@@ -234,218 +294,108 @@ def dist_bin(
             entropy_dists = (2 * entropy_mix - entropy_pred - entropy_targ) / np.log(4)
             entropy_dists[zeros] = 1
             dist.append(entropy_dists)
+        else:
+            raise NotImplementedError()
 
     dist = np.array(dist)
-    weights = (np.array(true_npeaks) >= 5) * 3 + (np.array(true_npeaks) >= 1) * 1
-    weights = weights / weights.sum()
+    if dist.shape[0] == 0:
+        return np.ones(len(cand_preds_dict), dtype=np.float32)
 
+    weights = (np.array(true_npeaks) >= 5) * 3 + (np.array(true_npeaks) >= 1) * 1
+    weights = weights / (weights.sum() + 1e-9)
     if agg:
         return np.sum(dist * weights[:, None], axis=0)
-    else:
-        dist = dist[weights > 0]
-        return dist, np.sum(dist * weights[:, None], axis=0)
+
+    dist = dist[weights > 0]
+    return dist, np.sum(dist * weights[:, None], axis=0)
 
 
 cos_dist_bin = partial(dist_bin, func="cos")
 entropy_dist_bin = partial(dist_bin, func="entropy")
 
 
-def cos_dist_hun(
-    cand_preds_dict: List[Dict],
-    true_spec_dict: dict,
-    parent_mass: float,
-    ignore_peak=False,
-) -> np.ndarray:
-    """cos_dist for sparse spectrum using Hungarian algorithm to match peaks"""
-    dist = 0
-    for _, colli_eng in enumerate(true_spec_dict.keys()):
-        cand_preds = common.np_stack_padding(
-            [i[colli_eng] for i in cand_preds_dict], axis=0
-        )
-        true_spec = true_spec_dict[colli_eng]
-
-        if ignore_peak:
-            cand_preds, true_spec = copy.deepcopy(cand_preds), copy.deepcopy(true_spec)
-            cand_preds[cand_preds[:, :, 0] > parent_mass - 1, 1] = 0
-            true_spec[true_spec[:, 0] > parent_mass - 1, 1] = 0
-
-        norm_pred = norm(cand_preds[:, :, 1], axis=-1) + 1e-22
-        norm_true = norm(true_spec[:, 1], axis=-1) + 1e-22
-
-        tol = parent_mass * 2e-5
-        mask = np.abs(cand_preds[:, :, None, 0] - true_spec[None, None, :, 0]) < tol
-        score = (
-            cand_preds[:, :, None, 1]
-            * true_spec[None, None, :, 1]
-            / (norm_pred[:, None, None] * norm_true)
-        )
-        score = score * mask
-        assign = pygm.hungarian(score)
-        dist += 1 - np.sum(assign * score, axis=(1, 2))
-
-    return dist / len(true_spec_dict)
+def rank_from_distances(dist: np.ndarray, target_mask: np.ndarray) -> Tuple[int, np.ndarray]:
+    sorted_indices = np.argsort(dist, kind="stable")
+    sorted_targets = target_mask[sorted_indices]
+    recovered = np.flatnonzero(sorted_targets)
+    if recovered.size == 0:
+        raise ValueError("True candidate was not present in the ranked candidate set.")
+    return int(recovered[0] + 1), sorted_indices
 
 
-def rank_test_entry(
-    cand_ikeys,
-    cand_preds,
-    true_spec,
-    true_ikey,
-    spec_name,
-    true_smiles,
-    parent_mass,
-    parent_mass_idx,
-    dist_fn="cos",
-    binned_pred=True,
-    **kwargs,
-):
-    """rank_test_entry."""
-    if dist_fn == "cos" and binned_pred:
-        dist = cos_dist_bin(
-            cand_preds_dict=cand_preds,
-            true_spec_dict=true_spec,
-            sparse=False,
-            ignore_peak=parent_mass_idx,
-        )
-    elif dist_fn == "cos" and not binned_pred:
-        dist = cos_dist_hun(
-            cand_preds_dict=cand_preds,
-            true_spec_dict=true_spec,
-            parent_mass=parent_mass,
-            ignore_peak=parent_mass_idx is not None,
-        )
-    elif dist_fn == "entropy" and binned_pred:
-        dist = entropy_dist_bin(
-            cand_preds_dict=cand_preds,
-            true_spec_dict=true_spec,
-            sparse=False,
-            ignore_peak=parent_mass_idx,
-        )
-    elif dist_fn == "random":
-        dist = np.random.randn(cand_preds.shape[0])
-    else:
-        raise NotImplementedError()
-
-    true_ind = np.argwhere(cand_ikeys == true_ikey).flatten()
-    resorted = np.argsort(dist)
-    resorted_ikeys = cand_ikeys[resorted]
-    resorted_dist = dist[resorted]
-
-    assert len(true_ind) == 1
-
-    true_ind = true_ind[0]
-    true_dist = dist[true_ind]
-    ind_found = np.argwhere(resorted_dist == true_dist).flatten()[-1]
-    ind_found = ind_found + 1
-
+def build_output_entry(
+    spec_name: str,
+    true_spec: dict,
+    true_smiles: str,
+    dist_full: np.ndarray,
+    target_mask: np.ndarray,
+    candidate_count: int,
+    full_candidate_count: int,
+) -> dict:
+    ind_found, sorted_indices = rank_from_distances(dist_full, target_mask)
+    sorted_dist = dist_full[sorted_indices]
+    true_dist = float(np.min(dist_full[target_mask]))
     true_mass = common.mass_from_smi(true_smiles)
-    mass_bin = common.bin_mass_results(true_mass)
 
-    if binned_pred:
-        num_peaks_avg = np.mean([np.sum(sp > 0) for sp in true_spec.values()])
-    else:
-        num_peaks_avg = np.mean([np.sum(sp[:, 1] > 0) for sp in true_spec.values()])
+    num_peaks_avg = np.mean([np.sum(sp > 0) for sp in true_spec.values()])
     num_collision_engs = len(true_spec)
-    peak_bin_avg = common.bin_peak_results(
-        true_spec, binned_spec=binned_pred, reduction="mean"
-    )
-    peak_bin_max = common.bin_peak_results(
-        true_spec, binned_spec=binned_pred, reduction="max"
-    )
-    peak_bin_min = common.bin_peak_results(
-        true_spec, binned_spec=binned_pred, reduction="min"
-    )
 
-    return_dict = {
+    out = {
         "ind_recovered": float(ind_found),
-        "total_decoys": len(resorted_ikeys),
+        "total_decoys": int(candidate_count),
+        "decoys_in_full": int(full_candidate_count),
         "mass": float(true_mass),
-        "mass_bin": mass_bin,
+        "mass_bin": common.bin_mass_results(true_mass),
         "num_peaks_avg": float(num_peaks_avg),
         "num_collision_engs": int(num_collision_engs),
-        "peak_bin_avg": peak_bin_avg,
-        "peak_bin_max": peak_bin_max,
-        "peak_bin_min": peak_bin_min,
-        "true_dist": float(true_dist),
+        "peak_bin_avg": common.bin_peak_results(true_spec, binned_spec=True, reduction="mean"),
+        "peak_bin_max": common.bin_peak_results(true_spec, binned_spec=True, reduction="max"),
+        "peak_bin_min": common.bin_peak_results(true_spec, binned_spec=True, reduction="min"),
+        "true_dist": true_dist,
         "spec_name": str(spec_name),
     }
-    for k in range(0, min(50, len(resorted_dist))):
-        return_dict[f"top_{k + 1}_dist"] = resorted_dist[k].item()
-    return return_dict
+    for k in range(0, min(50, len(sorted_dist))):
+        out[f"top_{k + 1}_dist"] = float(sorted_dist[k])
+    return out
 
 
-def _score_rank_entry_by_name(spec_name):
-    global _SCORE_WORKER_STATE
-    if _SCORE_WORKER_STATE is None:
-        raise RuntimeError("Score worker state has not been initialized")
+def expand_scores_to_full_candidates(
+    cand_ikeys: Sequence[str],
+    dist: np.ndarray,
+    full_candidate_ikeys: Sequence[str],
+) -> np.ndarray:
+    exact_map = {}
+    stereo_map = {}
+    for cand_ikey, cand_dist in zip(cand_ikeys, dist):
+        exact_key = normalize_inchikey(cand_ikey)
+        stereo_key = stereo_group_key(exact_key)
+        exact_map[exact_key] = float(cand_dist)
+        stereo_map[stereo_key] = float(cand_dist)
 
-    state = _SCORE_WORKER_STATE
-    selected_indices = state["pred_name_to_indices"][spec_name]
-    cand_ikeys = state["pred_ikeys"][selected_indices]
-    cand_preds = np.asarray(
-        [state["pred_spec_ars"][i] for i in selected_indices],
-        dtype=object,
-    )
-    true_spec = state["true_spec_by_name"][spec_name]
-    true_smi = state["name_to_smi"][spec_name]
-    true_ion = state["name_to_ion"][spec_name]
-    parent_mass = common.mass_from_smi(true_smi) + common.ion2mass[true_ion]
-
-    return rank_test_entry(
-        cand_ikeys=cand_ikeys,
-        cand_preds=cand_preds,
-        true_spec=true_spec,
-        true_ikey=state["name_to_ikey"][spec_name],
-        spec_name=spec_name,
-        true_smiles=true_smi,
-        parent_mass=parent_mass,
-        parent_mass_idx=(
-            (parent_mass - 1) * state["num_bins"] / state["upper_limit"]
-            if state["ignore_parent_peak"]
-            else None
-        ),
-        dist_fn=state["dist_fn"],
-        binned_pred=True,
-    )
+    expanded = np.empty(len(full_candidate_ikeys), dtype=np.float32)
+    expanded.fill(np.nan)
+    for idx, full_ikey in enumerate(full_candidate_ikeys):
+        exact_key = normalize_inchikey(full_ikey)
+        stereo_key = stereo_group_key(exact_key)
+        if exact_key in exact_map:
+            expanded[idx] = exact_map[exact_key]
+        elif stereo_key in stereo_map:
+            expanded[idx] = stereo_map[stereo_key]
+    return expanded
 
 
-def main(args):
-    """main."""
-    dataset = args.dataset
-    formula_dir_name = args.formula_dir_name
-    dist_fn = args.dist_fn
-    ignore_parent_peak = args.ignore_parent_peak
-    num_bins = args.num_bins
-    upper_limit = args.upper_limit
-    pool_fn = args.pool_fn
-    data_folder = Path(f"data/spec_datasets/{dataset}")
-    form_folder = data_folder / f"subformulae/{formula_dir_name}/"
-    data_df = pd.read_csv(data_folder / "labels.tsv", sep="\t")
-    class_df = pd.read_csv(data_folder / "chemical_class_labels.tsv", sep="\t")
+def make_torchmetric_scores(dist_full: np.ndarray, target_mask: np.ndarray) -> np.ndarray:
+    return -dist_full.astype(np.float64, copy=False)
 
-    name_to_ikey = dict(data_df[["spec", "inchikey"]].values)
-    name_to_smi = dict(data_df[["spec", "smiles"]].values)
-    name_to_ion = dict(data_df[["spec", "ionization"]].values)
-    name_to_colli = dict(data_df[["spec", "collision_energies"]].values)
-    name_to_class = dict(class_df[["spec", "class"]].values)
 
-    pred_file = Path(args.pred_file)
-    outfile = args.outfile
-    if outfile is None:
-        outfile = pred_file.parent / f"rerank_eval_{dist_fn}.yaml"
-        outfile_grouped_ion = pred_file.parent / f"rerank_eval_grouped_ion_{dist_fn}.tsv"
-        outfile_grouped_mass = pred_file.parent / f"rerank_eval_grouped_mass_{dist_fn}.tsv"
-        outfile_grouped_peak = pred_file.parent / f"rerank_eval_grouped_npeak_{dist_fn}.tsv"
-        outfile_grouped_class = pred_file.parent / f"rerank_eval_grouped_class_{dist_fn}.tsv"
-    else:
-        outfile = Path(outfile)
-        outfile_grouped_ion = outfile.parent / f"{outfile.stem}_grouped_ion.tsv"
-        outfile_grouped_mass = outfile.parent / f"{outfile.stem}_grouped_mass.tsv"
-        outfile_grouped_peak = outfile.parent / f"{outfile.stem}_grouped_npeak.tsv"
-        outfile_grouped_class = outfile.parent / f"{outfile.stem}_grouped_class.tsv"
-
-    pred_specs = common.PredSpecDB(h5_path=pred_file, mode="r")
-
+def load_prediction_entries(
+    pred_file: Path,
+    pred_names: Sequence[str],
+    num_bins: int,
+    upper_limit: int,
+    pool_fn: str,
+    num_cpu_workers: int,
+):
     pred_spec_ars = []
     pred_ikeys = []
     pred_name_to_indices = defaultdict(list)
@@ -458,9 +408,8 @@ def main(args):
                 pred_ikeys.append(pred_ikey)
                 pred_name_to_indices[pred_name].append(pred_idx)
 
-    pred_names = list(pred_specs.get_all_names())
-    bin_name_fn = partial(
-        _read_and_bin_pred_spec_name,
+    read_name_fn = partial(
+        _read_pred_spec_name,
         pred_file=str(pred_file),
         num_bins=num_bins,
         upper_limit=upper_limit,
@@ -468,33 +417,108 @@ def main(args):
     )
     common.chunked_parallel(
         pred_names,
-        bin_name_fn,
+        read_name_fn,
         chunks=1000,
-        max_cpu=args.num_cpu_workers,
-        task_name="Binning predicted spectra",
+        max_cpu=num_cpu_workers,
+        task_name="Loading predicted spectra",
         output_func=collect_pred_outputs,
     )
-    pred_ikeys = np.array(pred_ikeys)
-    pred_spec_names_unique = sorted(pred_name_to_indices.keys())
+    return np.array(pred_ikeys), pred_spec_ars, pred_name_to_indices
+
+
+def build_grouped_outputs(df: pd.DataFrame, output_map: Dict[str, Path]):
+    tsv_df = df.loc[:, ~df.columns.str.fullmatch(r"top_\d+_dist")]
+    for group_key, out_name in output_map.items():
+        if group_key not in tsv_df.columns:
+            continue
+        grouped = pd.concat(
+            [
+                tsv_df.groupby(group_key).mean(numeric_only=True),
+                tsv_df.groupby(group_key).size().rename("num_examples"),
+            ],
+            axis=1,
+        )
+        all_mean = tsv_df.mean(numeric_only=True)
+        all_mean["num_examples"] = len(tsv_df)
+        all_mean.name = "avg"
+        grouped = pd.concat([grouped, all_mean.to_frame().T], axis=0)
+        grouped.to_csv(out_name, sep="\t")
+
+
+def main(args):
+    dataset = args.dataset
+    data_folder = Path(f"data/spec_datasets/{dataset}")
+    form_folder = data_folder / f"subformulae/{args.formula_dir_name}/"
+
+    true_labels_path = args.true_labels
+    if true_labels_path is None:
+        true_labels_path = default_true_labels_path(data_folder)
+
+    full_cands_path = args.full_labels
+    if full_cands_path is None:
+        raise ValueError(
+            "Missing required --full-labels. Provide the retrieval candidate table to evaluate against."
+        )
+
+    query_df = pd.read_csv(true_labels_path, sep="\t")
+    full_df = pd.read_csv(full_cands_path, sep="\t")
+    full_group_sizes = full_df.groupby("spec").size()
+    if len(full_group_sizes) > 0 and int(full_group_sizes.max()) <= 1:
+        raise ValueError(
+            "The full candidate label file provides at most one candidate per spectrum. "
+            "Use a retrieval candidate table such as data/spec_datasets/<dataset>/retrieval/cands_df_<split>_*.tsv."
+        )
+
+    class_labels_path = data_folder / "chemical_class_labels.tsv"
+    class_df = pd.read_csv(class_labels_path, sep="\t") if class_labels_path.exists() else None
+
+    name_to_ikey = dict(query_df[["spec", "inchikey"]].values)
+    name_to_smi = dict(query_df[["spec", "smiles"]].values)
+    name_to_ion = dict(query_df[["spec", "ionization"]].values)
+    name_to_colli = dict(query_df[["spec", "collision_energies"]].values)
+    name_to_class = (
+        dict(class_df[["spec", "class"]].values)
+        if class_df is not None and {"spec", "class"}.issubset(class_df.columns)
+        else {}
+    )
 
     parsed_colli_cache = {}
     for spec_name, colli_raw in name_to_colli.items():
         if colli_raw not in parsed_colli_cache:
             colli_engs = ast.literal_eval(colli_raw)
             parsed_colli_cache[colli_raw] = [
-                colli_key for colli_key in colli_engs if "nan" not in colli_key
+                common.get_collision_energy(colli_key)
+                for colli_key in colli_engs
+                if "nan" not in str(colli_key)
             ]
         name_to_colli[spec_name] = parsed_colli_cache[colli_raw]
+
+    pred_file = Path(args.pred_file)
+    pred_specs = common.PredSpecDB(h5_path=pred_file, mode="r")
+    pred_names = list(pred_specs.get_all_names())
+
+    pred_ikeys, pred_spec_ars, pred_name_to_indices = load_prediction_entries(
+        pred_file=pred_file,
+        pred_names=pred_names,
+        num_bins=args.num_bins,
+        upper_limit=args.upper_limit,
+        pool_fn=args.pool_fn,
+        num_cpu_workers=args.num_cpu_workers,
+    )
+    query_spec_names = set(query_df["spec"].astype(str).unique())
+    pred_spec_names_unique = sorted(
+        spec_name for spec_name in pred_name_to_indices.keys() if spec_name in query_spec_names
+    )
 
     read_spec = partial(
         process_spec_file,
         name_to_colli=name_to_colli,
-        num_bins=num_bins,
-        upper_limit=upper_limit,
         spec_dir=form_folder,
+        num_bins=args.num_bins,
+        upper_limit=args.upper_limit,
         binned_spec=True,
+        dataset=dataset,
     )
-
     true_specs = common.chunked_parallel(
         pred_spec_names_unique,
         read_spec,
@@ -502,95 +526,174 @@ def main(args):
         max_cpu=args.num_cpu_workers,
         task_name="Loading true spectra",
     )
-
-    k_vals = list(range(1, 11))
-    running_lists = defaultdict(lambda: [])
-
     true_spec_by_name = {
         spec_name: true_spec
         for spec_name, true_spec in zip(pred_spec_names_unique, true_specs)
-        if true_spec is not None
-    }
-    score_spec_names = list(true_spec_by_name.keys())
-
-    global _SCORE_WORKER_STATE
-    _SCORE_WORKER_STATE = {
-        "pred_name_to_indices": pred_name_to_indices,
-        "pred_ikeys": pred_ikeys,
-        "pred_spec_ars": pred_spec_ars,
-        "true_spec_by_name": true_spec_by_name,
-        "name_to_smi": name_to_smi,
-        "name_to_ion": name_to_ion,
-        "name_to_ikey": name_to_ikey,
-        "num_bins": num_bins,
-        "upper_limit": upper_limit,
-        "ignore_parent_peak": ignore_parent_peak,
-        "dist_fn": dist_fn,
+        if spec_name in name_to_ikey and true_spec is not None
     }
 
-    with ThreadPoolExecutor(max_workers=args.num_cpu_workers) as executor:
-        rank_outputs = list(executor.map(_score_rank_entry_by_name, score_spec_names))
+    full_candidates_by_spec = {
+        spec_name: grp["inchikey"].astype(str).tolist()
+        for spec_name, grp in full_df.groupby("spec", sort=False)
+    }
 
+    k_vals = list(range(1, 11)) + [20]
+    hit_rates = {}
+    all_preds_torch = []
+    all_targets_torch = []
+    all_indexes_torch = []
     output_entries = []
-    for out in rank_outputs:
-        output_entries.append(out)
+    running_lists = defaultdict(list)
+    missing_true_candidate = 0
+    missing_candidate_mapping = 0
+
+    for query_idx, spec_name in enumerate(sorted(true_spec_by_name)):
+        selected_indices = pred_name_to_indices.get(spec_name)
+        if not selected_indices:
+            continue
+
+        full_candidate_ikeys = full_candidates_by_spec.get(spec_name)
+        if not full_candidate_ikeys:
+            continue
+
+        cand_ikeys = pred_ikeys[selected_indices]
+        cand_preds = np.asarray([pred_spec_ars[i] for i in selected_indices], dtype=object)
+        true_spec = true_spec_by_name[spec_name]
+        if len(true_spec) == 0 or not any(np.size(value) > 0 for value in true_spec.values()):
+            continue
+        true_smi = name_to_smi[spec_name]
+        true_ion = name_to_ion[spec_name]
+        true_ikey = normalize_inchikey(name_to_ikey[spec_name])
+        true_stereo_group = stereo_group_key(true_ikey)
+
+        parent_mass = common.mass_from_smi(true_smi) + common.ion2mass[true_ion]
+        parent_mass_idx = (
+            (parent_mass - 1) * args.num_bins / args.upper_limit
+            if args.ignore_parent_peak
+            else None
+        )
+
+        if args.dist_fn == "cos":
+            dist = cos_dist_bin(
+                cand_preds_dict=cand_preds,
+                true_spec_dict=true_spec,
+                sparse=False,
+                ignore_peak=parent_mass_idx,
+            )
+        elif args.dist_fn == "entropy":
+            dist = entropy_dist_bin(
+                cand_preds_dict=cand_preds,
+                true_spec_dict=true_spec,
+                sparse=False,
+                ignore_peak=parent_mass_idx,
+            )
+        elif args.dist_fn == "random":
+            dist = np.random.randn(len(cand_preds))
+        else:
+            raise NotImplementedError(f"dist_fn={args.dist_fn} is not implemented.")
+
+        target_mask = np.array(
+            [stereo_group_key(ikey) == true_stereo_group for ikey in full_candidate_ikeys],
+            dtype=bool,
+        )
+        if not np.any(target_mask):
+            missing_true_candidate += 1
+            continue
+
+        dist_full = expand_scores_to_full_candidates(cand_ikeys, dist, full_candidate_ikeys)
+        if np.isnan(dist_full[target_mask]).all():
+            missing_candidate_mapping += 1
+            continue
+        dist_full = np.nan_to_num(dist_full, nan=1.0)
+
+        entry = build_output_entry(
+            spec_name=spec_name,
+            true_spec=true_spec,
+            true_smiles=true_smi,
+            dist_full=dist_full,
+            target_mask=target_mask,
+            candidate_count=len(cand_ikeys),
+            full_candidate_count=len(full_candidate_ikeys),
+        )
+        entry["ion"] = true_ion
+        if spec_name in name_to_class:
+            entry["class"] = name_to_class[spec_name]
+        if "instrument" in query_df.columns:
+            instrument = query_df.loc[query_df["spec"] == spec_name, "instrument"].iloc[0]
+            entry["instrument"] = instrument
+        output_entries.append(entry)
 
         for k in k_vals:
-            below_k = out["ind_recovered"] <= k
+            below_k = entry["ind_recovered"] <= k
             running_lists[f"top_{k}"].append(below_k)
-            out[f"top_{k}"] = below_k
-        running_lists["total_decoys"].append(out["total_decoys"])
-        running_lists["true_dist"].append(out["true_dist"])
-    _SCORE_WORKER_STATE = None
+            entry[f"top_{k}"] = below_k
+        running_lists["total_decoys"].append(entry["total_decoys"])
+        running_lists["decoys_in_full"].append(entry["decoys_in_full"])
+        running_lists["true_dist"].append(entry["true_dist"])
+
+        scores_torch = make_torchmetric_scores(dist_full, target_mask)
+        all_preds_torch.append(torch.from_numpy(scores_torch))
+        all_targets_torch.append(torch.from_numpy(target_mask))
+        all_indexes_torch.append(
+            torch.full((len(full_candidate_ikeys),), query_idx, dtype=torch.long)
+        )
+
+    if all_preds_torch:
+        preds_tensor = torch.cat(all_preds_torch)
+        target_tensor = torch.cat(all_targets_torch)
+        indexes_tensor = torch.cat(all_indexes_torch)
+        for k in k_vals:
+            metric = RetrievalHitRate(top_k=k)
+            metric.update(preds_tensor, target_tensor, indexes=indexes_tensor)
+            hit_rates[f"hit_rate_at_{k}"] = float(metric.compute().item())
+
+    if args.outfile is None:
+        outfile = pred_file.parent / f"rerank_eval_{args.dist_fn}.yaml"
+        grouped_output_map = {
+            "ion": pred_file.parent / f"rerank_eval_grouped_ion_{args.dist_fn}.tsv",
+            "mass_bin": pred_file.parent / f"rerank_eval_grouped_mass_{args.dist_fn}.tsv",
+            "peak_bin_avg": pred_file.parent / f"rerank_eval_grouped_npeak_{args.dist_fn}.tsv",
+            "class": pred_file.parent / f"rerank_eval_grouped_class_{args.dist_fn}.tsv",
+        }
+    else:
+        outfile = Path(args.outfile)
+        grouped_output_map = {
+            "ion": outfile.parent / f"{outfile.stem}_grouped_ion.tsv",
+            "mass_bin": outfile.parent / f"{outfile.stem}_grouped_mass.tsv",
+            "peak_bin_avg": outfile.parent / f"{outfile.stem}_grouped_npeak.tsv",
+            "class": outfile.parent / f"{outfile.stem}_grouped_class.tsv",
+        }
+    if "instrument" in query_df.columns:
+        grouped_output_map["instrument"] = outfile.parent / f"{outfile.stem}_grouped_instrument.tsv"
 
     final_output = {
         "dataset": dataset,
         "data_folder": str(data_folder),
-        "dist_fn": dist_fn,
+        "dist_fn": args.dist_fn,
+        "true_labels": str(true_labels_path),
+        "full_labels": str(full_cands_path),
+        "metrics": hit_rates,
+        "missing_true_candidate": int(missing_true_candidate),
+        "missing_candidate_mapping": int(missing_candidate_mapping),
         "individuals": sorted(output_entries, key=lambda x: x["ind_recovered"]),
     }
-
     for k, v in running_lists.items():
-        final_output[f"avg_{k}"] = float(np.mean(v))
+        final_output[f"avg_{k}"] = float(np.mean(v)) if len(v) > 0 else float("nan")
+    for k, v in hit_rates.items():
+        suffix = k.replace("hit_rate_at_", "top_")
+        final_output[f"avg_{suffix}"] = v
 
-    for i in output_entries:
-        i["ion"] = name_to_ion[i["spec_name"]]
-        i["class"] = name_to_class[i["spec_name"]]
-
-    df = pd.DataFrame(output_entries)
-    tsv_df = df.loc[:, ~df.columns.str.fullmatch(r"top_\d+_dist")]
-
-    for group_key, out_name in zip(
-        ["mass_bin", "ion", "peak_bin_avg", "class"],
-        [
-            outfile_grouped_mass,
-            outfile_grouped_ion,
-            outfile_grouped_peak,
-            outfile_grouped_class,
-        ],
-    ):
-        df_grouped = pd.concat(
-            [
-                tsv_df.groupby(group_key).mean(numeric_only=True),
-                tsv_df.groupby(group_key).size(),
-            ],
-            axis=1,
+    if output_entries:
+        df = pd.DataFrame(output_entries)
+        build_grouped_outputs(
+            df=df,
+            output_map=grouped_output_map,
         )
-        df_grouped = df_grouped.rename({0: "num_examples"}, axis=1)
-
-        all_mean = tsv_df.mean(numeric_only=True)
-        all_mean["num_examples"] = len(tsv_df)
-        all_mean.name = "avg"
-        df_grouped = pd.concat([df_grouped, all_mean.to_frame().T], axis=0)
-        df_grouped.to_csv(out_name, sep="\t")
 
     with open(outfile, "w") as fp:
-        out_str = yaml.dump(final_output, indent=2)
-        # print(out_str)
-        fp.write(out_str)
+        yaml.dump(final_output, fp, indent=2)
 
 
 if __name__ == "__main__":
-    """__main__"""
     args = get_args()
     main(args)

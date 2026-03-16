@@ -664,15 +664,10 @@ class CompositeMassSpec:
         else:
             raise ValueError(f'Unknown merge method {merge_method}')
 
-def _encode_str_array_py(strings):
-    # Store as variable-length bytes in npz for portability.
-    # Use UTF-8; represent None as empty string.
-    out = []
-    for s in strings:
-        if s is None:
-            s = ""
-        out.append(s.encode("utf-8"))
-    return np.array(out, dtype=object)
+def _normalize_str_list(strings):
+    # HDF5 string datasets should be written from plain Python strings, not
+    # numpy object arrays of bytes, which h5py cannot always convert.
+    return ["" if s is None else str(s) for s in strings]
 
 def _decode_str_array_py(arr):
     # arr may be dtype object bytes; convert to Python str; empty => None
@@ -687,6 +682,19 @@ def _decode_str_array_py(arr):
             s = b.decode("utf-8")
         out.append(None if s == "" else s)
     return out
+
+def _create_str_dataset(grp, name, values, maxshape, chunks):
+    dt = h5py.string_dtype(encoding="utf-8")
+    ds = grp.create_dataset(
+        name,
+        shape=(len(values),),
+        dtype=dt,
+        maxshape=maxshape,
+        chunks=chunks,
+    )
+    if len(values) > 0:
+        ds[:] = _normalize_str_list(values)
+    return ds
 
 def _is_h5_writable(h5f: h5py.File) -> bool:
     # h5py File.mode examples: 'r', 'r+', 'w', 'w-', 'x', 'a'
@@ -762,34 +770,14 @@ def _embed_manifest_into_h5(h5f: h5py.File, manifest: dict, h5_path: Path):
     grp.attrs["version"] = int(manifest["version"])
     grp.attrs["layout_version"] = int(_MANIFEST_LAYOUT_VERSION)
 
-    # Datasets (variable length strings)
-    vlen_bytes = h5py.special_dtype(vlen=bytes)
-
-    leaf_path_b = _encode_str_array_py(manifest["leaf_path"])
-    name_b = _encode_str_array_py(manifest["name"])
-    remark_b = _encode_str_array_py(manifest["remark"])
-    ce_key_b = _encode_str_array_py(manifest["ce_key"])
-
     # Create RESIZABLE datasets so we can append inside write().
     # Use chunking for efficient append.
-    n = len(leaf_path_b)
+    n = len(manifest["leaf_path"])
     chunk = (max(1, min(4096, n)),)
-    grp.create_dataset(
-        "leaf_path", data=leaf_path_b, dtype=vlen_bytes,
-        maxshape = (None,), chunks = chunk
-    )
-    grp.create_dataset(
-        "name", data=name_b, dtype=vlen_bytes,
-        maxshape = (None,), chunks = chunk
-    )
-    grp.create_dataset(
-        "remark", data=remark_b, dtype=vlen_bytes,
-        maxshape = (None,), chunks = chunk
-    )
-    grp.create_dataset(
-        "ce_key", data=ce_key_b, dtype=vlen_bytes,
-        maxshape = (None,), chunks = chunk
-    )
+    _create_str_dataset(grp, "leaf_path", manifest["leaf_path"], maxshape=(None,), chunks=chunk)
+    _create_str_dataset(grp, "name", manifest["name"], maxshape=(None,), chunks=chunk)
+    _create_str_dataset(grp, "remark", manifest["remark"], maxshape=(None,), chunks=chunk)
+    _create_str_dataset(grp, "ce_key", manifest["ce_key"], maxshape=(None,), chunks=chunk)
     grp.attrs["count"] = int(n)
 
 def _load_embedded_manifest(h5f: h5py.File, h5_path: Path):
@@ -841,7 +829,6 @@ def _manifest_append_one(h5f: h5py.File, leaf_path: str, name: str, remark, ce_k
     Append a single entry into the embedded manifest group.
     Assumes file is writable.
     """
-    vlen_bytes = h5py.special_dtype(vlen=bytes)
     if remark is None:
         remark = ""
     # Ensure group exists and is appendable
@@ -852,7 +839,7 @@ def _manifest_append_one(h5f: h5py.File, leaf_path: str, name: str, remark, ce_k
         # start empty, chunked, resizable
         chunk = (4096,)
         for k in ("leaf_path", "name", "remark", "ce_key"):
-            grp.create_dataset(k, shape=(0,), maxshape=(None,), chunks=chunk, dtype=vlen_bytes)
+            _create_str_dataset(grp, k, [], maxshape=(None,), chunks=chunk)
         grp.attrs["count"] = 0
     grp = h5f[_MANIFEST_GROUP]
 
@@ -873,7 +860,7 @@ def _manifest_append_one(h5f: h5py.File, leaf_path: str, name: str, remark, ce_k
     ):
         ds = grp[k]
         ds.resize((new_n,))
-        ds[idx] = val.encode("utf-8")
+        ds[idx] = str(val)
     grp.attrs["count"] = int(new_n)
 
 class PredSpecDB:
@@ -1060,12 +1047,13 @@ class PredSpecDB:
         if spec.has_frags:
             attr_updates["frag_bits"] = spec.frags.shape[-1]
         if spec.has_binned_spec:
-            attr_updates.update({
+            binned_attr_updates = {
                 "num_bins": spec._num_bins,
                 "upper_limit": spec._mass_upper_limit,
                 "binned_rows": binned_rows,
                 "binned_u8_len": binned_u8_len,
-            })
+            }
+            attr_updates.update({k: v for k, v in binned_attr_updates.items() if v is not None})
         h5_dataset.update_attr(full_name, attr_updates)
         h5_dataset.update_attr(full_name, spec.info)
 

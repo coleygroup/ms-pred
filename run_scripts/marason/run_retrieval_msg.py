@@ -7,7 +7,7 @@ from sklearn.exceptions import DataConversionWarning
 warnings.filterwarnings(action='ignore', category=DataConversionWarning)
 
 pred_file = "src/ms_pred/marason/predict_smis.py"
-retrieve_file = "src/ms_pred/retrieval/retrieval_benchmark_msg.py"
+retrieve_file = "src/ms_pred/retrieval/retrieval_benchmark.py"
 subform_name = "no_subform"
 devices = [0, 1]
 vis_devices = ",".join([str(_) for _ in devices])

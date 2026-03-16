@@ -245,7 +245,9 @@ def predict():
                     intens=intens,
                     frags=pred_frag,
                     remark=ikey,
-                    binned_spec=full_outputs["binned_spec"][output_ind] if kwargs["binned_out"] else None
+                    binned_spec=full_outputs["binned_spec"][output_ind] if kwargs["binned_out"] else None,
+                    num_bins=kwargs["num_bins"] if kwargs["binned_out"] else None,
+                    upper_limit=kwargs["upper_limit"] if kwargs["binned_out"] else None,
                 )
                 return_list.append((spec_name, pred_ms))
             return return_list
