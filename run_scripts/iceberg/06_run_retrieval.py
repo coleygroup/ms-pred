@@ -50,6 +50,11 @@ test_entries = [
     #  "train_split": "scaffold_1_rnd3",
     #  "test_split": "scaffold_1",
     #  "max_k": 50},
+
+    {"dataset": "msg",
+     "train_split": "official_split",
+     "test_split": "test_formula",
+     "max_k": 256},
 ]
 
 pred_filename = "preds.hdf5"
@@ -71,9 +76,8 @@ for test_entry in test_entries:
     save_dir = inten_model.parent.parent / f"retrieval_{dataset}_{split}_{maxk}"
     save_dir.mkdir(exist_ok=True)
 
-    args = yaml.safe_load(open(inten_model.parent.parent / "args.yaml", "r"))
-    form_folder = Path(args["magma_dag_folder"])
-    gen_model = form_folder.parent / "version_0/best.ckpt"
+    form_dir = Path(f"results/dag_{dataset}")
+    gen_model = form_dir / train_split / "version_0/best.ckpt"
 
     save_dir = save_dir
     save_dir.mkdir(exist_ok=True)
@@ -103,6 +107,7 @@ for test_entry in test_entries:
     # Run retrieval
     cmd = f"""python {retrieve_file} \\
     --dataset {dataset} \\
+    --full-labels {labels} \\
     --formula-dir-name {subform_name}.hdf5 \\
     --pred-file {save_dir / pred_filename} \\
     --dist-fn {dist} \\
