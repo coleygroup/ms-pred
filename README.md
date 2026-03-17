@@ -138,6 +138,8 @@ python data_scripts/pubchem/02_make_formula_subsets.py
 python data_scripts/pubchem/03_dataset_subset.py --dataset-labels data/spec_datasets/nist20/labels.tsv # for nist20 dataset
 python data_scripts/pubchem/04_make_retrieval_lists.py
 
+# optional, if you want per chemical class analysis
+python data_scripts/predict_chemical_class.py
 ```
 
  
