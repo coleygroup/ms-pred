@@ -199,8 +199,8 @@ if __name__ == "__main__":
 
     # Modify here to create various datasets
     compute_entries = [
-        # {"dataset": "nist20", "max_k": 50, "split": "split_1.tsv", "subset": "test"},
-        # {"dataset": "nist20", "max_k": 50, "split": "scaffold_1.tsv", "subset": "test"},
+        {"dataset": "nist20", "max_k": 50, "split": "split_1.tsv", "subset": "test"},
+        {"dataset": "nist20", "max_k": 50, "split": "scaffold_1.tsv", "subset": "test"},
         {"dataset": "nist20", "max_k": 50, "split": "split_1.tsv", "subset": "val"},
         {"dataset": "nist20", "max_k": 50, "split": "scaffold_1.tsv", "subset": "val"},
         # {"dataset": "canopus_train_public", "max_k": 50, "split": "split_1.tsv"},
