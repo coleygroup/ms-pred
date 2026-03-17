@@ -141,6 +141,8 @@ ion2mass = {
     "[M-H2O+H]+": -ELEMENT_TO_MASS["O"] - ELEMENT_TO_MASS["H"] - ELECTRON_MASS,
     "[M+H-H2O]+": -ELEMENT_TO_MASS["O"] - ELEMENT_TO_MASS["H"] - ELECTRON_MASS,
     "[M+H3N+H]+": ELEMENT_TO_MASS["N"] + ELEMENT_TO_MASS["H"] * 4 - ELECTRON_MASS,
+    "[M+H-H3N]+": -ELEMENT_TO_MASS["N"] * 1 - ELEMENT_TO_MASS["H"] * 3 - ELECTRON_MASS,
+    "[M+H-CH2O2]+": -ELEMENT_TO_MASS["C"] - ELEMENT_TO_MASS["O"] * 2 - ELEMENT_TO_MASS["H"] - ELECTRON_MASS,
     "[M+NH4]+": ELEMENT_TO_MASS["N"] + ELEMENT_TO_MASS["H"] * 4 - ELECTRON_MASS,
     "[M]+": 0 - ELECTRON_MASS,
     "[M-H4O2+H]+": -ELEMENT_TO_MASS["O"] * 2 - ELEMENT_TO_MASS["H"] * 3 - ELECTRON_MASS,
@@ -148,6 +150,7 @@ ion2mass = {
     # negative mode
     "[M-H]-": -ELEMENT_TO_MASS["H"] + ELECTRON_MASS,
     "[M+Cl]-": ELEMENT_TO_MASS["Cl"] + ELECTRON_MASS,
+    "[M+CHO2]-": ELEMENT_TO_MASS["C"] + ELEMENT_TO_MASS["O"] * 2 + ELEMENT_TO_MASS["H"] + ELECTRON_MASS,
     "[M-H2O-H]-": -ELEMENT_TO_MASS["O"] - ELEMENT_TO_MASS["H"] * 3 + ELECTRON_MASS,
     "[M-H-H2O]-": -ELEMENT_TO_MASS["O"] - ELEMENT_TO_MASS["H"] * 3 + ELECTRON_MASS,
     "[M-H-CO2]-": -ELEMENT_TO_MASS["C"] - ELEMENT_TO_MASS["O"] * 2 - ELEMENT_TO_MASS["H"] + ELECTRON_MASS,
@@ -167,6 +170,8 @@ ion2mass = {
     #    '[M+3Na-2H]+'
 
 # Valid adducts
+# TODO: will I break things if positive adducts and negative adducts are intermingled? 
+# Added new adducts to the end here to present indexing? (Though I suppose no such preservation is needed)
 ion2onehot_pos = {
     "[M+H]+": 0,
     "[M+Na]+": 1,
@@ -183,6 +188,13 @@ ion2onehot_pos = {
     "[M-H2O-H]-": 9,
     "[M-H-H2O]-": 9,
     "[M-H-CO2]-": 10,
+    "[M+H-H3N]+": 11,
+    "[M-H3N+H]+": 11,
+    "[M-NH3+H]+": 11,
+    "[M+H-NH3]+": 11,
+    "[M+H-CH2O2]+": 12, 
+    "[M+CHO2]-": 13,
+
 }
 
 ion_pos2extra_multihot = {v: set() for v in ion2onehot_pos.values()}
@@ -245,7 +257,8 @@ for ion in _ori_ions:
 instrument2onehot_pos = {
     "Orbitrap": 0,
     "QTOF": 1, 
-    "Unknown": 2
+    "IT-FT": 2,
+    "Unknown": 3
 }
 
 
