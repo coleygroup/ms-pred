@@ -146,7 +146,7 @@ def train_model():
     for name in magma_tree_h5.get_all_names():
         ces, remarks = magma_tree_h5.get_entries(name)
         for ce, r in zip(ces, remarks):
-            name_to_keys[f'{name}'] = (name, ce, r)
+            name_to_keys[f'{name}_collision {ce}'] = (name, ce, r)
 
     pe_embed_k = kwargs["pe_embed_k"]
     root_encode = kwargs["root_encode"]
