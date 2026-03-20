@@ -19,7 +19,6 @@ from collections import defaultdict
 import ms_pred.common.chem_utils as chem_utils
 from ms_pred.common.denoising_utils import electronic_denoising
 from ms_pred import nn_utils
-from ms_pred.magma.fragmentation import FragmentEngine
 
 try:
     from pytorch_lightning.loggers import LightningLoggerBase as Logger
@@ -45,7 +44,7 @@ class MassSpec:
     """
     def __init__(self, collision_energy: Union[str, float], root_canonical_smiles=None, adduct=None, remark=None,
                  probs=None, brokens=None, masses=None, masses_no_adduct=None,
-                 frag_form_vecs=None, frags=None, intens=None, pulled_atoms=None, int_frags=None,
+                 frag_form_vecs=None, frags=None, intens=None, int_frags=None,
                  binned_spec=None, num_bins=None, upper_limit=None, **kwargs):
         self._engine = None
         self._binned_spec = None
@@ -81,6 +80,7 @@ class MassSpec:
         self.masses_no_adduct = safe_assign(masses_no_adduct, np.floating)
         self.frag_form_vecs = safe_assign(frag_form_vecs, np.integer)
         if frags is None and int_frags is not None:
+            from ms_pred.magma.fragmentation import FragmentEngine
             self._engine = FragmentEngine(self.root_canonical_smiles, mol_str_canonicalized=True)
             bit_lists = [
                 ((x >> np.arange(self._engine.natoms)) & 1).astype(bool)
@@ -89,11 +89,44 @@ class MassSpec:
             frags = np.vstack(bit_lists)
         self.frags = safe_assign(frags, bool)
         self.intens = safe_assign(intens, np.floating)
-        self.pulled_atoms = safe_assign(pulled_atoms, bool)
         self._binned_spec = safe_assign(binned_spec, np.floating)
         if self._binned_spec is not None and self._num_bins is None:
             self._num_bins = len(self._binned_spec)
+        for key in ("atoms_pulled_ptr", "atoms_pulled_data"):
+            if key in kwargs and kwargs[key] is not None:
+                kwargs[key] = safe_assign(kwargs[key], np.integer)
         self.meta = kwargs
+
+    @classmethod
+    def from_instance(cls, other_instance, **kwargs):
+        def clone_array_like(value):
+            if value is None:
+                return None
+            if isinstance(value, np.ndarray):
+                return value.copy()
+            if isinstance(value, torch.Tensor):
+                return value.clone()
+            return value
+
+        new_kwargs = {
+            "collision_energy": other_instance.collision_energy,
+            "root_canonical_smiles": other_instance.root_canonical_smiles,
+            "adduct": other_instance.adduct,
+            "remark": other_instance.remark,
+            "probs": clone_array_like(other_instance.probs),
+            "brokens": clone_array_like(other_instance.brokens),
+            "masses": clone_array_like(other_instance.masses),
+            "masses_no_adduct": clone_array_like(other_instance.masses_no_adduct),
+            "frag_form_vecs": clone_array_like(other_instance.frag_form_vecs),
+            "frags": clone_array_like(other_instance.frags),
+            "intens": clone_array_like(other_instance.intens),
+            "binned_spec": clone_array_like(other_instance._binned_spec),
+            "num_bins": other_instance._num_bins,
+            "upper_limit": other_instance._mass_upper_limit,
+            **copy.deepcopy(other_instance.meta),
+        }
+        new_kwargs.update(kwargs)
+        return cls(**new_kwargs)
 
     def add_hydrogen_shift(self):
         """add hydrogen shift to masses and fragments"""
@@ -227,10 +260,6 @@ class MassSpec:
         return self.frags is not None
 
     @property
-    def has_pulled_atoms(self):
-        return self.pulled_atoms is not None
-
-    @property
     def max_add_hs(self):
         return self.brokens
 
@@ -256,6 +285,17 @@ class MassSpec:
             return np.stack((self.masses, self.intens), axis=1)
         else:
             return None
+
+    def get_atoms_pulled(self):
+        ptr = self.meta.get("atoms_pulled_ptr")
+        data = self.meta.get("atoms_pulled_data")
+        if ptr is None or data is None:
+            return None
+        ptr = np.asarray(ptr, dtype=np.int64)
+        data = np.asarray(data, dtype=np.int64)
+        if len(ptr) == 0:
+            return []
+        return [data[ptr[i]:ptr[i + 1]].tolist() for i in range(len(ptr) - 1)]
 
     @property
     def binned_spec(self):
@@ -343,7 +383,7 @@ class MassSpec:
             raise ValueError('spectrum must have intensities!')
 
         new_masses, new_masses_no_adduct, new_probs, new_frags, new_frag_form_vecs = [], [], [], [], []
-        new_brokens, new_pulled_atoms, new_intens = [], [], []
+        new_brokens, new_intens = [], []
         for i in range(self.num_peaks):
             if self.intens[i] >= thresh:
                 if self.has_masses:           new_masses.append(self.masses[i])
@@ -352,7 +392,6 @@ class MassSpec:
                 if self.has_frags:            new_frags.append(self.frags[i])
                 if self.has_frag_form_vecs:   new_frag_form_vecs.append(self.frag_form_vecs[i])
                 if self.has_brokens:          new_brokens.append(self.brokens[i])
-                if self.has_pulled_atoms:     new_pulled_atoms.append(self.pulled_atoms[i])
                 new_intens.append(self.intens[i])
 
         return MassSpec(
@@ -367,7 +406,6 @@ class MassSpec:
             frag_form_vecs=new_frag_form_vecs,
             frags=new_frags,
             intens=new_intens,
-            pulled_atoms=new_pulled_atoms,
             **self.meta
         )
 
@@ -382,7 +420,6 @@ class MassSpec:
         if self.has_frags:            self.frags = self.frags[sortind]
         if self.has_frag_form_vecs:   self.frag_form_vecs = self.frag_form_vecs[sortind]
         if self.has_brokens:          self.brokens = self.brokens[sortind]
-        if self.has_pulled_atoms:     self.pulled_atoms = self.pulled_atoms[sortind]
         if self.has_intens:           self.intens = self.intens[sortind]
 
     @staticmethod
@@ -895,7 +932,6 @@ class PredSpecDB:
             self.has_frag_form_vecs = has_frag_form_vecs
             self.has_frags   = has_frags
             self.has_intens  = has_intens
-            self.has_pulled_atoms = has_pulled_atoms
             self.has_binned_spec = has_binned_spec
             self.root_key_dict = {
                 "probs": self.has_probs,
@@ -905,7 +941,6 @@ class PredSpecDB:
                 "brokens": self.has_brokens,
                 "frag_form_vecs": self.has_frag_form_vecs,
                 "frags": self.has_frags,
-                "pulled_atoms": self.has_pulled_atoms,
                 "binned_spec": self.has_binned_spec,
             }
             h5_dataset_0.update_attr('.', self.root_key_dict)
@@ -921,7 +956,6 @@ class PredSpecDB:
             self.has_brokens          = safe_root_key_get('brokens')
             self.has_frag_form_vecs   = safe_root_key_get('frag_form_vecs')
             self.has_frags            = safe_root_key_get('frags')
-            self.has_pulled_atoms     = safe_root_key_get('pulled_atoms')
             self.has_binned_spec      = safe_root_key_get('binned_spec')
             if self.h5_persistent is None:
                 self.h5_persistent = False  # default non-persistent H5 objects for read mode (to support parallel read)
@@ -972,7 +1006,6 @@ class PredSpecDB:
             "brokens": spec.has_brokens,
             "frag_form_vecs": spec.has_frag_form_vecs,
             "frags": spec.has_frags,
-            "pulled_atoms": spec.has_pulled_atoms,
             "binned_spec": spec.has_binned_spec,
         }
         if replace_name_by_formula and spec.root_canonical_smiles is not None:
@@ -995,8 +1028,6 @@ class PredSpecDB:
         if spec.has_brokens: uint_arrs.append(spec.brokens.astype(np.uint8)[:, None])
         if spec.has_frag_form_vecs: uint_arrs.append(spec.frag_form_vecs.astype(np.uint8))
         if spec.has_frags: uint_arrs.append(nn_utils.encode_bin_to_uint8(spec.frags).astype(np.uint8))
-        if spec.has_pulled_atoms: uint_arrs.append(nn_utils.encode_bin_to_uint8(spec.pulled_atoms).astype(np.uint8))
-
         main_rows = 0
         if len(float_arrs) > 0:
             main_rows = len(float_arrs[0])
@@ -1094,6 +1125,7 @@ class PredSpecDB:
 
         spec_dict = {}
         spec_dict.update(key_dict)
+        spec_dict.pop("pulled_atoms", None)
         try:
             fdata = h5_dataset.read_data(full_name + '/f')
         except:
@@ -1121,10 +1153,6 @@ class PredSpecDB:
             frag_u8_len = math.ceil(key_dict["frag_bits"] / 8)
             spec_dict["frags"] = nn_utils.decode_bin_from_uint8(udata[:main_rows, ucur_idx:ucur_idx+frag_u8_len], key_dict["frag_bits"])
             ucur_idx += frag_u8_len
-        if in_key_dict("pulled_atoms"):
-            assert "frag_bits" in key_dict
-            spec_dict["pulled_atoms"] = nn_utils.decode_bin_from_uint8(udata[:main_rows, ucur_idx:], key_dict["frag_bits"])
-
         if in_key_dict("binned_spec"):
             spec_dict["binned_spec"] = self._read_binned_spec(h5_dataset, full_name, key_dict, fdata, udata, cur_idx, ucur_idx)
 

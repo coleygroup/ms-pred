@@ -227,21 +227,36 @@ class TreeProcessor:
             max_add_hs = tree.max_add_hs
             max_remove_hs = tree.max_remove_hs
             forms = tree.frag_form
+            atoms_pulled = tree.get_atoms_pulled()
+            if include_frag_targets and (atoms_pulled is None or len(atoms_pulled) != len(tree.int_frags)):
+                raise ValueError("Generation targets in MassSpec meta must align with fragment rows")
 
             dgl_inputs = []
-            for frag in tree.int_frags:
+            frag_targets = []
+            for frag_ind, frag in enumerate(tree.int_frags):
                 frag_dict = self.featurize_frag(
                     frag,
                     engine,
                 )
                 graph = frag_dict["graph"]
+                if include_frag_targets:
+                    targ_vec = np.zeros(graph.num_nodes())
+                    old_to_new = frag_dict["old_to_new"]
+                    for j in old_to_new[atoms_pulled[frag_ind]]:
+                        targ_vec[j] = 1
+                    frag_targets.append(torch.from_numpy(targ_vec))
                 dgl_inputs.append(graph)
 
             if include_inten_targets:
-                inten_targets = np.array(tree.info["raw_spec"])
+                if "raw_spec" in tree.info:
+                    inten_targets = np.array(tree.info["raw_spec"])
+                elif tree.spec is not None:
+                    inten_targets = np.array(tree.spec)
+                else:
+                    raise ValueError("MassSpec must include masses and intens for intensity targets")
 
-            frag_targets = []  # for gen model only, not implemented
-            assert not include_frag_targets
+            if not include_frag_targets:
+                frag_targets = []
 
         else:
             raise TypeError(f'Unknown type of {tree}')
@@ -468,13 +483,15 @@ class DAGDataset(Dataset):
             use_ray (bool): use_ray
             kwargs:
         """
-        self.df = df
+        self.df = df.copy()
+        if "instrument" not in self.df.columns:
+            self.df["instrument"] = "Orbitrap"  # assumes Orbitrap instrument if missing
         self.num_workers = num_workers
         self.magma_h5 = magma_h5
         self.magma_map = magma_map
-        if 'collision' in list(self.magma_map.keys())[0]:
+        if 'collision' in list(self.magma_map.keys())[0]:  # spec_id_collision 11.magma
             valid_spec_ids = set([common.rm_collision_str(i) for i in self.magma_map])
-        else:
+        else:  # spec_id.magma
             # TODO: fix for CANOPUS. 
             # TODO: temporary fix for CANOPUS, change indexing back
             #valid_spec_ids = set(["_".join(i.split("_")[:-2]) for i in self.magma_map])
@@ -665,10 +682,16 @@ class GenDataset(DAGDataset):
         return output
 
     def load_tree(self, x):
-        filename = self.name_to_dict[x]["magma_file"]
+        filekeys = self.name_to_dict[x]["magma_file"]
+        if isinstance(filekeys, tuple):
+            if not type(self.magma_h5) is common.PredSpecDB:
+                self.magma_h5 = common.PredSpecDB(self.magma_h5)
+            spec = self.magma_h5.read(*filekeys)
+            return spec
+
         if not type(self.magma_h5) is common.HDF5Dataset:
             self.magma_h5 = common.HDF5Dataset(self.magma_h5)
-        fp = self.magma_h5.read_str(filename)
+        fp = self.magma_h5.read_str(filekeys)
         return json.loads(fp)
 
 

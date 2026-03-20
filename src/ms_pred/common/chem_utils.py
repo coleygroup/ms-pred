@@ -141,9 +141,9 @@ ion2mass = {
     "[M-H2O+H]+": -ELEMENT_TO_MASS["O"] - ELEMENT_TO_MASS["H"] - ELECTRON_MASS,
     "[M+H-H2O]+": -ELEMENT_TO_MASS["O"] - ELEMENT_TO_MASS["H"] - ELECTRON_MASS,
     "[M+H3N+H]+": ELEMENT_TO_MASS["N"] + ELEMENT_TO_MASS["H"] * 4 - ELECTRON_MASS,
+    "[M+NH4]+": ELEMENT_TO_MASS["N"] + ELEMENT_TO_MASS["H"] * 4 - ELECTRON_MASS,
     "[M+H-H3N]+": -ELEMENT_TO_MASS["N"] * 1 - ELEMENT_TO_MASS["H"] * 3 - ELECTRON_MASS,
     "[M+H-CH2O2]+": -ELEMENT_TO_MASS["C"] - ELEMENT_TO_MASS["O"] * 2 - ELEMENT_TO_MASS["H"] - ELECTRON_MASS,
-    "[M+NH4]+": ELEMENT_TO_MASS["N"] + ELEMENT_TO_MASS["H"] * 4 - ELECTRON_MASS,
     "[M]+": 0 - ELECTRON_MASS,
     "[M-H4O2+H]+": -ELEMENT_TO_MASS["O"] * 2 - ELEMENT_TO_MASS["H"] * 3 - ELECTRON_MASS,
     "[M+H-2H2O]+": -ELEMENT_TO_MASS["O"] * 2 - ELEMENT_TO_MASS["H"] * 3 - ELECTRON_MASS,
@@ -156,8 +156,8 @@ ion2mass = {
     "[M-H-CO2]-": -ELEMENT_TO_MASS["C"] - ELEMENT_TO_MASS["O"] * 2 - ELEMENT_TO_MASS["H"] + ELECTRON_MASS,
 }
     # More high probability adducts:
-    #    '[M+H-NH3]+', '[M-H+2Na]+', '[M+CHO2]-', '[M+HCOOH-H]-', '[M+CH3COOH-H]-', '[M+CH3OH-H]-'
-    #    '[M-H+2i]-', '[M+H-CH2O2]+', '[M+H-C2H4O2]+', '[M+H-C4H8]+',
+    #    '[M-H+2Na]+', '[M+HCOOH-H]-', '[M+CH3COOH-H]-', '[M+CH3OH-H]-'
+    #    '[M-H+2i]-', '[M+H-C2H4O2]+', '[M+H-C4H8]+',
     #    '[M-2H]2-', '[M+H-3H2O]+', '[M+H-CH4O]+', '[M+H-C2H4]+',
     #    '[M+2Na-H]+', '[M+H-H2O+2i]+', '[M+H-C2H2O]+', '[M-H-CH3]-',
     #    '[M+H-CO]+', '[M+H-C3H6]+', '[M+H-C2H6O]+', '[M+H-CH3]+',
@@ -170,8 +170,6 @@ ion2mass = {
     #    '[M+3Na-2H]+'
 
 # Valid adducts
-# TODO: will I break things if positive adducts and negative adducts are intermingled? 
-# Added new adducts to the end here to present indexing? (Though I suppose no such preservation is needed)
 ion2onehot_pos = {
     "[M+H]+": 0,
     "[M+Na]+": 1,
@@ -183,18 +181,24 @@ ion2onehot_pos = {
     "[M]+": 5,
     "[M-H4O2+H]+": 6,
     "[M+H-2H2O]+": 6,
-    "[M-H]-": 7,
-    "[M+Cl]-": 8,
-    "[M-H2O-H]-": 9,
-    "[M-H-H2O]-": 9,
-    "[M-H-CO2]-": 10,
-    "[M+H-H3N]+": 11,
-    "[M-H3N+H]+": 11,
-    "[M-NH3+H]+": 11,
-    "[M+H-NH3]+": 11,
-    "[M+H-CH2O2]+": 12, 
-    "[M+CHO2]-": 13,
-
+    # uncomment the following if you need compatibility with the old weights
+    # "[M-H]-": 7,
+    # "[M+Cl]-": 8,
+    # "[M-H2O-H]-": 9,
+    # "[M-H-H2O]-": 9,
+    # "[M-H-CO2]-": 10,
+    # comment the following if you need compatibility with the old weights
+    "[M+H-H3N]+": 7,
+    "[M-H3N+H]+": 7,
+    "[M-NH3+H]+": 7,
+    "[M+H-NH3]+": 7,
+    "[M+H-CH2O2]+": 8,
+    "[M+CHO2]-": 9,
+    "[M-H]-": 10,
+    "[M+Cl]-": 11,
+    "[M-H2O-H]-": 12,
+    "[M-H-H2O]-": 12,
+    "[M-H-CO2]-": 13,
 }
 
 ion_pos2extra_multihot = {v: set() for v in ion2onehot_pos.values()}
@@ -255,9 +259,9 @@ for ion in _ori_ions:
             
 
 instrument2onehot_pos = {
-    "Orbitrap": 0,
-    "QTOF": 1, 
-    "IT-FT": 2,
+    "Orbitrap": 0,  # Orbitrap HCD
+    "QTOF": 1,
+    "IT-FT": 2,     # Orbitrap CID
     "Unknown": 3
 }
 
@@ -638,6 +642,14 @@ def smi_inchi_round_mol(smi: str) -> Chem.Mol:
 
     mol = canonical_mol_from_inchi(inchi)
     return mol
+
+
+def smi_inchi_round_smi(smi: str) -> str:
+    mol = smi_inchi_round_mol(smi)
+    if mol is None:
+        return None
+    else:
+        return Chem.MolToSmiles(mol)
 
 
 def smiles_from_inchi(inchi: str) -> str:
