@@ -904,9 +904,8 @@ class IntenContrDataset(DAGDataset):
         outdict.update(dgl_entry)
 
         outlist = [outdict]
-        # deposited differently for canopus: 
-        # query = f'pred_{spec_name}' before
-        query = f'pred_{spec_name}_{colli_eng}'
+        # query = f'pred_{spec_name}_{colli_eng}' for canopus
+        query = f'pred_{spec_name}'
         _, decoy_keys = self.decoy_db.get_entries(query, colli_eng)
         
         if len(decoy_keys) > 0:

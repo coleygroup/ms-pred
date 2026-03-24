@@ -136,6 +136,8 @@ def predict():
             collision_energies = [i for i in ast.literal_eval(entry["collision_energies"])]
             smi = common.rm_stereo(smi)
             mol = common.smi_inchi_round_mol(smi)
+            if mol is None:
+                return []
             smi = Chem.MolToSmiles(mol)  # canonical smiles
             inchikey = Chem.MolToInchiKey(mol)
 

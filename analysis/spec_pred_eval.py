@@ -17,6 +17,9 @@ from scipy.stats import sem
 
 import ms_pred.common as common
 
+DEFAULT_NUM_BINS = 15000
+DEFAULT_UPPER_LIMIT = 1500
+
 
 def cos_sim_fn(pred_ar, true_spec):
     """cos_sim_fn.
@@ -87,6 +90,44 @@ def process_spec_file(spec_name, num_bins: int, upper_limit: int, spec_dir: Path
     return avged
 
 
+def _get_spec_meta_value(spec_data, key: str):
+    """Read metadata from either MassSpec attrs or legacy nested dict metadata."""
+    if hasattr(spec_data, key):
+        value = getattr(spec_data, key)
+        if value is not None:
+            return value
+
+    if key == "num_bins" and hasattr(spec_data, "_num_bins"):
+        value = getattr(spec_data, "_num_bins")
+        if value is not None:
+            return value
+
+    if key == "upper_limit" and hasattr(spec_data, "_mass_upper_limit"):
+        value = getattr(spec_data, "_mass_upper_limit")
+        if value is not None:
+            return value
+
+    meta = getattr(spec_data, "meta", None)
+    if isinstance(meta, dict) and key in meta:
+        return meta[key]
+
+    if isinstance(spec_data, dict):
+        if key in spec_data:
+            return spec_data[key]
+        nested_meta = spec_data.get("meta")
+        if isinstance(nested_meta, dict) and key in nested_meta:
+            return nested_meta[key]
+
+    defaults = {
+        "num_bins": DEFAULT_NUM_BINS,
+        "upper_limit": DEFAULT_UPPER_LIMIT,
+    }
+    if key in defaults:
+        return defaults[key]
+
+    raise KeyError(f"Could not find metadata field '{key}' in prediction entry")
+
+
 def main(args):
     """main."""
     dataset = args.dataset
@@ -112,10 +153,22 @@ def main(args):
     collision_energies = []
     ion_types = []
 
+    num_bins = None
+    upper_limit = None
     for spec_id, spec_data2 in pred_specs.get_all_specs():
         for spec_id2, spec_data in spec_data2.items():
-            upper_limit = spec_data['meta']['upper_limit']
-            num_bins = spec_data['meta']['num_bins']
+            cur_upper_limit = int(_get_spec_meta_value(spec_data, "upper_limit"))
+            cur_num_bins = int(_get_spec_meta_value(spec_data, "num_bins"))
+            if upper_limit is None:
+                upper_limit = cur_upper_limit
+                num_bins = cur_num_bins
+            elif upper_limit != cur_upper_limit or num_bins != cur_num_bins:
+                raise ValueError(
+                    "Prediction file contains inconsistent binning metadata: "
+                    f"expected num_bins={num_bins}, upper_limit={upper_limit}, "
+                    f"got num_bins={cur_num_bins}, upper_limit={cur_upper_limit} "
+                    f"for {spec_id}/{spec_id2}"
+                )
             name = spec_id
             smiles = spec_data['root_canonical_smiles']
             name = common.rm_collision_str(name)
@@ -125,6 +178,9 @@ def main(args):
             pred_spec_names.append(name + f'_collision {float(collision_eng_key):.0f}')
             collision_energies.append(collision_eng_key)
             ion_types.append(name_to_ion[name])
+
+    if num_bins is None or upper_limit is None:
+        raise ValueError(f"No prediction spectra found in {binned_pred_file}")
 
     read_spec = partial(
         process_spec_file,

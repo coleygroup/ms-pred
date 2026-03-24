@@ -163,12 +163,11 @@ def get_output_dict(
         return output_dict
 
     if use_magma:
-
-        fe = fragmentation.FragmentEngine(
-            mol_str=smiles,
-            # max_tree_depth=3,
-        )
         try:
+            fe = fragmentation.FragmentEngine(
+                mol_str=smiles,
+                # max_tree_depth=3,
+            )
             fe.generate_fragments()
         except:
             print(f"Error with generating fragments for spec {smiles}")

@@ -70,15 +70,26 @@ def predict():
     # Get dataset
     # Load smiles dataset and split into 3 subsets
     dataset_name = kwargs["dataset_name"]
-    data_dir = Path("data/spec_datasets") / dataset_name
+    data_dir = common.get_data_dir(dataset_name)
     labels = data_dir / kwargs["dataset_labels"]
 
     # Get train, val, test inds
-    df = pd.read_csv(labels, sep="\t").rename(columns={"name": "spec"})
+    df = pd.read_csv(labels, sep="\t")
+    if "spec" not in df.columns and "name" in df.columns:
+        df = df.rename(columns={"name": "spec"})
+    if "spec" not in df.columns:
+        raise ValueError(
+            f"Expected a 'spec' column in {labels}, found columns: {list(df.columns)}"
+        )
 
     if kwargs["subset_datasets"] != "none":
         splits = pd.read_csv(data_dir / "splits" / kwargs["split_name"], sep="\t")
-        splits = splits.rename(columns={"name": "spec"})
+        if "spec" not in splits.columns and "name" in splits.columns:
+            splits = splits.rename(columns={"name": "spec"})
+        if "spec" not in splits.columns:
+            raise ValueError(
+                "Split file must contain a 'spec' column or a legacy 'name' column."
+            )
         folds = set(splits.keys())
         
         folds.remove("spec")

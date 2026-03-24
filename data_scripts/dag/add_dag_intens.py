@@ -23,7 +23,6 @@ def get_args():
     parser.add_argument("--pred-dag-path", action="store")
     parser.add_argument("--true-dag-path", action="store")
     parser.add_argument("--out-dag-path", action="store")
-    parser.add_argument("--dataset", action="store", default="nist", type=str)
     return parser.parse_args()
 
 
@@ -75,24 +74,15 @@ def main():
     pred_dag_names, true_dag_names, out_dag_names, colli_engs = [], [], [], []
     true_dag_h5 = common.HDF5Dataset(true_dag_path)
     for true_dag_n in tqdm(true_dag_h5.get_all_names()):
-        if args.dataset == 'nist':
-            spec_id = common.rm_collision_str(true_dag_n)
-            colli_eng = common.get_collision_energy(true_dag_n)
-            pred_dag_names.append('pred_' + spec_id)
-            true_dag_names.append(true_dag_n)
-            out_dag_names.append(spec_id)
-            colli_engs.append(colli_eng)
-        elif args.dataset == 'msg':
-            spec_id = common.rm_collision_str(true_dag_n)
-            colli_eng = common.get_collision_energy(true_dag_n)
-            if spec_id not in pred_dag_name_set:
-                continue
-            pred_dag_names.append('pred_' + spec_id)
-            true_dag_names.append(true_dag_n)
-            out_dag_names.append(spec_id)
-            colli_engs.append(colli_eng)
-        else:
-            raise ValueError(f'Unrecognized dataset {args.dataset}')
+        spec_id = common.rm_collision_str(true_dag_n)
+        colli_eng = common.get_collision_energy(true_dag_n)
+        pred_dag_name = 'pred_' + spec_id
+        if pred_dag_name not in pred_dag_name_set:
+            continue
+        pred_dag_names.append(pred_dag_name)
+        true_dag_names.append(true_dag_n)
+        out_dag_names.append(spec_id)
+        colli_engs.append(colli_eng)
     true_dag_h5.close()
     arg_dicts = [
         {
