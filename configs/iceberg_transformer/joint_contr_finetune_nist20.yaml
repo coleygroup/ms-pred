@@ -14,7 +14,7 @@ universal_args:
   seed: [1]
   num-workers: [32]
   batch-size: [16]
-  max-epochs: [20]
+  max-epochs: [200]
   min-epochs: [0]
 
   dataset-name: [nist20]
@@ -67,32 +67,32 @@ universal_args:
 
 
 iterative_args:
-  -  split-name: [split_1.tsv]
-     save-dir: [split_1_rnd1]
-     seed: [1]
-     train-checkpoint: [results/joint_train_nist20/split_1_rnd1/version_0/best.ckpt]
-     
   # -  split-name: [split_1.tsv]
-  #     save-dir: [split_1_rnd2]
-  #     seed: [2]
-  #     train-checkpoint: [results/joint_train_nist20/split_1_rnd2/version_0/best.ckpt]
+  #    save-dir: [split_1_rnd1]
+  #    seed: [1]
+  #    train-checkpoint: [results/joint_train_nist20/split_1_rnd1/version_0/best.ckpt]
 
   # -  split-name: [split_1.tsv]
-  #     save-dir: [split_1_rnd3]
-  #     seed: [3]
-  #     train-checkpoint: [results/joint_train_nist20/split_1_rnd3/version_0/best.ckpt]
+  #    save-dir: [split_1_rnd2]
+  #    seed: [2]
+  #    train-checkpoint: [results/joint_train_nist20/split_1_rnd2/version_0/best.ckpt]
+
+  # -  split-name: [split_1.tsv]
+  #    save-dir: [split_1_rnd3]
+  #    seed: [3]
+  #    train-checkpoint: [results/joint_train_nist20/split_1_rnd3/version_0/best.ckpt]
 
   # -  split-name: [scaffold_1.tsv]
-  #     save-dir: [scaffold_1_rnd1]
-  #     seed: [1]
-  #     train-checkpoint: [results/joint_train_nist20/scaffold_1_rnd1/version_0/best.ckpt]
+  #    save-dir: [scaffold_1_rnd1]
+  #    seed: [1]
+  #    train-checkpoint: [results/joint_train_nist20/scaffold_1_rnd1/version_0/best.ckpt]
+
+  -  split-name: [scaffold_1.tsv]
+     save-dir: [scaffold_1_rnd2]
+     seed: [2]
+     train-checkpoint: [results/joint_train_nist20/scaffold_1_rnd2/version_0/best.ckpt]
 
   # -  split-name: [scaffold_1.tsv]
-  #     save-dir: [scaffold_1_rnd2]
-  #     seed: [2]
-  #     train-checkpoint: [results/joint_train_nist20/scaffold_1_rnd2/version_0/best.ckpt]
-
-  # -  split-name: [scaffold_1.tsv]
-  #     save-dir: [scaffold_1_rnd3]
-  #     seed: [3]
-  #     train-checkpoint: [results/joint_train_nist20/scaffold_1_rnd3/version_0/best.ckpt]
+  #    save-dir: [scaffold_1_rnd3]
+  #    seed: [3]
+  #    train-checkpoint: [results/joint_train_nist20/scaffold_1_rnd3/version_0/best.ckpt]

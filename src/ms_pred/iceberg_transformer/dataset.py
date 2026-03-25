@@ -321,13 +321,10 @@ class TreeProcessor:
     def create_graphormer_input(
         self,
         mol: Any,
-        max_nodes: int = 128,
         spatial_pos_max: int = 1024,
         multi_hop_max_dist: int = 5,
     ) -> Dict[str, Any]:
         num_atoms = mol.GetNumAtoms()
-        if num_atoms > max_nodes:
-            raise ValueError(f"Molecule has {num_atoms} atoms, exceeding max_nodes={max_nodes}")
 
         try:
             rdPartialCharges.ComputeGasteigerCharges(mol)
@@ -812,7 +809,7 @@ class IntenContrDataset(IntenDataset):
                 decoy_data = common.MassSpec(colli_eng, decoy_smi, common.onehot_pos2ion[adduct])
                 trees = self.tree_processor.featurize_tree(decoy_data, include_inten_targs= False, include_frag_targs=False)
                 trees.update(
-                    {"name": name + '_decoy', "adduct": adduct, "precursor": precursor, "instument": instrument,
+                    {"name": name + '_decoy', "adduct": adduct, "precursor": precursor, "instrument": instrument,
                      "collision_energy": colli_eng, "smiles": decoy_data})
                 decoy_outlist.append(trees)
         outlist.append(decoy_outlist)

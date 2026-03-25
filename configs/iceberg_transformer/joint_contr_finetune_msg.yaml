@@ -2,31 +2,31 @@ launcher_args: {experiment_name: joint_train_msg,
   script_name: "src/ms_pred/iceberg_transformer/train_contr_joint.py",
   slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,
-  visible_devices: [1, 2]
+  visible_devices: [0, 1]
 }
 universal_args:
   _slurm_args:
   - {_num_gpu: 1, cpus-per-task: 7, job-name: joint_train, mem-per-cpu: 8G,
     time: '1-12:00:00'}
-  debug: [true]
+  debug: [False]
   gpu: [true]
 
   seed: [1]
   num-workers: [32]
   batch-size: [16]
-  max-epochs: [20]
-  min-epochs: [0]
+  max-epochs: [200]
+  min-epochs: [20]
 
   dataset-name: [msg]
-  dataset-labels: [labels_withev.tsv]
+  dataset-labels: [20250725_labels_spec_sim.tsv]
   magma-folder: [magma_outputs]
   split-name: [split.tsv]
 
   learning-rate: [0.0001]
   lr-decay-rate: [0.95]
-  num-decoys: [3]
-  num-fixed-decoys: [3]
-  all-decoy-nums: [10]
+  num-decoys: [5]
+  num-fixed-decoys: [5]
+  all-decoy-nums: [20]
   weight-decay: [0.0]
   grad-accumulate: [2]
 
@@ -63,7 +63,8 @@ universal_args:
   inten-loss-fn: [cosine]
   contr-loss-fn: [entropy]
   contr-weight: [1]
-  train-checkpoint: [results/joint_train_msg/split_rnd1/version_1/best.ckpt]
+  contr-threshold: [0.4, 0.6]
+  train-checkpoint: [results/joint_train_msg/split_rnd1/version_0/best.ckpt]
   pubchem-map-path: ['data/retrieval/pubchem/pubchem_formulae_inchikey.hdf5']
 
 

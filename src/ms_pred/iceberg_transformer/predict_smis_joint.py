@@ -25,6 +25,7 @@ from ms_pred.iceberg_transformer import joint_model
 from rdkit import Chem
 from rdkit import rdBase
 from rdkit import RDLogger
+from ms_pred.common import chem_utils
 
 rdBase.DisableLog("rdApp.error")
 RDLogger.DisableLog("rdApp.*")
@@ -93,7 +94,7 @@ def predict():
     df = pd.read_csv(labels, sep="\t")
 
     if debug:
-        df = df[:10]
+        df = df[:1000]
         kwargs["num_cpu_workers"] = 0
         kwargs["num_gpu_workers"] = 0
 
@@ -143,8 +144,16 @@ def predict():
             smi = entry["smiles"]
             adduct = entry["ionization"]
             name = entry["spec"]
+            instrument = entry["instrument"] if "instrument" in entry else "Orbitrap"  # fallback to Orbitrap
             inchikey = common.inchikey_from_smiles(smi)
-            smi = Chem.MolToSmiles(Chem.MolFromSmiles(smi))  # canonicalize
+            try:
+                mol = Chem.MolFromSmiles(smi)
+                for atom in mol.GetAtoms():
+                    if atom.GetAtomicNum() not in chem_utils.VALID_ATOM_NUM:
+                        return []  # skip molecules with wildcard atoms
+                smi = Chem.MolToSmiles(mol)  # canonicalize
+            except:
+                return []
             collision_energies = [i for i in ast.literal_eval(entry["collision_energies"])]
             tup_to_process = []
 
@@ -152,7 +161,7 @@ def predict():
                 colli_eng_val = common.collision_energy_to_float(colli_eng)  # str to float
                 if math.isnan(colli_eng_val):  # skip collision_energy == nan (no collision energy recorded)
                     continue
-                tup_to_process.append((smi, f"pred_{name}", colli_eng_val, adduct, f"ikey {inchikey}"))
+                tup_to_process.append((smi, f"pred_{name}", colli_eng_val, adduct, instrument, f"ikey {inchikey}"))
             return tup_to_process
 
         all_rows = [j for _, j in df.iterrows()]
@@ -208,17 +217,14 @@ def predict():
                     local_model = model_by_device[device]
 
             # for batch in batched_entries:
-            smis, spec_names, colli_eng_vals, adducts, ikeys = list(zip(*batch))
-            try:
-                full_outputs = local_model.predict_mol(
-                    smis,
-                    collision_eng=colli_eng_vals,
-                    adduct=adducts,
-                    device=device,
-                )
-            except Exception:
-                logging.error(f'Prediction failed, SMILES: {smis}')
-                return []
+            smis, spec_names, colli_eng_vals, adducts, instruments, ikeys = list(zip(*batch))
+            full_outputs = local_model.predict_mol(
+                smis,
+                collision_eng=colli_eng_vals,
+                adduct=adducts,
+                instrument=instruments,
+                device=device,
+            )
 
             return_list = []
             for output_spec, spec_name, smi, ikey, adduct, pred_frag, collision_energy in \

@@ -794,7 +794,7 @@ class JointModel(pl.LightningModule):
             decoy_spec_loss_sorted = torch.sort(decoy_spec_loss, dim=-1).values.detach()
             ranking_dist = torch.abs(decoy_spec_loss[:, :, None] - decoy_spec_loss_sorted[:, None, :])
             top1_prob = pygm.sinkhorn(-ranking_dist, n1=batch["num_decoys_per_entry"]+1, n2=batch["num_decoys_per_entry"]+1, tau=self.sk_tau, backend='pytorch')[:, 0, 0]
-            contr_loss = torch.relu(-torch.log(top1_prob + self.contr_threshold))  # shift & cut ce loss for probs > 0.5
+            contr_loss = torch.relu(-torch.log(top1_prob + self.contr_threshold))  # shift & cut ce loss for probs > contr_threshold
             if name != "train":  
                 loss = {
                     "spec_loss": end_to_end_inten_loss,
