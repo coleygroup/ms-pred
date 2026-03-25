@@ -103,7 +103,8 @@ def predict():
 
         df = df[df["spec"].isin(names)]
 
-        df = df[df["instrument"].isin(["Orbitrap", "QTOF", "Unknown"])] # drop any nans
+        if "instrument" in df:
+            df = df[df["instrument"].isin(common.instrument2onehot_pos.keys())]  # drop any nans
 
     # Create model and load
     best_checkpoint = kwargs["checkpoint_pth"]
@@ -131,10 +132,12 @@ def predict():
             name = entry["spec"]
             adduct = entry["ionization"]
             precursor_mz = entry["precursor"]
-            instrument = entry["instrument"]
+            instrument = entry["instrument"] if "instrument" in entry else "Orbitrap"  # fallback to Orbitrap
             collision_energies = [i for i in ast.literal_eval(entry["collision_energies"])]
             smi = common.rm_stereo(smi)
             mol = common.smi_inchi_round_mol(smi)
+            if mol is None:
+                return []
             smi = Chem.MolToSmiles(mol)  # canonical smiles
             inchikey = Chem.MolToInchiKey(mol)
 
@@ -269,9 +272,6 @@ def predict():
             for out_batch in out_entries:
                 for out_item in out_batch:
                     name, spec = out_item
-                    # make name: name_collision_{ce}
-                    ce_str = spec._standardize_ce(spec.collision_energy)
-                    name = name + '_' + ce_str
                     specdb.write(name, spec)
             specdb.close()
 

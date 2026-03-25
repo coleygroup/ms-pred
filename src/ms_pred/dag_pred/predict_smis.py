@@ -158,7 +158,7 @@ def predict():
             instrument = entry["instrument"] if "instrument" in entry else "Orbitrap"  # fallback to Orbitrap
             name = entry["spec"]
             inchikey = common.inchikey_from_smiles(smi)
-            smi = Chem.MolToSmiles(Chem.MolFromSmiles(smi))  # canonicalize
+            smi = Chem.MolToSmiles(Chem.MolFromSmiles(smi))  # canonicalize by roundtrip from SMILES
             collision_energies = [i for i in ast.literal_eval(entry["collision_energies"])]
             tup_to_process = []
 

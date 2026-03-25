@@ -73,9 +73,9 @@ Running the demo takes <2 minutes with a regular desktop GPU.
 > You can checkout to the [``iceberg_analychem_2024`` branch](https://github.com/coleygroup/ms-pred/tree/iceberg_analychem_2024)
 > with the legacy code that supports NPLIB1.
 
-``nist20`` is a commercial dataset available for purchase through [several vendors worldwide](https://chemdata.nist.gov/dokuwiki/doku.php?id=chemdata:distributors).
+``nist20/nist23`` is a commercial dataset available for purchase through [several vendors worldwide](https://chemdata.nist.gov/dokuwiki/doku.php?id=chemdata:distributors).
 Given the scale of effort required to purchase samples, run experiments, and collect such a large amount of spectra,
-and that NIST’20 is the only database where all spectra have collision energy annotations, this dataset is a reasonable investment in mass spectrum-related research in the
+and that NIST is the only database where all spectra have collision energy annotations, this dataset is a reasonable investment in mass spectrum-related research in the
 absence of a thorough open-source replacement. 
 
 After your purchase of NIST, export the raw data as ``.SDF``. A detailed instruction on NIST'20 could be found [here](https://github.com/Roestlab/massformer?tab=readme-ov-file#exporting-the-nist-data) 
@@ -88,6 +88,7 @@ Once the dataset is processed, move the files to ``ms-pred/data/spec_datasets/ni
     ├── spec_files.hdf5
     └── splits
 ```
+Rename ``nist20`` with ``nist23`` if you are working with the newer version.
 
 
 ### SCARF Processing
@@ -138,6 +139,8 @@ python data_scripts/pubchem/02_make_formula_subsets.py
 python data_scripts/pubchem/03_dataset_subset.py --dataset-labels data/spec_datasets/nist20/labels.tsv # for nist20 dataset
 python data_scripts/pubchem/04_make_retrieval_lists.py
 
+# optional, if you want per chemical class analysis
+python data_scripts/predict_chemical_class.py
 ```
 
  
@@ -147,7 +150,7 @@ python data_scripts/pubchem/04_make_retrieval_lists.py
 
 ICEBERG is our recommended model with a 40% top-1 retrieval accuracy with [M+H]+, benchmarked on the NIST'20 dataset. 
 ICEBERG is trained in two parts: a learned fragment generator and an intensity predictor. The pipeline for training and evaluating this model can be accessed in `run_scripts/iceberg/`. 
-There is an all-in-one script ``run_scripts/iceberg/run_all.sh`` that trains the up-to-date version of ICEBERG on NIST'20 dataset described in Wang et al. (2025). 
+There is an all-in-one script ``run_scripts/iceberg/run_all.sh`` that trains the up-to-date version of ICEBERG on NIST'20 dataset described in [Wang et al. (2025)](https://doi.org/10.1101/2025.05.28.656653). 
 The archived version released with [Goldman et al. (2024)](http://arxiv.org/abs/2304.13136) is at the [``iceberg_analychem_2024`` branch](https://github.com/coleygroup/ms-pred/tree/iceberg_analychem_2024).
 The internal pipeline used to conduct experiments can be followed below:
 

@@ -163,12 +163,11 @@ def get_output_dict(
         return output_dict
 
     if use_magma:
-
-        fe = fragmentation.FragmentEngine(
-            mol_str=smiles,
-            # max_tree_depth=3,
-        )
         try:
+            fe = fragmentation.FragmentEngine(
+                mol_str=smiles,
+                # max_tree_depth=3,
+            )
             fe.generate_fragments()
         except:
             print(f"Error with generating fragments for spec {smiles}")
@@ -274,8 +273,8 @@ def process_spec_file(spec_name: str, data_dir: Path):
     """process_spec_file."""
     ms_h5 = common.HDF5Dataset(data_dir / "spec_files.hdf5")
     spec_lines = ms_h5.read_str(f"{spec_name}.ms").split('\n')
-    meta, tuples = common.parse_spectra(spec_lines)
-    specs = common.process_spec_file(meta, tuples, merge_specs=False)
+    meta, specs = common.parse_spectra(spec_lines)
+    specs.process_spec_file(parentmass=meta['parentmass'] if 'parentmass' in meta else None)
     # if 'nan' not in specs:  # include a merged spec
     #     specs['collision nan'] = common.process_spec_file(meta, tuples, merge_specs=True)
     return spec_name, specs
@@ -329,8 +328,8 @@ def main():
         spec_name = row["spec"]
         for colli_eng, spec in input_specs_dict[spec_name].items():
             new_entry = {
-                "spec_name": f'{spec_name}_{colli_eng}',
-                "spec": spec,
+                "spec_name": f'{spec_name}_collision {colli_eng}',
+                "spec": spec.spec,
                 "form": row["formula"],
                 "mass_diff_type": mass_diff_type,
                 "mass_diff_thresh": mass_diff_thresh,

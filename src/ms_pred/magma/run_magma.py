@@ -6,7 +6,6 @@ Entry point into running magma program
 import sys
 import argparse
 import logging
-import json
 from pathlib import Path
 import numpy as np
 import copy
@@ -20,6 +19,23 @@ from rdkit import RDLogger
 # Custom import
 import ms_pred.common as common
 import ms_pred.magma.fragmentation as fragmentation
+
+
+def _pack_atoms_pulled(atoms_pulled):
+    ptr = [0]
+    flat = []
+    for atoms in atoms_pulled:
+        flat.extend(int(atom) for atom in atoms)
+        ptr.append(len(flat))
+    return np.array(ptr, dtype=np.int32), np.array(flat, dtype=np.int16)
+
+
+def _pack_frags_as_bool(frags, natoms):
+    bit_rows = []
+    atom_range = range(natoms)
+    for frag in frags:
+        bit_rows.append([(frag >> atom_ind) & 1 for atom_ind in atom_range])
+    return np.array(bit_rows, dtype=bool)
 
 
 def greedy_prune(
@@ -150,24 +166,24 @@ def magma_augmentation(
         debug (bool)
     """
     tsv_return = {}
-    tree_return = {}
+    tree_return = []
 
     spec_h5 = common.HDF5Dataset(spec_dir)
     spec_readlines = spec_h5.read_str(spec_name).split('\n')
-    meta, spectras = common.parse_spectra(spec_readlines)
+    meta, spectra = common.parse_spectra(spec_readlines)
 
     spec_name_clean = Path(spec_name).stem  # remove '.json'
     spectra_smiles = spec_to_smiles.get(spec_name_clean, None)
     spectra_adduct = spec_to_adduct.get(spec_name_clean, None)
 
     # Step 1 - Generate fragmentations inside fragmentation engine
-    fe = fragmentation.FragmentEngine(mol_str=spectra_smiles, **fragmentation.FRAGMENT_ENGINE_PARAMS)
-
     # Outside try except loop
     if debug:
+        fe = fragmentation.FragmentEngine(mol_str=spectra_smiles, **fragmentation.FRAGMENT_ENGINE_PARAMS)
         fe.generate_fragments()
     else:
         try:
+            fe = fragmentation.FragmentEngine(mol_str=spectra_smiles, **fragmentation.FRAGMENT_ENGINE_PARAMS)
             fe.generate_fragments()
         except:
             print(f"Error with generating fragments for spec {spec_name_clean}")
@@ -175,16 +191,17 @@ def magma_augmentation(
 
     # Step 2: Process spec and get comparison points
     # Read in file and filter it down
-    spectra = common.process_spec_file(meta, spectras, merge_specs=merge_specs)
-    if spectra is None:
+    spectra.process_spec_file(parentmass=meta['parentmass'] if 'parentmass' in meta else None)
+    if len(spectra) == 0:
         print(f"Error with generating fragments for spec {spec_name_clean}")
         return
 
     if merge_specs:
-        spectra = {'collision nan': spectra}
+        spectra = spectra.merge_spectra(merge_method='max')
+        spectra = {'collision nan': spectra.spec}
     for colli_eng, spectrum in spectra.items():
-        tsv_filename = f"{spec_name_clean}_{colli_eng}.magma"
-        tree_filename = f"{spec_name_clean}_{colli_eng}.json"
+        tsv_filename = f"{spec_name_clean}_collision {colli_eng}.magma"
+        spectrum = spectrum.spec
 
         spectrum = common.max_inten_spec(
             spectrum, max_num_inten=max_peaks, inten_thresh=0.001
@@ -393,15 +410,28 @@ def magma_augmentation(
             out_frags[k]["atoms_pulled"] = list(out_frags[k]["atoms_pulled"])
             out_frags[k]["parents"] = list(out_frags[k]["parents"])
 
-        export_tree = {
-            "root_canonical_smiles": fe.smiles,
-            "frags": out_frags,
-            "collision_energy": float(colli_eng.split()[1]),
-            "adduct": spectra_adduct,
-        }
-        # Export files when needed
-        if len(export_tree["frags"]) > 0:
-            tree_return[tree_filename] = json.dumps(export_tree, indent=2)
+        if len(out_frags) > 0:
+            ordered_frags = list(out_frags.values())
+            atoms_pulled = [entry["atoms_pulled"] for entry in ordered_frags]
+            atoms_pulled_ptr, atoms_pulled_data = _pack_atoms_pulled(atoms_pulled)
+            frag_bits = _pack_frags_as_bool([entry["frag"] for entry in ordered_frags], fe.natoms)
+            tree_return.append((
+                spec_name_clean,
+                common.MassSpec(
+                    collision_energy=colli_eng,
+                    root_canonical_smiles=fe.smiles,
+                    adduct=spectra_adduct,
+                    masses_no_adduct=np.array([entry["base_mass"] for entry in ordered_frags], dtype=np.float32),
+                    brokens=np.array([entry["max_broken"] for entry in ordered_frags], dtype=np.uint8),
+                    frag_form_vecs=np.array(
+                        [common.formula_to_dense(fe.frag_to_entry[entry["frag_hash"]]["form"]) for entry in ordered_frags],
+                        dtype=np.uint8,
+                    ),
+                    frags=frag_bits,
+                    atoms_pulled_ptr=atoms_pulled_ptr,
+                    atoms_pulled_data=atoms_pulled_data,
+                ),
+            ))
 
     return tsv_return, tree_return
 
@@ -453,20 +483,44 @@ def run_magma_augmentation(
     # OR: only unmerged specs in the dataset
     params = [{'spec_file': f, 'merge_specs': m} for f, m in itertools.product(ms_files, [False])]
 
-    if debug:
-        write_objs = [partial_aug_safe(i) for i in tqdm(params[:10])]
-    else:
-        write_objs = common.chunked_parallel(params, partial_aug_safe, max_cpu=workers, chunks=1000)
-
     spec_h5.close()
     logging.info('Write to hdf5 file output')
-    tsv_h5 = common.HDF5Dataset(output_dir / "magma_tsv.hdf5", mode='w')
-    tree_h5 = common.HDF5Dataset(output_dir / "magma_tree.hdf5", mode='w')
-    for obj in tqdm(write_objs):
-        tsv_h5.write_dict(obj[0])
-        tree_h5.write_dict(obj[1])
-    tsv_h5.close()
-    tree_h5.close()
+
+    def write_output_objs(obj_iter):
+        tsv_h5 = common.HDF5Dataset(output_dir / "magma_tsv.hdf5", mode='w')
+        tree_h5 = common.PredSpecDB(
+            output_dir / "magma_tree.hdf5",
+            mode='w',
+            has_probs=False,
+            has_brokens=True,
+            has_masses=True,
+            has_masses_no_adduct=True,
+            has_frag_form_vecs=True,
+            has_frags=True,
+            has_intens=True,
+        )
+        try:
+            for obj in tqdm(obj_iter, total=len(params) if not debug else min(10, len(params)), desc='Write to HDF5'):
+                if obj is None:
+                    continue
+                tsv_h5.write_dict(obj[0])
+                for spec_name, tree_spec in obj[1]:
+                    tree_h5.write(spec_name, tree_spec)
+        finally:
+            tsv_h5.close()
+            tree_h5.close()
+
+    if debug:
+        write_output_objs([partial_aug_safe(i) for i in tqdm(params[:10])])
+    else:
+        common.chunked_parallel(
+            params,
+            partial_aug_safe,
+            max_cpu=workers,
+            chunks=1000,
+            output_func=write_output_objs,
+            task_name='MAGMa augmentation',
+        )
 
 
 def get_args():

@@ -8,7 +8,7 @@ from collections import Counter, defaultdict
 from hashlib import blake2b
 from typing import Tuple, List
 from rdkit import Chem
-from ms_pred.common import chem_utils
+import ms_pred.common.chem_utils as chem_utils
 
 
 TYPEW = {
@@ -53,8 +53,12 @@ class FragmentEngine(object):
             self.inchi = Chem.MolToInchi(self.mol)
             if not mol_str_canonicalized:
                 self.mol = chem_utils.canonical_mol_from_inchi(self.inchi)
+                if self.mol is None:
+                    raise RuntimeError(f"Invalid molecule encountered. SMILES: {self.smiles}")
                 self.smiles = Chem.MolToSmiles(self.mol)  # canonical smiles
                 self.mol = Chem.MolFromSmiles(self.smiles)  # always use canonical smiles for mols
+                if self.mol is None:
+                    raise RuntimeError(f"Invalid molecule encountered. SMILES: {self.smiles}")
 
         elif mol_str_type == "inchi":
             self.inchi = mol_str

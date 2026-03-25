@@ -6,9 +6,9 @@ import json
 pred_file = "src/ms_pred/iceberg_transformer/predict_smis_joint.py"
 retrieve_file = "src/ms_pred/retrieval/retrieval_benchmark.py"
 subform_name = "no_subform"
-devices = [0, 1]
+devices = [1, 2]
 vis_devices = ",".join([str(_) for _ in devices])
-num_gpu_workers = len(devices) * 9
+num_gpu_workers = len(devices) * 5
 num_cpu_workers = 32
 batch_size = 16
 binned_out = False
@@ -46,15 +46,15 @@ test_entries = [
     #  "test_split": "scaffold_1",
     #  "max_k": 50},
 
-    {"dataset": "msg",
-     "train_split": "split_rnd1",
-     "test_split": "test_formula",
-     "max_k": 256},
-
     # {"dataset": "msg",
     #  "train_split": "split_rnd1",
-    #  "test_split": "test_mass",
+    #  "test_split": "test_formula",
     #  "max_k": 256},
+
+    {"dataset": "msg",
+     "train_split": "split_rnd1",
+     "test_split": "test_mass",
+     "max_k": 256},
 ]
 
 pred_filename = "binned_preds.hdf5" if binned_out else "preds.hdf5"

@@ -2,7 +2,7 @@ launcher_args: {experiment_name: joint_train_msg,
   script_name: "src/ms_pred/iceberg_transformer/train_joint.py",
   slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,
-  visible_devices: [0, 1]
+  visible_devices: [1, 2]
 }
 universal_args:
   _slurm_args:
@@ -29,7 +29,7 @@ universal_args:
   inten-dropout: [0.1]
   frag-dropout: [0.1]
   hidden-size: [256]
-  graphormer-layers: [6]
+  graphormer-layers: [5]
   graphormer-dropout: [0.1]
   embed-elem-group: [True]
   add-hs: [True]

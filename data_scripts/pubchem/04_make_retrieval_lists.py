@@ -31,9 +31,11 @@ def process_example(obj, max_k=50) -> dict:
         max_k = int(1e10)
     # Note this takes a while and should be done upfront
     # Some didn't pass round trip in frag engine, so repeat it here
-    cands_list = [
-        i for i in obj["cands"] if common.smi_inchi_round_mol(i[0]) is not None
-    ]
+    cands_list = []
+    for i in obj["cands"]:
+        smi = common.smi_inchi_round_smi(i[0])
+        if smi is not None:
+            cands_list.append((smi, i[1]))
     cands_list = np.array(cands_list, dtype=object)
     cands = [common.get_morgan_fp_smi(j[0]) for j in cands_list]
     true_cand = np.array([obj["smiles"], obj["inchikey"]])[None, :]
@@ -199,8 +201,8 @@ if __name__ == "__main__":
 
     # Modify here to create various datasets
     compute_entries = [
-        # {"dataset": "nist20", "max_k": 50, "split": "split_1.tsv", "subset": "test"},
-        # {"dataset": "nist20", "max_k": 50, "split": "scaffold_1.tsv", "subset": "test"},
+        {"dataset": "nist20", "max_k": 50, "split": "split_1.tsv", "subset": "test"},
+        {"dataset": "nist20", "max_k": 50, "split": "scaffold_1.tsv", "subset": "test"},
         {"dataset": "nist20", "max_k": 50, "split": "split_1.tsv", "subset": "val"},
         {"dataset": "nist20", "max_k": 50, "split": "scaffold_1.tsv", "subset": "val"},
         # {"dataset": "canopus_train_public", "max_k": 50, "split": "split_1.tsv"},
