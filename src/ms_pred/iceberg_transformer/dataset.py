@@ -42,6 +42,13 @@ class TreeProcessor:
         self.bins = np.linspace(0, 1500, 15000)
         self.multi_hop_max_dist = multi_hop_max_dist
 
+    @staticmethod
+    def _to_heavy_mol(mol: Any) -> Any:
+        # Drop explicit hydrogens so graph nodes correspond to heavy atoms only
+        if mol is None:
+            return None
+        return Chem.RemoveHs(mol)
+
     # ---------- lightweight fragment ----------
     def featurize_frag_lite(self, frag: int, engine: fragmentation.FragmentEngine) -> Dict[str, Any]:
         kept_atom_inds, _ = engine.get_present_atoms(frag)
@@ -62,8 +69,12 @@ class TreeProcessor:
         atom_form_vecs = torch.from_numpy(np.stack(atom_form_vecs_np))
 
         mol = Chem.MolFromSmiles(root_smiles)
+
         if mol is None:
             raise ValueError(f"Cannot create RDKit molecule from SMILES: {root_smiles}")
+        mol = self._to_heavy_mol(mol)
+        if mol is None:
+            raise ValueError(f"Cannot create heavy-atom RDKit molecule from SMILES: {root_smiles}")
 
         if self.root_encode == "gnn":
             root_repr = self.rdkit_featurize(mol)
@@ -167,6 +178,9 @@ class TreeProcessor:
 
     # ---------- RDKit featurize for DGL ----------
     def rdkit_featurize(self, mol: Any):
+        mol = self._to_heavy_mol(mol)
+        if mol is None:
+            raise ValueError("RDKit molecule is None after hydrogen removal")
         num_atoms = mol.GetNumAtoms()
         try:
             rdPartialCharges.ComputeGasteigerCharges(mol)
@@ -324,6 +338,9 @@ class TreeProcessor:
         spatial_pos_max: int = 1024,
         multi_hop_max_dist: int = 5,
     ) -> Dict[str, Any]:
+        mol = self._to_heavy_mol(mol)
+        if mol is None:
+            raise ValueError("RDKit molecule is None after hydrogen removal")
         num_atoms = mol.GetNumAtoms()
 
         try:

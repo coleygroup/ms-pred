@@ -148,9 +148,14 @@ def predict():
             inchikey = common.inchikey_from_smiles(smi)
             try:
                 mol = Chem.MolFromSmiles(smi)
+                if mol is None:
+                    return []  # skip if rdkit can't parse the smiles
                 for atom in mol.GetAtoms():
                     if atom.GetAtomicNum() not in chem_utils.VALID_ATOM_NUM:
                         return []  # skip molecules with wildcard atoms
+                mol=Chem.RemoveHs(mol)
+                if mol.GetNumAtoms() > 100:
+                    return []  # skip molecules with more than 100 heavy atoms
                 smi = Chem.MolToSmiles(mol)  # canonicalize
             except:
                 return []

@@ -15,7 +15,7 @@ universal_args:
   num-workers: [32]
   batch-size: [16]
   max-epochs: [200]
-  min-epochs: [0]
+  min-epochs: [15]
 
   dataset-name: [nist20]
   dataset-labels: [labels.tsv]
