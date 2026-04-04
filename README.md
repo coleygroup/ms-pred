@@ -1,11 +1,6 @@
 #  Mass Spectrum Predictor
 
-**Update 10/25/2025:** We are releasing _open-source_ weights of ICEBERG trained on the [MassSpecGym](https://arxiv.org/abs/2410.23326) benchmark. ICEBERG achieves 57.8% cosine similarity and 46% top-1 retrieval accuracy when retrieving from formula candidates, representing state-of-the-art performance on the forward spectrum simulation challenge. The codebase has been updated to support training and inference from MassSpecGym data, and the retrieval sets used for this task as well as weights are available via Dropbox [here](https://www.dropbox.com/scl/fo/d73o0o4u5ymr9ubtp3m7j/AL4r7e3p9ElV0ewBwDCScbM?rlkey=tr99zkzy208ol8aw0pfsdsf5v&st=2zg9n01y&dl=0). Given the challenge of the scaffold split and inclusion of only [M+H]+ adducts and positive mode spectra, we encourage users to adopt the ICEBERG version trained on the NIST20 commercial dataset when possible.   
-
-
-| Model | Cosine Similarity | Entropy (JS) Similarity | Top 1 Hit Rate | Top 5 Hit Rate | Top 20 Hit Rate |
-|-------|-------------------|-------------------------|----------------|----------------|-----------------|
-| ICEBERG | **0.5782** (0.5702, 0.5865) | **0.4847** (0.4796, 0.4901) | **0.4595** (0.4432, 0.4759) | **0.7543** (0.7388, 0.7690) | **0.9169** (0.9073, 0.9260) |
+**Update 4/4/2026:** You can run ICEBERG structural elucidation easily at http://iceberg-ms.mit.edu/! By inputting the chemical formula and your experimental spectrum, the WebUI will rank it against all candidates from PubChem. No GPU is required.
 
 ------------
 
@@ -56,7 +51,9 @@ Installation will take ~5 minutes.
 Note: if you are not using GPU, please comment the CUDA-based packages in ``envorinment.yaml``.
 
 ## Demo <a name="demo"></a>
-A demo of how to use mass spectrum predictors (ICEBERG as an example) for structural elucidation campaigns can be found at [``notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb``](notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb).
+To easily get started, you can run ICEBERG structural elucidation at the WebUI: http://iceberg-ms.mit.edu/
+
+If you want more flexibility by doing some coding, a demo of how to use mass spectrum predictors (ICEBERG as an example) for structural elucidation campaigns can be found at [``notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb``](notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb).
 
 Please go through the following prerequisites to run the demo:
 * Clone the repository ``git clone https://github.com/coleygroup/ms-pred.git``.
