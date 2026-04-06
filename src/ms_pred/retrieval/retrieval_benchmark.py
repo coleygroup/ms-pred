@@ -71,6 +71,19 @@ def normalize_inchikey(ikey: str) -> str:
     return str(ikey).replace("ikey ", "").strip()
 
 
+def normalize_query_structure(smiles: str, inchikey: str) -> Tuple[str, str]:
+    """Normalize query structures the same way retrieval candidates are normalized."""
+    norm_smi = common.smi_inchi_round_smi(smiles)
+    if norm_smi is None:
+        return smiles, normalize_inchikey(inchikey)
+
+    norm_ikey = common.inchikey_from_smiles(norm_smi)
+    if not norm_ikey:
+        return norm_smi, normalize_inchikey(inchikey)
+
+    return norm_smi, normalize_inchikey(norm_ikey)
+
+
 def stereo_group_key(ikey: str) -> str:
     ikey = normalize_inchikey(ikey)
     return ikey.split("-")[0]
@@ -471,6 +484,14 @@ def main(args):
 
     class_labels_path = data_folder / "chemical_class_labels.tsv"
     class_df = pd.read_csv(class_labels_path, sep="\t") if class_labels_path.exists() else None
+
+    query_df = query_df.copy()
+    normalized_query_structures = query_df.apply(
+        lambda row: normalize_query_structure(row["smiles"], row["inchikey"]),
+        axis=1,
+    )
+    query_df["smiles"] = [norm_smi for norm_smi, _ in normalized_query_structures]
+    query_df["inchikey"] = [norm_ikey for _, norm_ikey in normalized_query_structures]
 
     name_to_ikey = dict(query_df[["spec", "inchikey"]].values)
     name_to_smi = dict(query_df[["spec", "smiles"]].values)
