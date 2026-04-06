@@ -49,7 +49,7 @@ class FragmentEngine(object):
             self.smiles = mol_str
             self.mol = Chem.MolFromSmiles(self.smiles)
             if self.mol is None:
-                return
+                raise RuntimeError(f"Invalid molecule encountered. SMILES: {self.smiles}")
             self.inchi = Chem.MolToInchi(self.mol)
             if not mol_str_canonicalized:
                 self.mol = common.canonical_mol_from_inchi(self.inchi)
@@ -60,7 +60,7 @@ class FragmentEngine(object):
             self.inchi = mol_str
             self.mol = common.canonical_mol_from_inchi(self.inchi)  # inchi must be canonicalized
             if self.mol is None:
-                return
+                raise RuntimeError(f"Invalid molecule encountered. InChI: {self.inchi}")
             self.smiles = Chem.MolToSmiles(self.mol)
             self.mol = Chem.MolFromSmiles(self.smiles)  # always use canonical smiles for mols
         else:
