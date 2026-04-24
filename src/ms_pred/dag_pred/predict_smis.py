@@ -59,6 +59,8 @@ def get_args():
     parser.add_argument("--dataset-name", default=None)
     parser.add_argument("--dataset-labels", default="labels.tsv")
     parser.add_argument("--split-name", default="split_22.tsv")
+    parser.add_argument("--strict-sanitize", default=False, action="store_true",
+                        help="sanitize input smiles using stricter rules")
     parser.add_argument("--threshold", default=0.0, action="store", type=float)
     parser.add_argument("--max-nodes", default=100, action="store", type=int)
     parser.add_argument("--upper-limit", default=1500, action="store", type=int)
@@ -150,6 +152,7 @@ def predict():
     with torch.no_grad():
         model.eval()
         model.freeze()
+        strict_sanitize = kwargs["strict_sanitize"]
 
         def prepare_entry(entry):
             smi = entry["smiles"]
@@ -158,7 +161,18 @@ def predict():
             instrument = entry["instrument"] if "instrument" in entry else "Orbitrap"  # fallback to Orbitrap
             name = entry["spec"]
             inchikey = common.inchikey_from_smiles(smi)
-            smi = Chem.MolToSmiles(Chem.MolFromSmiles(smi))  # canonicalize by roundtrip from SMILES
+            if strict_sanitize:
+                mol = Chem.MolFromSmiles(smi)
+                if mol is None:
+                    return []
+                for atom in mol.GetAtoms():
+                    if atom.GetSymbol() not in common.VALID_ELEMENTS:
+                        return []
+                smi = Chem.MolToSmiles(mol)  # canonicalize by roundtrip from SMILES
+                if '.' in smi:  # multiple molecules / salt
+                    return []
+            else:
+                smi = Chem.MolToSmiles(Chem.MolFromSmiles(smi))  # canonicalize by roundtrip from SMILES
             collision_energies = [i for i in ast.literal_eval(entry["collision_energies"])]
             tup_to_process = []
 

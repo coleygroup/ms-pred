@@ -55,6 +55,12 @@ test_entries = [
      "train_split": "official_split",
      "test_split": "test_formula",
      "max_k": 256},
+
+    {"dataset": "msg",
+     "train_split": "official_split",
+     "test_split": "test_mass",
+     "max_k": 256,
+     "strict_sanitize": True},
 ]
 
 pred_filename = "preds.hdf5"
@@ -98,7 +104,9 @@ for test_entry in test_entries:
     --adduct-shift \\
     """
     if binned_out:
-        cmd += "--binned-out"
+        cmd += "--binned-out \\\n    "
+    if "strict_sanitize" in test_entry and test_entry["strict_sanitize"]:
+        cmd += "--strict-sanitize"
     device_str = f"CUDA_VISIBLE_DEVICES={vis_devices}"
     cmd = f"{device_str} {cmd}"
     print(cmd + "\n")
