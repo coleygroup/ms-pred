@@ -1,6 +1,6 @@
 #  Mass Spectrum Predictor
 
-![ICEBERG-WebUI](iceberg_teaser.png)
+[![ICEBERG-WebUI](iceberg_teaser.png)](http://iceberg-ms.mit.edu/)
 
 **Update 4/4/2026:** You can run ICEBERG structural elucidation easily at http://iceberg-ms.mit.edu/! By inputting the chemical formula and your experimental spectrum, the WebUI will rank it against all candidates from PubChem. No GPU is required.
 
