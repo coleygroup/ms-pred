@@ -26,7 +26,7 @@ universal_args:
   lr-decay-rate: [0.95]
   num-decoys: [5]
   num-fixed-decoys: [5]
-  all-decoy-nums: [10]
+  all-decoy-nums: [20]
   weight-decay: [0.0]
   grad-accumulate: [2]
 
@@ -87,12 +87,12 @@ iterative_args:
   #    seed: [1]
   #    train-checkpoint: [results/joint_train_nist20/scaffold_1_rnd1/version_0/best.ckpt]
 
-  -  split-name: [scaffold_1.tsv]
-     save-dir: [scaffold_1_rnd2]
-     seed: [2]
-     train-checkpoint: [results/joint_train_nist20/scaffold_1_rnd2/version_0/best.ckpt]
-
   # -  split-name: [scaffold_1.tsv]
-  #    save-dir: [scaffold_1_rnd3]
-  #    seed: [3]
-  #    train-checkpoint: [results/joint_train_nist20/scaffold_1_rnd3/version_0/best.ckpt]
+  #    save-dir: [scaffold_1_rnd2]
+  #    seed: [2]
+  #    train-checkpoint: [results/joint_train_nist20/scaffold_1_rnd2/version_0/best.ckpt]
+
+  -  split-name: [scaffold_1.tsv]
+     save-dir: [scaffold_1_rnd3]
+     seed: [3]
+     train-checkpoint: [results/joint_train_nist20/scaffold_1_rnd3/version_0/best.ckpt]

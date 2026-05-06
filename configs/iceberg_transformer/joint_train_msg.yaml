@@ -2,7 +2,7 @@ launcher_args: {experiment_name: joint_train_msg,
   script_name: "src/ms_pred/iceberg_transformer/train_joint.py",
   slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,
-  visible_devices: [1, 2]
+  visible_devices: [0, 1]
 }
 universal_args:
   _slurm_args:
@@ -56,7 +56,7 @@ universal_args:
   magma-decay-rate: [0.9]
   magma-decay-steps: [2500]
   binned-targs: [True]
-  inten-loss-fn: [cosine]
+  inten-loss-fn: [entropy]
 
 iterative_args:
   -  split-name: [split.tsv]

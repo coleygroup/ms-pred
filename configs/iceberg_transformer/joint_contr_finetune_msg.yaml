@@ -25,6 +25,7 @@ universal_args:
   learning-rate: [0.00027]
   lr-decay-rate: [0.9]
   weight-decay: [0]
+  grad-accumulate: [1]
 
   inten-dropout: [0.1]
   frag-dropout: [0.1]
@@ -59,7 +60,7 @@ universal_args:
   magma-decay-rate: [0.9]
   magma-decay-steps: [2500]
   binned-targs: [True]
-  inten-loss-fn: [cosine]
+  inten-loss-fn: [entropy]
   contr-loss-fn: [entropy]
   contr-weight: [1]
   contr-threshold: [0.6]
@@ -69,4 +70,4 @@ iterative_args:
   -  split-name: [split.tsv]
      save-dir: [split_rnd1]
      seed: [1]
-     train-checkpoint: [results/joint_train_msg/split_rnd1/version_74/best.ckpt]
+     train-checkpoint: [results/joint_train_msg/split_rnd1/version_82/best.ckpt]

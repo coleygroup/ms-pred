@@ -190,3 +190,6 @@ class ForwardFFN(pl.LightningModule):
             },
         }
         return ret
+
+    def lr_scheduler_step(self, scheduler, optimizer_idx, metric=None):
+        scheduler.step()

@@ -119,6 +119,12 @@ def add_joint_train_args(parser):
     parser.add_argument("--num-decoys", default=3, type=int)
     parser.add_argument("--num-fixed-decoys", default=7, action="store", type=int) 
     parser.add_argument("--all-decoy-nums", default=10, type=int)
+    parser.add_argument("--filter-decoys-by-retrieval-inchikey", default=False, action="store_true")
+    parser.add_argument(
+        "--retrieval-inchikey-tsv",
+        default="data/spec_datasets/nist20/retrieval/cands_df_split_1_50.tsv",
+        type=str,
+    )
     parser.add_argument("--grad-accumulate", default=1, type=int, action="store")
 
     return parser
@@ -178,6 +184,8 @@ def train_model():
     num_fixed_decoys = kwargs["num_fixed_decoys"]
     pubchem_path = kwargs["pubchem_map_path"]
     all_decoy_nums = kwargs["all_decoy_nums"]
+    filter_decoys_by_retrieval_inchikey = kwargs["filter_decoys_by_retrieval_inchikey"]
+    retrieval_inchikey_tsv = kwargs["retrieval_inchikey_tsv"]
 
     # Processor and datasets
     tree_processor = TreeProcessor(
@@ -199,6 +207,8 @@ def train_model():
         num_decoys=num_decoys,
         pubchem_path=pubchem_path,
         all_decoy_nums=all_decoy_nums,
+        filter_decoys_by_retrieval_inchikey=filter_decoys_by_retrieval_inchikey,
+        retrieval_inchikey_tsv=retrieval_inchikey_tsv,
     )
     val_dataset = IntenContrDataset(
         val_df,
@@ -213,6 +223,8 @@ def train_model():
         pubchem_path=pubchem_path,
         all_decoy_nums=all_decoy_nums,
         fix_decoys=True,  # Ensure val decoys are the same across epochs for consistent validation performance
+        filter_decoys_by_retrieval_inchikey=filter_decoys_by_retrieval_inchikey,
+        retrieval_inchikey_tsv=retrieval_inchikey_tsv,
     )
     test_dataset = IntenContrDataset(
         test_df,
@@ -227,6 +239,8 @@ def train_model():
         pubchem_path=pubchem_path,
         all_decoy_nums=all_decoy_nums,
         fix_decoys=True,  # Ensure test decoys are the same across epochs for consistent test performance
+        filter_decoys_by_retrieval_inchikey=filter_decoys_by_retrieval_inchikey,
+        retrieval_inchikey_tsv=retrieval_inchikey_tsv,
     )
 
     # Define dataloaders

@@ -8,7 +8,7 @@
 from pathlib import Path
 import random
 import ast
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Set
 import logging
 
 import numpy as np
@@ -710,6 +710,8 @@ class IntenContrDataset(IntenDataset):
         pubchem_path: str = 'data/pubchem/pubchem_formulae_inchikey.hdf5',
         all_decoy_nums: int=10,
         fix_decoys: bool = False,
+        filter_decoys_by_retrieval_inchikey: bool = False,
+        retrieval_inchikey_tsv: str = 'data/spec_datasets/nist20/retrieval/cands_df_split_1_50.tsv',
         **kwargs,
     ):
         super().__init__(
@@ -727,8 +729,30 @@ class IntenContrDataset(IntenDataset):
         self.all_decoy_nums = all_decoy_nums
         self.num_decoys = num_decoys
         self.fix_decoys = fix_decoys
+        self.filter_decoys_by_retrieval_inchikey = filter_decoys_by_retrieval_inchikey
+        self.retrieval_inchikey_tsv = retrieval_inchikey_tsv
+        self.retrieval_inchikey_filter: Set[str] = set()
+        if self.filter_decoys_by_retrieval_inchikey:
+            self.retrieval_inchikey_filter = self._load_retrieval_inchikey_filter(self.retrieval_inchikey_tsv)
         if self.fix_decoys:
             self.fixed_decoys = {}
+
+    @staticmethod
+    def _load_retrieval_inchikey_filter(retrieval_inchikey_tsv: str) -> Set[str]:
+        retrieval_path = Path(retrieval_inchikey_tsv)
+        if not retrieval_path.exists():
+            raise FileNotFoundError(
+                f"Retrieval InChIKey TSV not found: {retrieval_inchikey_tsv}"
+            )
+
+        retrieval_df = pd.read_csv(retrieval_path, sep="\t")
+        if "inchikey" not in retrieval_df.columns:
+            raise ValueError(
+                f"Missing 'inchikey' column in retrieval TSV: {retrieval_inchikey_tsv}"
+            )
+
+        inchikeys = retrieval_df["inchikey"].dropna().astype(str).str.strip()
+        return set(inchikeys[inchikeys != ""].tolist())
 
     @classmethod
     def get_collate_fn(cls):
@@ -758,6 +782,10 @@ class IntenContrDataset(IntenDataset):
         num_decoys_per_entry = torch.LongTensor([len(decoys) for decoys in input_list_decoy])
         input_list_decoy_flatten = [decoy for sublist in input_list_decoy for decoy in sublist]
         targ_output = IntenDataset.collate_fn(input_list_targ)
+        if len(input_list_decoy_flatten) == 0:
+            # All items in this batch have zero valid decoys; fall back to the
+            # non-contrastive path so the model skips the contrastive loss.
+            return targ_output
         decoy_output = IntenDataset.collate_fn(input_list_decoy_flatten)
         return {"targ":targ_output, "decoy":decoy_output, "num_decoys_per_entry":num_decoys_per_entry}
     
@@ -797,6 +825,8 @@ class IntenContrDataset(IntenDataset):
             new_smi = Chem.MolToSmiles(new_mol)
             if '.' not in new_smi:
                 if new_inchikey != inchikey:
+                    if self.filter_decoys_by_retrieval_inchikey and new_inchikey in self.retrieval_inchikey_filter:
+                        continue
                     decoy_smis.append(new_smi)
         return decoy_smis
     def __getitem__(self, idx: int):

@@ -20,8 +20,8 @@ def main():
     parser = argparse.ArgumentParser(description="Compute bootstrap confidence intervals for retrieval metrics.")
     parser.add_argument(
         "--path",
-        default="results/joint_train_msg/split_rnd1/retrieval_msg_test_mass_256_pre_finetune/rerank_eval_cos.yaml",
-        help="Path to rerank_eval YAML output (defaults to cosine run).",
+        default="results/joint_train_msg/split_rnd1/retrieval_msg_test_formula_256_entropy_decoy_3_threshold_0.6/rerank_eval_entropy.yaml",
+        help="Path to rerank_eval YAML output (defaults to entropy run).",
     )
     parser.add_argument("--dist-fn", choices=["entropy", "cosine"], default="entropy", help="Which distance metric to analyze (defaults to entropy).")
     parser.add_argument(

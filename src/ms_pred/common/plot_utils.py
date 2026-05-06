@@ -26,8 +26,10 @@ method_colors = {
     "GrAFF-MS": "#FFD593",
     "FraGNNet": "#7C9D97",
     "ICEBERG (Goldman'24)": "#A7B7C3",
-    "ICEBERG (Ours)": "#7B94CC",
+    "ICEBERG (Wang'25)": "#7B94CC",
     "MetFrag": "#818181",
+    "GLACIER (w/o CF)": "#A7B7C3",
+    "GLACIER (with CF)": "#F54927",
 }
 
 # List all marker symbols in list in commnet
@@ -37,10 +39,12 @@ method_colors = {
 method_markers = {
     "CFM-ID": ".",
     "MassFormer": "<",
-    "Graff-MS": "v",
+    "GrAFF-MS": "v",
     "FraGNNet": ">",
     "ICEBERG (Goldman'24)": "x",
-    "ICEBERG (Ours)": "o",
+    "ICEBERG (Wang'25)": "o",
+    "GLACIER (w/o CF)":"1",
+    "GLACIER (with CF)":"2",
 }
 
 plt_dataset_names = {"canopus_train_public": "NPLIB1", "nist20": "NIST20"}

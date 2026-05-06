@@ -1,4 +1,4 @@
-launcher_args: {experiment_name: marason_msg_allev,
+launcher_args: {experiment_name: marason_msg,
   script_name: "src/ms_pred/marason/train_gen.py",
   slurm_script: launcher_scripts/generic_slurm.sh, 
   launch_method: local,
@@ -18,7 +18,7 @@ universal_args:
 
   dataset-name: [msg]
   split-name: [split.tsv]
-  dataset-labels: [labels_withev.tsv]
+  dataset-labels: [labels.tsv]
   magma-folder: [magma_outputs]
   learning-rate: [0.000996]
   lr-decay-rate: [0.7214]

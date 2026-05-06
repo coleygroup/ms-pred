@@ -734,6 +734,9 @@ class ScarfNet(pl.LightningModule):
         }
         return ret
 
+    def lr_scheduler_step(self, scheduler, optimizer_idx, metric=None):
+        scheduler.step()
+
 
 class ScarfIntenNet(pl.LightningModule):
     """ScarfIntenNet."""
@@ -1280,6 +1283,9 @@ class ScarfIntenNet(pl.LightningModule):
             },
         }
         return ret
+
+    def lr_scheduler_step(self, scheduler, optimizer_idx, metric=None):
+        scheduler.step()
 
 
 class JointModel(pl.LightningModule):

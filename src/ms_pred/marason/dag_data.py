@@ -145,10 +145,66 @@ class TreeProcessor:
             frag_feature_dict["morgan"] = None
         return frag_feature_dict
 
+    @staticmethod
+    def infer_parent_fragments(frag_hash_ids, max_broken):
+        frag_hash_ids = [int(i) for i in frag_hash_ids]
+        max_broken = np.asarray(max_broken, dtype=int)
+        parent_dag_ids = []
+        for frag_ind, frag_hash in enumerate(frag_hash_ids):
+            child_broken = max_broken[frag_ind]
+            candidate_inds = [
+                cand_ind
+                for cand_ind, cand_hash in enumerate(frag_hash_ids)
+                if cand_ind != frag_ind
+                and max_broken[cand_ind] == child_broken - 1
+                and (frag_hash & cand_hash) == frag_hash
+            ]
+            if not candidate_inds and child_broken > 0:
+                candidate_inds = [
+                    cand_ind
+                    for cand_ind, cand_hash in enumerate(frag_hash_ids)
+                    if cand_ind != frag_ind
+                    and max_broken[cand_ind] < child_broken
+                    and (frag_hash & cand_hash) == frag_hash
+                ]
+                if candidate_inds:
+                    max_parent_broken = max(max_broken[cand_ind] for cand_ind in candidate_inds)
+                    candidate_inds = [
+                        cand_ind for cand_ind in candidate_inds if max_broken[cand_ind] == max_parent_broken
+                    ]
+            parent_dag_ids.append([frag_hash_ids[cand_ind] for cand_ind in candidate_inds])
+        return parent_dag_ids
+
+    @staticmethod
+    def build_dag_graph(frag_hash_ids, parent_dag_ids, num_nodes, include_dag_graph=False):
+        id_node_map = {node: i for i, node in enumerate(frag_hash_ids)}
+        edge_set = set()
+        src, dst = [], []
+        edge_feats = []
+        connectivities = []
+        for i, parents in enumerate(parent_dag_ids):
+            for parent in parents:
+                if parent in id_node_map:
+                    parent_id = id_node_map[parent]
+                    if (i, parent_id) not in edge_set:
+                        src.append(i)
+                        dst.append(parent_id)
+                        edge_set.add((i, parent_id))
+                        edge_feats.append(1)
+                        edge_feats.append(-1)
+                        connectivities.append([parent_id, i])
+                        connectivities.append([i, parent_id])
+
+        src = torch.tensor(src)
+        dst = torch.tensor(dst)
+        dag_graph = dgl.graph((src, dst), num_nodes=num_nodes) if include_dag_graph else None
+        return dag_graph, connectivities, edge_feats
+
     def _convert_to_dgl(
         self,
         tree: dict,
-        include_targets: bool = True,
+        include_frag_targets: bool = True,
+        include_inten_targets: bool = True,
         last_row=False,
         include_dag_graph=False
     ):
@@ -156,11 +212,11 @@ class TreeProcessor:
 
         Args:
             tree (dict): tree dictionary
-            include_targets (bool): Try to add inten targets for supervising
+            include_inten_targets (bool): Try to add inten targets for supervising
                 the inten model
             last_row:
         """
-        root_smiles = tree["root_canonical_smiles"]
+        root_smiles = tree["root_canonical_smiles"] if isinstance(tree, dict) else tree.root_canonical_smiles
         engine = fragmentation.FragmentEngine(mol_str=root_smiles, mol_str_type="smiles", mol_str_canonicalized=True)
         # bottom_depth = engine.max_broken_bonds
         bottom_depth = engine.max_tree_depth
@@ -200,53 +256,87 @@ class TreeProcessor:
         forms, max_remove_hs, max_add_hs = [], [], []
         parent_dag_ids = []
         frag_hash_ids = []
-        for k, sub_frag in tree["frags"].items():
-            max_broken_num = sub_frag["max_broken"]
-            tree_depth = sub_frag["tree_depth"]
-            frag_hash_ids.append(sub_frag["frag_hash"])
-            parent_dag_ids.append(sub_frag["parents"])
-            inten_frag_ids.append(k)
+        if isinstance(tree, dict):
+            for k, sub_frag in tree["frags"].items():
+                max_broken_num = sub_frag["max_broken"]
+                tree_depth = sub_frag["tree_depth"]
+                frag_hash_ids.append(sub_frag["frag_hash"])
+                parent_dag_ids.append(sub_frag["parents"])
+                inten_frag_ids.append(k)
 
-            # Skip because we never fragment last row
-            if (not last_row) and (tree_depth == bottom_depth):
-                continue
+                if (not last_row) and (tree_depth == bottom_depth):
+                    continue
 
-            binary_targs = sub_frag["atoms_pulled"]
-            frag = sub_frag["frag"]
+                binary_targs = sub_frag["atoms_pulled"]
+                frag = sub_frag["frag"]
 
-            # Get frag dict and target
-            frag_dict = self.featurize_frag(
-                frag,
-                engine,
-            )
-            draw_dicts.append(frag_dict["draw_dict"])
-            frag_morgans.append(frag_dict["morgan"])
-            forms.append(frag_dict["form"])
-            old_to_new = frag_dict["old_to_new"]
-            graph = frag_dict["graph"]
-            max_broken.append(max_broken_num)
+                frag_dict = self.featurize_frag(
+                    frag,
+                    engine,
+                )
+                draw_dicts.append(frag_dict["draw_dict"])
+                frag_morgans.append(frag_dict["morgan"])
+                forms.append(frag_dict["form"])
+                old_to_new = frag_dict["old_to_new"]
+                graph = frag_dict["graph"]
+                max_broken.append(max_broken_num)
 
-            max_remove_hs.append(sub_frag["max_remove_hs"])
-            max_add_hs.append(sub_frag["max_add_hs"])
+                max_remove_hs.append(sub_frag["max_remove_hs"])
+                max_add_hs.append(sub_frag["max_add_hs"])
 
-            # if include_targets and not self.binned_targs:
-            #     inten_targs = sub_frag["intens"]
-            #     inten_targets.append(inten_targs)
+                if include_frag_targets:
+                    targ_vec = np.zeros(graph.num_nodes())
+                    for j in old_to_new[binary_targs]:
+                        targ_vec[j] = 1
+                    frag_targets.append(torch.from_numpy(targ_vec))
 
+                dgl_inputs.append(graph)
+                masses.append(sub_frag["base_mass"])
+            if include_inten_targets:
+                inten_targets = np.array(tree["raw_spec"])
+        elif isinstance(tree, common.MassSpec):
+            masses = tree.masses_no_adduct if tree.has_masses_no_adduct else tree.masses
+            if masses is None:
+                raise ValueError("MassSpec must include masses or masses_no_adduct")
 
-            # For gen model only!!
-            targ_vec = np.zeros(graph.num_nodes())
-            for j in old_to_new[binary_targs]:
-                targ_vec[j] = 1
+            frag_hash_ids = [int(i) for i in tree.int_frags]
+            inten_frag_ids = np.arange(len(frag_hash_ids))
+            max_broken = np.asarray(tree.brokens)
+            max_add_hs = np.asarray(tree.max_add_hs)
+            max_remove_hs = np.asarray(tree.max_remove_hs)
+            forms = tree.frag_form
+            atoms_pulled = tree.get_atoms_pulled()
+            parent_dag_ids = self.infer_parent_fragments(frag_hash_ids, max_broken)
 
-            graph = frag_dict["graph"]
+            if include_frag_targets and (atoms_pulled is None or len(atoms_pulled) != len(frag_hash_ids)):
+                raise ValueError("Generation targets in MassSpec meta must align with fragment rows")
 
-            # Define targ vec
-            dgl_inputs.append(graph)
-            masses.append(sub_frag["base_mass"])
-            frag_targets.append(torch.from_numpy(targ_vec))
-        if include_targets:
-            inten_targets = np.array(tree["raw_spec"])
+            for frag_ind, frag in enumerate(frag_hash_ids):
+                frag_dict = self.featurize_frag(
+                    frag,
+                    engine,
+                )
+                draw_dicts.append(frag_dict["draw_dict"])
+                frag_morgans.append(frag_dict["morgan"])
+                graph = frag_dict["graph"]
+                dgl_inputs.append(graph)
+
+                if include_frag_targets:
+                    targ_vec = np.zeros(graph.num_nodes())
+                    old_to_new = frag_dict["old_to_new"]
+                    for j in old_to_new[atoms_pulled[frag_ind]]:
+                        targ_vec[j] = 1
+                    frag_targets.append(torch.from_numpy(targ_vec))
+
+            if include_inten_targets:
+                if "raw_spec" in tree.info:
+                    inten_targets = np.array(tree.info["raw_spec"])
+                elif tree.spec is not None:
+                    inten_targets = np.array(tree.spec)
+                else:
+                    raise ValueError("MassSpec must include masses and intens for intensity targets")
+        else:
+            raise TypeError(f"Unknown type of {tree}")
 
         masses = engine.shift_bucket_masses[None, None, :] + \
                  adduct_mass_shift[None, :, None] + \
@@ -259,43 +349,22 @@ class TreeProcessor:
         all_form_vecs = [common.formula_to_dense(i) for i in forms]
         all_form_vecs = np.array(all_form_vecs)
         root_form_vec = common.formula_to_dense(root_form)
-        id_node_map = {node:i for i, node in enumerate(frag_hash_ids)}
-        edge_set = set()
-        src, dst = [], []
-        edge_feats = []
-        connectivities = []
-        for i, parents in enumerate(parent_dag_ids):
-            for parent in parents:
-                if parent in id_node_map:
-                    parent_id = id_node_map[parent]
-                    if (i, parent_id) not in edge_set:
-                        src.append(i)
-                        dst.append(parent_id)
-                        edge_set.add((i, parent_id))
-                        edge_feats.append(1)
-                        edge_feats.append(-1)
-                        connectivities.append([parent_id, i])
-                        connectivities.append([i, parent_id])
-        
-        src = torch.tensor(src)
-        dst = torch.tensor(dst)
-        # dag_graph = dgl.heterograph({
-        #     # ('node', 'parent', 'node'): (src, dst),
-        #     ('node', 'child', 'node'): (dst, src),
-        # }, num_nodes_dict={'node':masses.shape[0]})
-        dag_graph = dgl.graph(
-            (src, dst), num_nodes=masses.shape[0]
-        ) if include_dag_graph else None
+        dag_graph, connectivities, edge_feats = self.build_dag_graph(
+            frag_hash_ids=frag_hash_ids,
+            parent_dag_ids=parent_dag_ids,
+            num_nodes=masses.shape[0],
+            include_dag_graph=include_dag_graph,
+        )
 
         out_dict = {
             "root_repr": root_repr,
             "dgl_frags": dgl_inputs,
             "masses": masses,
-            "inten_targs": np.array(inten_targets) if include_targets else None,
+            "inten_targs": np.array(inten_targets) if include_inten_targets else None,
             "max_remove_hs": max_remove_hs,
             "max_add_hs": max_add_hs,
             "max_broken": max_broken,
-            "targs": frag_targets,
+            "targs": frag_targets if include_frag_targets else None,
             "form_vecs": all_form_vecs,
             "root_form_vec": root_form_vec,
             "root_morgan":root_morgan,
@@ -311,7 +380,8 @@ class TreeProcessor:
     def _process_tree(
         self,
         tree: dict,
-        include_targets: bool = True,
+        include_frag_targets: bool = True,
+        include_inten_targets: bool = True,
         last_row=False,
         convert_to_dgl=True,
         include_dag_graph=False
@@ -320,13 +390,19 @@ class TreeProcessor:
 
         Args:
             tree (dict): tree dictionary
-            include_targets (bool): Try to add inten targets for supervising
+            include_inten_targets (bool): Try to add inten targets for supervising
                 the inten model
             last_row:
             pickle_input: If pickle_input, this
         """
         if convert_to_dgl:
-            out_dict = self._convert_to_dgl(tree, include_targets, last_row, include_dag_graph)
+            out_dict = self._convert_to_dgl(
+                tree,
+                include_frag_targets,
+                include_inten_targets,
+                last_row,
+                include_dag_graph,
+            )
             if "collision_energy" in tree:
                 out_dict["collision_energy"] = tree["collision_energy"]
             if "instrument" in tree:
@@ -344,7 +420,7 @@ class TreeProcessor:
             if isinstance(root_repr, dgl.DGLGraph):
                 self.add_pe_embed(root_repr)
 
-        if include_targets and self.binned_targs:
+        if include_inten_targets and self.binned_targs:
             intens = out_dict["inten_targs"]
             bin_posts = np.clip(np.digitize(intens[:, 0], self.bins), 0, len(self.bins) - 1)
             new_out = np.zeros_like(self.bins)
@@ -364,7 +440,12 @@ class TreeProcessor:
 
     def process_tree_gen(self, tree: dict, convert_to_dgl=True):
         proc_out = self._process_tree(
-            tree, include_targets=False, last_row=False, convert_to_dgl=convert_to_dgl, include_dag_graph=False
+            tree,
+            include_frag_targets=True,
+            include_inten_targets=False,
+            last_row=False,
+            convert_to_dgl=convert_to_dgl,
+            include_dag_graph=False,
         )
         keys = {
             "root_repr",
@@ -380,7 +461,12 @@ class TreeProcessor:
 
     def process_tree_inten(self, tree, convert_to_dgl=True):
         proc_out = self._process_tree(
-            tree, include_targets=True, last_row=True, convert_to_dgl=convert_to_dgl, include_dag_graph=True
+            tree,
+            include_frag_targets=False,
+            include_inten_targets=True,
+            last_row=True,
+            convert_to_dgl=convert_to_dgl,
+            include_dag_graph=True,
         )
         keys = {
             "root_repr",
@@ -406,7 +492,12 @@ class TreeProcessor:
 
     def process_tree_inten_pred(self, tree: dict, convert_to_dgl=True):
         proc_out = self._process_tree(
-            tree, include_targets=False, last_row=True, convert_to_dgl=convert_to_dgl, include_dag_graph=True
+            tree,
+            include_frag_targets=False,
+            include_inten_targets=False,
+            last_row=True,
+            convert_to_dgl=convert_to_dgl,
+            include_dag_graph=True,
         )
         keys = {
             "root_repr",
@@ -515,6 +606,7 @@ class TreeProcessor:
 
         g = dgl.graph(data=(src_tens, dest_tens), num_nodes=num_nodes)
         g.ndata["h"] = node_data.float()
+        g.ndata["n_id"] = torch.arange(num_nodes, dtype=torch.long)
         g.edata["e"] = bond_types_onehot.float()
         g.edata["e_ind"] = bond_types.long()
         return g
@@ -547,11 +639,16 @@ class DAGDataset(Dataset):
             use_ray (bool): use_ray
             kwargs:
         """
-        self.df = df
+        self.df = df.copy()
+        if "instrument" not in self.df.columns:
+            self.df["instrument"] = "Orbitrap"
         self.num_workers = num_workers
         self.magma_h5 = magma_h5
         self.magma_map = magma_map
-        valid_spec_ids = set([self.rm_collision(i) for i in self.magma_map])
+        if 'collision' in list(self.magma_map.keys())[0]:
+            valid_spec_ids = set([common.rm_collision_str(i) for i in self.magma_map])
+        else:
+            valid_spec_ids = set(self.magma_map.keys())
         valid_specs = [(i in valid_spec_ids and inst in common.instrument2onehot_pos) for i, inst in self.df[["spec", "instrument"]].values]
         self.df_sub = self.df[valid_specs]
         self.name_to_idx = {}
@@ -563,7 +660,7 @@ class DAGDataset(Dataset):
             self.spec_names = []
             self.name_to_dict = {}
             for i in self.magma_map:
-                ori_id = self.rm_collision(i)
+                ori_id = common.rm_collision_str(i)
                 if ori_id in ori_label_map:
                     self.spec_names.append(i)
                     self.name_to_dict[i] = copy.deepcopy(ori_label_map[ori_id])
@@ -578,14 +675,14 @@ class DAGDataset(Dataset):
 
         adduct_map = dict(self.df[["spec", "ionization"]].values)
         self.name_to_adduct = {
-            i: adduct_map[self.rm_collision(i)] for i in self.spec_names
+            i: adduct_map[common.rm_collision_str(i)] for i in self.spec_names
         }
         self.name_to_adducts = {
             i: common.ion2onehot_pos[self.name_to_adduct[i]] for i in self.spec_names
         }
         instrument_map = dict(self.df[["spec", "instrument"]].values)
         self.name_to_instrument = {
-            i: instrument_map[self.rm_collision(i)] for i in self.spec_names
+            i: instrument_map[common.rm_collision_str(i)] for i in self.spec_names
         }
 
         self.name_to_instruments = {
@@ -595,10 +692,21 @@ class DAGDataset(Dataset):
         self.name_to_precursors = {k: v['precursor'] for k, v in self.name_to_dict.items()}
 
     def load_tree(self, x):
-        filename = self.name_to_dict[x]["magma_file"]
+        if x in self.name_to_dict:
+            filekeys = self.name_to_dict[x]["magma_file"]
+        elif x in self.magma_map:
+            filekeys = self.magma_map[x]
+        else:
+            raise KeyError(f"{x} not found in dataset labels or magma map")
+
+        if isinstance(filekeys, tuple):
+            if not type(self.magma_h5) is common.PredSpecDB:
+                self.magma_h5 = common.PredSpecDB(self.magma_h5)
+            return self.magma_h5.read(*filekeys)
+
         if not type(self.magma_h5) is common.HDF5Dataset:
             self.magma_h5 = common.HDF5Dataset(self.magma_h5)
-        fp = self.magma_h5.read_str(filename)
+        fp = self.magma_h5.read_str(filekeys)
         return json.loads(fp)
 
     def read_fn(self, x):
@@ -634,14 +742,7 @@ class DAGDataset(Dataset):
 
     @staticmethod
     def rm_collision(key: str) -> str:
-        """remove `_collision VALUE` from the string"""
-        keys = key.split('_collision')
-        if len(keys) == 2:
-            return keys[0]
-        elif len(keys) == 1:
-            return key
-        else:
-            raise ValueError(f'Unrecognized key: {key}')
+        return common.rm_collision_str(key)
 
 
 class GenDataset(DAGDataset):
@@ -809,14 +910,13 @@ class IntenDataset(DAGDataset):
             if self.closest is not None:
                 ref_idx = self.closest[idx, 0].item()
                 ref_name = self.ref_spec_names[ref_idx]
-                gen_pred = json.loads(self.magma_h5.read_str(f"{ref_name}.json"))
-
-                smi = gen_pred['root_canonical_smiles']
+                gen_pred = self.load_tree(ref_name)
+                smi = gen_pred['root_canonical_smiles'] if isinstance(gen_pred, dict) else gen_pred.root_canonical_smiles
                 trees = self.tree_processor.process_tree_inten_pred(gen_pred)
                 refs = trees['dgl_tree']
                 colli_eng = float(common.get_collision_energy(ref_name))
                 refs.update(
-                {"name": gen_pred['name'], "adduct": adduct, "precursor": precursor, "collision_energy": colli_eng,
+                {"name": gen_pred['name'] if isinstance(gen_pred, dict) else ref_name, "adduct": adduct, "precursor": precursor, "collision_energy": colli_eng,
                     "smiles": smi})
                 ref_engs, ref_specs = [], []
                 spec_indices = self.closest[idx, :ref_count]
@@ -1047,13 +1147,13 @@ class IntenPredDataset(DAGDataset):
             if self.closest is not None:
                 ref_idx = self.closest[idx, 0].item()
                 ref_name = self.ref_spec_names[ref_idx]
-                gen_pred = json.loads(self.magma_h5.read_str(f"pred_{ref_name}.json"))
-                smi = gen_pred['root_canonical_smiles']
+                gen_pred = self.load_tree(ref_name)
+                smi = gen_pred['root_canonical_smiles'] if isinstance(gen_pred, dict) else gen_pred.root_canonical_smiles
                 trees = self.tree_processor.process_tree_inten_pred(gen_pred)
                 refs = trees['dgl_tree']
                 colli_eng = float(common.get_collision_energy(ref_name))
                 refs.update(
-                {"name": gen_pred['name'], "adduct": adduct, "precursor": precursor, "collision_energy": colli_eng,
+                {"name": gen_pred['name'] if isinstance(gen_pred, dict) else ref_name, "adduct": adduct, "precursor": precursor, "collision_energy": colli_eng,
                     "smiles": smi})
                 spec_indices = self.closest[idx, :ref_count]
                 ref_engs = self.engs_db[spec_indices]

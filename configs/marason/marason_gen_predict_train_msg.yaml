@@ -1,4 +1,4 @@
-launcher_args: {experiment_name: marason_msg_allev,
+launcher_args: {experiment_name: marason_msg,
   script_name: "src/ms_pred/marason/predict_gen.py",
   slurm_script: launcher_scripts/generic_slurm.sh, 
   launch_method: local,
@@ -13,8 +13,9 @@ universal_args:
 
   batch-size: [8]
   dataset-name: [msg]
-  dataset-labels: [labels_withev_validinst.tsv]
-  num-workers: [6]
+  dataset-labels: [labels.tsv]
+  num-gpu-workers: [4]
+  num-cpu-workers: [32]
   threshold: [0.0]
   max-nodes: [100]
   num-decoys: [0]
@@ -22,14 +23,14 @@ universal_args:
 iterative_args:
 
   -  split-name: [split.tsv]
-     checkpoint-pth: [results/marason_msg_allev/split_rnd1/version_0/best.ckpt]
+     checkpoint-pth: [results/marason_msg/split_rnd1/version_0/best.ckpt]
      save-dir: [split_rnd1/preds_train_100]
 
   # -  split-name: [split.tsv]
-  #    checkpoint-pth: [results/marason_msg_allev/split_rnd2/version_0/best.ckpt]
+  #    checkpoint-pth: [results/marason_msg/split_rnd2/version_0/best.ckpt]
   #    save-dir: [split_rnd2/preds_train_100]
 
   # -  split-name: [split.tsv]
-  #    checkpoint-pth: [results/marason_msg_allev/split_rnd3/version_0/best.ckpt]
+  #    checkpoint-pth: [results/marason_msg/split_rnd3/version_0/best.ckpt]
   #    save-dir: [split_rnd3/preds_train_100]
 

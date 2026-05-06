@@ -33,7 +33,7 @@ universal_args:
   frag-set-layers: [3]
   mlp-layers: [1]
   gnn-layers: [4]
-  loss-fn: [cosine]
+  loss-fn: [entropy]
   root-encode: [gnn]
   inject-early: [false]
 

@@ -26,6 +26,20 @@ import ms_pred.marason.inten_model as inten_model
 import ms_pred.marason.train_inten as inten_train
 
 
+def build_inten_magma_map(magma_tree_path: Path):
+    predspec_db = common.PredSpecDB(magma_tree_path)
+    name_to_entry = {}
+    for name in predspec_db.get_all_names():
+        ces, remarks = predspec_db.get_entries(name)
+        for ce, remark in zip(ces, remarks):
+            name_to_entry[f"{name}_collision {ce}"] = (name, ce, remark)
+    if len(name_to_entry) > 0:
+        return name_to_entry
+
+    legacy_h5 = common.HDF5Dataset(magma_tree_path)
+    return {Path(name).stem: name for name in legacy_h5.get_all_names()}
+
+
 def score_function(config, base_args, orig_dir=""):
     """score_function.
 
@@ -64,20 +78,25 @@ def score_function(config, base_args, orig_dir=""):
 
     num_workers = kwargs.get("num_workers", 0)
     magma_dag_folder = Path(kwargs["magma_dag_folder"])
-    all_json_pths = [Path(i) for i in magma_dag_folder.glob("*.json")]
-    name_to_json = {i.stem.replace("pred_", ""): i for i in all_json_pths}
+    name_to_json = build_inten_magma_map(magma_dag_folder)
 
     pe_embed_k = kwargs["pe_embed_k"]
     root_encode = kwargs["root_encode"]
     binned_targs = kwargs["binned_targs"]
+    add_hs = kwargs["add_hs"]
+    embed_elem_group = kwargs["embed_elem_group"]
     tree_processor = dag_data.TreeProcessor(
-        pe_embed_k=pe_embed_k, root_encode=root_encode, binned_targs=binned_targs
+        pe_embed_k=pe_embed_k,
+        root_encode=root_encode,
+        binned_targs=binned_targs,
+        add_hs=add_hs,
+        embed_elem_group=embed_elem_group,
     )
 
     # Build out frag datasets
     train_dataset = dag_data.IntenDataset(
         train_df,
-        data_dir=data_dir,
+        magma_h5=magma_dag_folder,
         magma_map=name_to_json,
         num_workers=num_workers,
         tree_processor=tree_processor,
@@ -85,7 +104,7 @@ def score_function(config, base_args, orig_dir=""):
     )
     val_dataset = dag_data.IntenDataset(
         val_df,
-        data_dir=data_dir,
+        magma_h5=magma_dag_folder,
         magma_map=name_to_json,
         num_workers=num_workers,
         tree_processor=tree_processor,
@@ -132,8 +151,12 @@ def score_function(config, base_args, orig_dir=""):
         root_encode=kwargs["root_encode"],
         inject_early=kwargs["inject_early"],
         embed_adduct=kwargs["embed_adduct"],
+        embed_collision=kwargs["embed_collision"],
+        embed_instrument=kwargs["embed_instrument"],
         binned_targs=binned_targs,
         encode_forms=kwargs["encode_forms"],
+        add_hs=add_hs,
+        embed_elem_group=embed_elem_group,
     )
 
     # outputs = model(test_batch['fps'])

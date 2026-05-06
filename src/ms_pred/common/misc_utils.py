@@ -1409,6 +1409,13 @@ class HDF5Dataset:
         return self.h5_obj.keys()
 
     def read_str(self, name, encoding='utf-8') -> str:
+        # Some metadata pipelines may store HDF5 dataset keys as numeric IDs.
+        # Normalize to a string key before indexing h5py groups.
+        if isinstance(name, bytes):
+            name = name.decode(encoding)
+        elif not isinstance(name, str):
+            name = str(name)
+
         if '/' in name:  # has group
             groupname, name = name.rsplit('/', 1)
             grp = self.h5_obj[groupname]
