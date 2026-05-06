@@ -10,13 +10,133 @@ import numpy as np
 import pandas as pd
 import torch
 import yaml
-from numpy.linalg import norm
 from torchmetrics.retrieval import RetrievalHitRate
 
 import ms_pred.common as common
 
 
 _WORKER_PREDSPEC_DB = None
+
+
+def dense_to_sparse_spec(spec: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Represent a binned spectrum as (bin_indices, intensities)."""
+    spec = np.asarray(spec)
+    if spec.size == 0:
+        return np.zeros(0, dtype=np.uint32), np.zeros(0, dtype=np.float32)
+    if spec.ndim == 2:
+        if spec.shape[1] != 2:
+            raise ValueError(f"Expected sparse spectrum with shape [n, 2], got {spec.shape}")
+        vals = spec[:, 1]
+        keep = vals > 0
+        return spec[keep, 0].astype(np.uint32, copy=False), vals[keep].astype(np.float32, copy=False)
+
+    inds = np.flatnonzero(spec > 0)
+    if inds.size == 0:
+        return np.zeros(0, dtype=np.uint32), np.zeros(0, dtype=np.float32)
+    return inds.astype(np.uint32, copy=False), spec[inds].astype(np.float32, copy=False)
+
+
+def _sparse_indices_values(spec: np.ndarray, ignore_peak=None) -> Tuple[np.ndarray, np.ndarray]:
+    if isinstance(spec, tuple) and len(spec) == 2:
+        inds = np.asarray(spec[0], dtype=np.int64)
+        vals = np.asarray(spec[1], dtype=np.float32)
+        keep = vals > 0
+        inds = inds[keep]
+        vals = vals[keep]
+        if ignore_peak is not None:
+            keep = inds < int(ignore_peak)
+            inds = inds[keep]
+            vals = vals[keep]
+        return inds, vals
+
+    spec = np.asarray(spec)
+    if spec.size == 0:
+        return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.float32)
+    if spec.ndim == 1:
+        inds = np.flatnonzero(spec > 0).astype(np.int64, copy=False)
+        vals = spec[inds].astype(np.float32, copy=False)
+    else:
+        inds = spec[:, 0].astype(np.int64, copy=False)
+        vals = spec[:, 1].astype(np.float32, copy=False)
+        keep = vals > 0
+        inds = inds[keep]
+        vals = vals[keep]
+
+    if ignore_peak is not None:
+        keep = inds < int(ignore_peak)
+        inds = inds[keep]
+        vals = vals[keep]
+    return inds, vals
+
+
+def _num_sparse_peaks(spec: np.ndarray) -> int:
+    _, vals = _sparse_indices_values(spec)
+    return int(np.sum(vals > 0))
+
+
+def _cosine_sparse(cand_preds_dict: List[Dict], true_spec: np.ndarray, colli_eng, ignore_peak=None) -> np.ndarray:
+    true_inds, true_vals = _sparse_indices_values(true_spec, ignore_peak=ignore_peak)
+    true_norm = float(np.sqrt(np.dot(true_vals, true_vals))) + 1e-22
+    true_lookup = {int(ind): float(val) for ind, val in zip(true_inds, true_vals)}
+
+    out = np.ones(len(cand_preds_dict), dtype=np.float32)
+    for pred_idx, cand_dict in enumerate(cand_preds_dict):
+        cand_pred = cand_dict.get(colli_eng)
+        if cand_pred is None:
+            continue
+        cand_inds, cand_vals = _sparse_indices_values(cand_pred, ignore_peak=ignore_peak)
+        if cand_vals.size == 0:
+            continue
+        pred_norm = float(np.sqrt(np.dot(cand_vals, cand_vals))) + 1e-22
+        dot = sum(float(val) * true_lookup.get(int(ind), 0.0) for ind, val in zip(cand_inds, cand_vals))
+        out[pred_idx] = 1 - dot / (pred_norm * true_norm)
+    return out
+
+
+def _entropy_from_probs(vals: np.ndarray) -> float:
+    vals = vals[vals > 0]
+    return float(-np.sum(vals * np.log(vals + 1e-22)))
+
+
+def _entropy_sparse(cand_preds_dict: List[Dict], true_spec: np.ndarray, colli_eng, ignore_peak=None) -> np.ndarray:
+    true_inds, true_vals = _sparse_indices_values(true_spec, ignore_peak=ignore_peak)
+    true_sum = float(true_vals.sum())
+    if true_sum <= 0:
+        return np.ones(len(cand_preds_dict), dtype=np.float32)
+
+    q_vals = true_vals / true_sum
+    q_lookup = {int(ind): float(val) for ind, val in zip(true_inds, q_vals)}
+    h_true = _entropy_from_probs(q_vals)
+    out = np.ones(len(cand_preds_dict), dtype=np.float32)
+
+    for pred_idx, cand_dict in enumerate(cand_preds_dict):
+        cand_pred = cand_dict.get(colli_eng)
+        if cand_pred is None:
+            continue
+        cand_inds, cand_vals = _sparse_indices_values(cand_pred, ignore_peak=ignore_peak)
+        pred_sum = float(cand_vals.sum())
+        if pred_sum <= 0:
+            continue
+
+        p_vals = cand_vals / pred_sum
+        h_pred = _entropy_from_probs(p_vals)
+        h_mix = 0.0
+        p_lookup = {}
+        for ind, p_val in zip(cand_inds, p_vals):
+            ind = int(ind)
+            p_val = float(p_val)
+            p_lookup[ind] = p_lookup.get(ind, 0.0) + p_val
+
+        for ind, p_val in p_lookup.items():
+            if ind not in q_lookup:
+                mix_val = p_val / 2
+                h_mix -= mix_val * np.log(mix_val + 1e-22)
+        for ind, q_val in q_lookup.items():
+            mix_val = (q_val + p_lookup.get(ind, 0.0)) / 2
+            h_mix -= mix_val * np.log(mix_val + 1e-22)
+
+        out[pred_idx] = (2 * h_mix - h_pred - h_true) / np.log(4)
+    return out
 
 
 def get_args():
@@ -125,15 +245,13 @@ def _read_pred_spec_name(
                 and getattr(spec_data, "_num_bins", None) == num_bins
                 and getattr(spec_data, "_mass_upper_limit", None) == upper_limit
             )
-            if has_matching_bins:
-                spec_array = spec_data.binned_spec
-            else:
-                spec_array = spec_data.bin_spectrum(
+            if not has_matching_bins:
+                spec_data.bin_spectrum(
                     mass_upper_limit=upper_limit,
                     num_bins=num_bins,
                     pool_fn=pool_fn,
                 )
-            pred_spec[ce] = spec_array.astype(np.float32, copy=False)
+            pred_spec[ce] = spec_data.binned_spec_sparse
 
         output.append(
             (
@@ -183,7 +301,7 @@ def process_spec_file(
             if loaded_json is None:
                 print(f"Cannot find spec for {spec_name} collision {colli_label}")
                 return_dict[colli_label] = (
-                    np.zeros(num_bins, dtype=np.float32)
+                    np.zeros((0, 2), dtype=np.float32)
                     if binned_spec
                     else np.zeros((0, 2), dtype=np.float32)
                 )
@@ -194,7 +312,7 @@ def process_spec_file(
                 if not spec_file.exists():
                     print(f"Cannot find spec {spec_file}")
                     missing_spec = (
-                        np.zeros(num_bins, dtype=np.float32)
+                        np.zeros((0, 2), dtype=np.float32)
                         if binned_spec
                         else np.zeros((0, 2), dtype=np.float32)
                     )
@@ -209,9 +327,9 @@ def process_spec_file(
                     inten = shared_loaded_json["output_tbl"]["ms2_inten"]
                     shared_spec_ar = np.vstack([mz, inten]).transpose(1, 0)
                     if binned_spec:
-                        shared_binned = common.bin_spectra(
-                            [shared_spec_ar], num_bins, upper_limit
-                        )[0].astype(np.float32, copy=False)
+                        shared_binned = dense_to_sparse_spec(
+                            common.bin_spectra([shared_spec_ar], num_bins, upper_limit)[0]
+                        )
             loaded_json = shared_loaded_json
 
         if loaded_json.get("output_tbl") is None:
@@ -226,7 +344,7 @@ def process_spec_file(
                 inten = loaded_json["output_tbl"]["ms2_inten"]
                 spec_ar = np.vstack([mz, inten]).transpose(1, 0)
                 binned = common.bin_spectra([spec_ar], num_bins, upper_limit)[0]
-                return_dict[colli_label] = binned.astype(np.float32, copy=False)
+                return_dict[colli_label] = dense_to_sparse_spec(binned)
         else:
             if spec_h5 is None:
                 return_dict[colli_label] = shared_spec_ar
@@ -259,54 +377,25 @@ def dist_bin(
         }
 
     for colli_eng, true_spec in true_spec_dict.items():
-        if sparse:
-            pred_specs = np.zeros((len(cand_preds_dict), true_spec.shape[0]), dtype=np.float32)
-            for pred_idx, cand_dict in enumerate(cand_preds_dict):
-                cand_pred = cand_dict.get(colli_eng)
-                if cand_pred is None or cand_pred.size == 0:
-                    continue
-                if cand_pred.ndim == 1:
-                    pred_specs[pred_idx] = cand_pred.astype(np.float32, copy=False)
-                    continue
-                inds = cand_pred[:, 0].astype(int)
-                valid_mask = (inds >= 0) & (inds < pred_specs.shape[1])
-                pred_specs[pred_idx, inds[valid_mask]] = cand_pred[valid_mask, 1]
-        else:
-            pred_specs = np.stack(
-                [
-                    cand_dict.get(colli_eng, np.zeros_like(true_spec, dtype=np.float32))
-                    for cand_dict in cand_preds_dict
-                ],
-                axis=0,
-            ).astype(np.float32, copy=False)
-
-        if ignore_peak is not None:
-            pred_specs[:, int(ignore_peak) :] = 0
-            true_spec = true_spec.copy()
-            true_spec[int(ignore_peak) :] = 0
-
-        true_npeaks.append(np.sum(true_spec > 0))
-
+        true_npeaks.append(_num_sparse_peaks(true_spec))
         if func == "cos":
-            norm_pred = norm(pred_specs, axis=-1) + 1e-22
-            norm_true = norm(true_spec, axis=-1) + 1e-22
-            dist.append(1 - np.dot(pred_specs, true_spec) / (norm_pred * norm_true))
+            dist.append(
+                _cosine_sparse(
+                    cand_preds_dict=cand_preds_dict,
+                    true_spec=true_spec,
+                    colli_eng=colli_eng,
+                    ignore_peak=ignore_peak,
+                )
+            )
         elif func == "entropy":
-            def norm_peaks(prob):
-                return prob / (prob.sum(axis=-1, keepdims=True) + 1e-22)
-
-            def entropy(prob):
-                return -np.sum(prob * np.log(prob + 1e-22), axis=-1)
-
-            norm_pred = norm_peaks(pred_specs)
-            norm_true = norm_peaks(true_spec)
-            zeros = pred_specs.sum(axis=-1) == 0
-            entropy_pred = entropy(norm_pred)
-            entropy_targ = entropy(norm_true)
-            entropy_mix = entropy((norm_pred + norm_true) / 2)
-            entropy_dists = (2 * entropy_mix - entropy_pred - entropy_targ) / np.log(4)
-            entropy_dists[zeros] = 1
-            dist.append(entropy_dists)
+            dist.append(
+                _entropy_sparse(
+                    cand_preds_dict=cand_preds_dict,
+                    true_spec=true_spec,
+                    colli_eng=colli_eng,
+                    ignore_peak=ignore_peak,
+                )
+            )
         else:
             raise NotImplementedError()
 
@@ -350,7 +439,7 @@ def build_output_entry(
     true_dist = float(np.min(dist_full[target_mask]))
     true_mass = common.mass_from_smi(true_smiles)
 
-    num_peaks_avg = np.mean([np.sum(sp > 0) for sp in true_spec.values()])
+    num_peaks_avg = np.mean([_num_sparse_peaks(sp) for sp in true_spec.values()])
     num_collision_engs = len(true_spec)
 
     out = {
@@ -361,9 +450,9 @@ def build_output_entry(
         "mass_bin": common.bin_mass_results(true_mass),
         "num_peaks_avg": float(num_peaks_avg),
         "num_collision_engs": int(num_collision_engs),
-        "peak_bin_avg": common.bin_peak_results(true_spec, binned_spec=True, reduction="mean"),
-        "peak_bin_max": common.bin_peak_results(true_spec, binned_spec=True, reduction="max"),
-        "peak_bin_min": common.bin_peak_results(true_spec, binned_spec=True, reduction="min"),
+        "peak_bin_avg": common.bin_peak_results(true_spec, reduction="mean"),
+        "peak_bin_max": common.bin_peak_results(true_spec, reduction="max"),
+        "peak_bin_min": common.bin_peak_results(true_spec, reduction="min"),
         "true_dist": true_dist,
         "spec_name": str(spec_name),
     }

@@ -1210,7 +1210,7 @@ def fragment_svg():
 
     try:
         # Build fragment engine and get highlight information
-        engine = fragmentation.FragmentEngine(smiles, mol_str_type="smiles")
+        engine = fragmentation.FragmentEngine(smiles, mol_str_type="smiles", mol_str_canonicalized=True)
         draw_dict = engine.get_draw_dict(frag_id_int)
 
         mol = draw_dict["mol"]
