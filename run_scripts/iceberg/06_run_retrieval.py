@@ -14,51 +14,61 @@ max_nodes = 100
 batch_size = 64
 dist = "entropy"
 binned_out = True
+upper_limit = 1500
 
 test_entries = [
     {"dataset": "nist20",
      "train_split": "split_1_rnd1",
      "test_split": "split_1",
+     "num_bins": 15000,
      "max_k": 50},
 
     {"dataset": "nist20",
      "train_split": "split_1_rnd1",
      "test_split": "split_1_val",
+     "num_bins": 15000,
      "max_k": 50},
 
     # {"dataset": "nist20",
     #  "train_split": "split_1_rnd2",
     #  "test_split": "split_1",
+    #  "num_bins": 15000,
     #  "max_k": 50},
     #
     # {"dataset": "nist20",
     #  "train_split": "split_1_rnd3",
     #  "test_split": "split_1",
+    #  "num_bins": 15000,
     #  "max_k": 50},
     #
     # {"dataset": "nist20",
     #  "train_split": "scaffold_1_rnd1",
     #  "test_split": "scaffold_1",
+    #  "num_bins": 15000,
     #  "max_k": 50},
     #
     # {"dataset": "nist20",
     #  "train_split": "scaffold_1_rnd2",
     #  "test_split": "scaffold_1",
+    #  "num_bins": 15000,
     #  "max_k": 50},
     #
     # {"dataset": "nist20",
     #  "train_split": "scaffold_1_rnd3",
     #  "test_split": "scaffold_1",
+    #  "num_bins": 15000,
     #  "max_k": 50},
 
     {"dataset": "msg",
      "train_split": "official_split",
      "test_split": "test_formula",
+     "num_bins": 150000,
      "max_k": 256},
 
     {"dataset": "msg",
      "train_split": "official_split",
      "test_split": "test_mass",
+     "num_bins": 150000,
      "max_k": 256,
      "strict_sanitize": True},
 ]
@@ -70,6 +80,7 @@ for test_entry in test_entries:
     train_split = test_entry['train_split']
     split = test_entry['test_split']
     maxk = test_entry['max_k']
+    num_bins = test_entry['num_bins']
     inten_dir = Path(f"results/dag_inten_{dataset}")
     inten_model = inten_dir / train_split / "version_1/best.ckpt"  # contrastive learning model is version 1
                                                                    # if no contrastive finetuning, change version_1 to version_0
@@ -118,6 +129,8 @@ for test_entry in test_entries:
     --full-labels {labels} \\
     --formula-dir-name {subform_name}.hdf5 \\
     --pred-file {save_dir / pred_filename} \\
+    --num-bins {num_bins} \\
+    --upper-limit {upper_limit} \\
     --dist-fn {dist} \\
     """
 

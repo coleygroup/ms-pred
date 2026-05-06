@@ -8,7 +8,6 @@ from itertools import groupby, islice
 from typing import Tuple, List, Dict, Union
 import pandas as pd
 import numpy as np
-from numpy.linalg import norm
 from tqdm import tqdm
 import h5py
 import hashlib
@@ -45,9 +44,11 @@ class MassSpec:
     def __init__(self, collision_energy: Union[str, float], root_canonical_smiles=None, adduct=None, remark=None,
                  probs=None, brokens=None, masses=None, masses_no_adduct=None,
                  frag_form_vecs=None, frags=None, intens=None, int_frags=None,
-                 binned_spec=None, num_bins=None, upper_limit=None, **kwargs):
+                 binned_spec=None, binned_spec_sparse=None, num_bins=None, upper_limit=None, **kwargs):
         self._engine = None
-        self._binned_spec = None
+        self._binned_inds = None
+        self._binned_vals = None
+        self._binned_spec_dense_cache = None
         self._mass_upper_limit = upper_limit
         self._num_bins = num_bins
 
@@ -89,13 +90,78 @@ class MassSpec:
             frags = np.vstack(bit_lists)
         self.frags = safe_assign(frags, bool)
         self.intens = safe_assign(intens, np.floating)
-        self._binned_spec = safe_assign(binned_spec, np.floating)
-        if self._binned_spec is not None and self._num_bins is None:
-            self._num_bins = len(self._binned_spec)
+        if binned_spec is not None and binned_spec_sparse is not None:
+            raise ValueError("Specify only one of binned_spec or binned_spec_sparse")
+        if binned_spec_sparse is not None:
+            self._set_binned_spec_sparse(binned_spec_sparse, num_bins=num_bins, upper_limit=upper_limit)
+        elif binned_spec is not None:
+            self._set_binned_spec_dense(safe_assign(binned_spec, np.floating), upper_limit=upper_limit)
         for key in ("atoms_pulled_ptr", "atoms_pulled_data"):
             if key in kwargs and kwargs[key] is not None:
                 kwargs[key] = safe_assign(kwargs[key], np.integer)
         self.meta = kwargs
+
+    def _set_binned_spec_dense(self, binned_spec, upper_limit=None):
+        if binned_spec is None:
+            self._binned_inds = None
+            self._binned_vals = None
+            self._binned_spec_dense_cache = None
+            return
+        binned_spec = np.asarray(binned_spec, dtype=np.float32)
+        if binned_spec.ndim != 1:
+            raise ValueError(f"binned_spec must be 1D, got shape {binned_spec.shape}")
+        inds = np.flatnonzero(binned_spec > 0).astype(np.uint32)
+        vals = binned_spec[inds].astype(np.float32, copy=False)
+        self._set_binned_spec_sparse((inds, vals), num_bins=len(binned_spec), upper_limit=upper_limit)
+
+    def _set_binned_spec_sparse(self, binned_spec_sparse, num_bins=None, upper_limit=None):
+        if isinstance(binned_spec_sparse, dict):
+            inds = binned_spec_sparse.get("indices")
+            vals = binned_spec_sparse.get("values")
+        elif isinstance(binned_spec_sparse, tuple) and len(binned_spec_sparse) == 2:
+            inds, vals = binned_spec_sparse
+        else:
+            arr = np.asarray(binned_spec_sparse)
+            if arr.size == 0:
+                inds = np.zeros(0, dtype=np.uint32)
+                vals = np.zeros(0, dtype=np.float32)
+            elif arr.ndim == 2 and arr.shape[1] == 2:
+                inds, vals = arr[:, 0], arr[:, 1]
+            else:
+                raise ValueError("binned_spec_sparse must be (indices, values), a dict, or an [n, 2] array")
+
+        inds = np.asarray(inds, dtype=np.uint32)
+        vals = np.asarray(vals, dtype=np.float32)
+        if inds.ndim != 1 or vals.ndim != 1 or len(inds) != len(vals):
+            raise ValueError("Sparse binned indices and values must be 1D arrays with the same length")
+
+        keep = vals > 0
+        inds = inds[keep]
+        vals = vals[keep]
+        order = np.argsort(inds, kind="stable")
+        inds = inds[order]
+        vals = vals[order]
+        if len(inds) > 1:
+            unique_inds, inverse = np.unique(inds, return_inverse=True)
+            if len(unique_inds) != len(inds):
+                summed_vals = np.zeros(len(unique_inds), dtype=np.float32)
+                np.add.at(summed_vals, inverse, vals)
+                inds = unique_inds.astype(np.uint32, copy=False)
+                vals = summed_vals
+
+        if num_bins is None:
+            num_bins = self._num_bins
+        if num_bins is None:
+            num_bins = int(inds.max() + 1) if len(inds) > 0 else 0
+        if len(inds) > 0 and int(inds.max()) >= int(num_bins):
+            raise ValueError("Sparse binned index exceeds num_bins")
+
+        self._binned_inds = inds
+        self._binned_vals = vals
+        self._num_bins = int(num_bins)
+        if upper_limit is not None:
+            self._mass_upper_limit = upper_limit
+        self._binned_spec_dense_cache = None
 
     @classmethod
     def from_instance(cls, other_instance, **kwargs):
@@ -120,7 +186,10 @@ class MassSpec:
             "frag_form_vecs": clone_array_like(other_instance.frag_form_vecs),
             "frags": clone_array_like(other_instance.frags),
             "intens": clone_array_like(other_instance.intens),
-            "binned_spec": clone_array_like(other_instance._binned_spec),
+            "binned_spec_sparse": (
+                clone_array_like(other_instance._binned_inds),
+                clone_array_like(other_instance._binned_vals),
+            ) if other_instance.has_binned_spec else None,
             "num_bins": other_instance._num_bins,
             "upper_limit": other_instance._mass_upper_limit,
             **copy.deepcopy(other_instance.meta),
@@ -299,13 +368,36 @@ class MassSpec:
 
     @property
     def binned_spec(self):
-        if self._binned_spec is None:
+        if not self.has_binned_spec:
             self.bin_spectrum()  # use default parameters (0.1 bin)
-        return self._binned_spec
+        if self._binned_spec_dense_cache is not None:
+            return self._binned_spec_dense_cache
+        out = np.zeros(int(self._num_bins), dtype=np.float32)
+        if len(self._binned_inds) > 0:
+            out[self._binned_inds.astype(np.int64)] = self._binned_vals
+        return out
+
+    @property
+    def binned_spec_sparse(self):
+        if not self.has_binned_spec:
+            self.bin_spectrum()  # use default parameters (0.1 bin)
+        return self._binned_inds, self._binned_vals
+
+    def binned_spec_dense(self, cache=False):
+        dense = self.binned_spec
+        if cache and self._binned_spec_dense_cache is None:
+            self._binned_spec_dense_cache = dense
+        return self._binned_spec_dense_cache if cache else dense
+
+    def cache_binned_spec_dense(self):
+        return self.binned_spec_dense(cache=True)
+
+    def clear_binned_spec_dense_cache(self):
+        self._binned_spec_dense_cache = None
 
     @property
     def has_binned_spec(self):
-        return self._binned_spec is not None
+        return self._binned_inds is not None and self._binned_vals is not None
 
     @property
     def num_peaks(self):
@@ -318,6 +410,8 @@ class MassSpec:
             obj = getattr(self, key)
             if obj is not None:
                 _repr += f', {key}={obj.shape}'
+        if self.has_binned_spec:
+            _repr += f', binned_spec_sparse=({len(self._binned_inds)}, {self._num_bins})'
         _repr += ')'
         return _repr
 
@@ -461,12 +555,33 @@ class MassSpec:
         """turn spectrum into binned vectors, and store the binned spectrum (accessible via self.binned_spec)"""
         if self.has_masses and self.has_intens:
             binned_spec = bin_spectra([self], upper_limit=mass_upper_limit, num_bins=num_bins, pool_fn=pool_fn)[0]
-            self._binned_spec = binned_spec  # changes the output of self.binned_spec
-            self._mass_upper_limit = mass_upper_limit
-            self._num_bins = num_bins
+            self._set_binned_spec_dense(binned_spec, upper_limit=mass_upper_limit)
             return binned_spec
         else:
             raise ValueError('Spectrum object should have both masses and intens')
+
+    def _filtered_binned_sparse(self, ignore_mass=None):
+        inds, vals = self.binned_spec_sparse
+        if ignore_mass is None:
+            return inds.astype(np.int64, copy=False), vals.astype(np.float32, copy=False)
+        if self._num_bins is None or self._mass_upper_limit is None:
+            raise ValueError("num_bins and upper_limit are required to filter binned spectra by mass")
+        max_ind = int(ignore_mass * (self._num_bins / self._mass_upper_limit))
+        keep = inds < max_ind
+        return inds[keep].astype(np.int64, copy=False), vals[keep].astype(np.float32, copy=False)
+
+    def _check_binned_compatibility(self, other):
+        if self._num_bins != other._num_bins or self._mass_upper_limit != other._mass_upper_limit:
+            raise ValueError(
+                "Binned spectra must share num_bins and upper_limit for sparse similarity "
+                f"(self={self._num_bins}, {self._mass_upper_limit}; "
+                f"other={other._num_bins}, {other._mass_upper_limit})"
+            )
+
+    @staticmethod
+    def _entropy_from_sparse_probs(vals):
+        vals = vals[vals > 0]
+        return -np.sum(vals * np.log(vals + 1e-22))
 
     def similarity(self, other, ignore_mass=None, metric='entropy'):
         if metric == 'entropy':
@@ -484,16 +599,19 @@ class MassSpec:
             other: compared MassSpec object
             ignore_mass: any peaks with a larger mass will be ignored
         """
-        self_spec = copy.deepcopy(self.binned_spec)
-        other_spec = copy.deepcopy(other.binned_spec)
-        if ignore_mass is not None:
-            self_spec[int(ignore_mass * (self._num_bins / self._mass_upper_limit)):] = 0
-            other_spec[int(ignore_mass * (self._num_bins / self._mass_upper_limit)):] = 0
+        self.binned_spec_sparse
+        other.binned_spec_sparse
+        self._check_binned_compatibility(other)
+        self_inds, self_vals = self._filtered_binned_sparse(ignore_mass)
+        other_inds, other_vals = other._filtered_binned_sparse(ignore_mass)
+        if len(self_vals) == 0 or len(other_vals) == 0:
+            return 0.0
 
-        norm_self = norm(self_spec, axis=-1) + 1e-22
-        norm_other = norm(other_spec, axis=-1) + 1e-22
-
-        return np.dot(self_spec, norm_other) / (norm_self * norm_other)
+        other_lookup = {int(ind): float(val) for ind, val in zip(other_inds, other_vals)}
+        dot = sum(float(val) * other_lookup.get(int(ind), 0.0) for ind, val in zip(self_inds, self_vals))
+        norm_self = np.sqrt(np.dot(self_vals, self_vals)) + 1e-22
+        norm_other = np.sqrt(np.dot(other_vals, other_vals)) + 1e-22
+        return dot / (norm_self * norm_other)
 
     def entr_sim(self, other, ignore_mass=None):
         """
@@ -503,23 +621,39 @@ class MassSpec:
             other: compared MassSpec object
             ignore_mass: any peaks with a larger mass will be ignored
         """
-        self_spec = copy.deepcopy(self.binned_spec)
-        other_spec = copy.deepcopy(other.binned_spec)
-        if ignore_mass is not None:
-            self_spec[int(ignore_mass * (self._num_bins / self._mass_upper_limit)):] = 0
-            other_spec[int(ignore_mass * (self._num_bins / self._mass_upper_limit)):] = 0
+        self.binned_spec_sparse
+        other.binned_spec_sparse
+        self._check_binned_compatibility(other)
+        self_inds, self_vals = self._filtered_binned_sparse(ignore_mass)
+        other_inds, other_vals = other._filtered_binned_sparse(ignore_mass)
+        self_sum = self_vals.sum()
+        other_sum = other_vals.sum()
+        if self_sum <= 0 or other_sum <= 0:
+            return 0.0
 
-        def norm_peaks(prob):
-            return prob / (prob.sum(axis=-1, keepdims=True) + 1e-22)
-        def entropy(prob):
-            return -np.sum(prob * np.log(prob + 1e-22), axis=-1)
+        self_probs = self_vals / (self_sum + 1e-22)
+        other_probs = other_vals / (other_sum + 1e-22)
+        entropy_self = self._entropy_from_sparse_probs(self_probs)
+        entropy_other = self._entropy_from_sparse_probs(other_probs)
 
-        norm_self = norm_peaks(self_spec)
-        norm_other = norm_peaks(other_spec)
+        other_lookup = {}
+        for ind, prob in zip(other_inds, other_probs):
+            ind = int(ind)
+            other_lookup[ind] = other_lookup.get(ind, 0.0) + float(prob)
 
-        entropy_self = entropy(norm_self)
-        entropy_other = entropy(norm_other)
-        entropy_mix = entropy((norm_self + norm_other) / 2)
+        entropy_mix = 0.0
+        seen = set()
+        for ind, prob in zip(self_inds, self_probs):
+            ind = int(ind)
+            seen.add(ind)
+            mix_prob = (float(prob) + other_lookup.get(ind, 0.0)) / 2
+            entropy_mix -= mix_prob * np.log(mix_prob + 1e-22)
+        for ind, prob in zip(other_inds, other_probs):
+            ind = int(ind)
+            if ind in seen:
+                continue
+            mix_prob = float(prob) / 2
+            entropy_mix -= mix_prob * np.log(mix_prob + 1e-22)
         return 1 - (2 * entropy_mix - entropy_self - entropy_other) / np.log(4)
 
 
@@ -989,12 +1123,11 @@ class PredSpecDB:
 
         binned_rows = int(key_dict.get("binned_rows", 0))
         u8_len = int(key_dict["binned_u8_len"])
-        out = np.zeros(int(key_dict["num_bins"]), dtype=np.float32)
-        if binned_rows > 0:
-            indices = self._decode_binned_indices(udata[:binned_rows, uint_col:uint_col + u8_len], u8_len)
-            values = fdata[:binned_rows, float_col].astype(np.float32, copy=False)
-            out[indices] = values
-        return out
+        if binned_rows == 0:
+            return np.zeros(0, dtype=np.uint32), np.zeros(0, dtype=np.float32)
+        indices = self._decode_binned_indices(udata[:binned_rows, uint_col:uint_col + u8_len], u8_len)
+        values = fdata[:binned_rows, float_col].astype(np.float32, copy=False)
+        return indices.astype(np.uint32, copy=False), values
 
     def write(self, name, spec: MassSpec, replace_name_by_formula=False):
         """write one spectrum"""
@@ -1039,8 +1172,9 @@ class PredSpecDB:
         binned_vals = None
         binned_inds_u8 = None
         if spec.has_binned_spec:
-            binned_inds = np.flatnonzero(spec.binned_spec > 0).astype(np.uint32)
-            binned_vals = spec.binned_spec[binned_inds].astype(np.float32, copy=False)
+            binned_inds, binned_vals = spec.binned_spec_sparse
+            binned_inds = binned_inds.astype(np.uint32, copy=False)
+            binned_vals = binned_vals.astype(np.float32, copy=False)
             binned_inds_u8, binned_u8_len = self._encode_binned_indices(binned_inds, spec._num_bins)
             binned_rows = len(binned_inds)
 
@@ -1154,7 +1288,8 @@ class PredSpecDB:
             spec_dict["frags"] = nn_utils.decode_bin_from_uint8(udata[:main_rows, ucur_idx:ucur_idx+frag_u8_len], key_dict["frag_bits"])
             ucur_idx += frag_u8_len
         if in_key_dict("binned_spec"):
-            spec_dict["binned_spec"] = self._read_binned_spec(h5_dataset, full_name, key_dict, fdata, udata, cur_idx, ucur_idx)
+            spec_dict["binned_spec_sparse"] = self._read_binned_spec(h5_dataset, full_name, key_dict, fdata, udata, cur_idx, ucur_idx)
+            spec_dict.pop("binned_spec", None)
 
         return MassSpec(**spec_dict)
 
@@ -1221,6 +1356,10 @@ class PredSpecDB:
             return [], []
 
         root_obj = h5_dataset.h5_obj[name]
+        if isinstance(root_obj, h5py.Dataset):
+            # Legacy MAGMa trees store each entry as a dataset payload rather than
+            # a nested PredSpecDB group. Let callers fall back to HDF5Dataset.
+            return [], []
 
         # Iteratively enumerate all paths that end at groups with attrs["override"]
         all_paths = []
@@ -2079,18 +2218,27 @@ def bin_peak_results(
         (30, 40),
         (40, 500),
     ],
-    binned_spec = True,
     reduction = 'mean',  # mean / max / min
 ):
     """bin_peak_results.
 
     Use to stratify results
     """
-    if binned_spec:
-        num_peaks = [np.sum(sp > 0) for sp in spec.values()]
-    else:
-        num_peaks = [np.sum(sp[:, 1] > 0)  for sp in spec.values()]
-    reduction_func = eval('np.' + reduction)
+    def count_peaks(sp):
+        if isinstance(sp, tuple) and len(sp) == 2:
+            return np.sum(np.asarray(sp[1]) > 0)
+
+        sp = np.asarray(sp)
+        if sp.size == 0:
+            return 0
+        if sp.ndim == 1:
+            return np.sum(sp > 0)
+        if sp.ndim == 2 and sp.shape[1] >= 2:
+            return np.sum(sp[:, 1] > 0)
+        return np.sum(sp > 0)
+
+    num_peaks = [count_peaks(sp) for sp in spec.values()]
+    reduction_func = getattr(np, reduction)
     num_peaks = reduction_func(num_peaks)
     for i, j in peak_bins:
         m_str = f"({i}, {j}]"
