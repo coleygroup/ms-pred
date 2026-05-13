@@ -37,6 +37,9 @@ def dense_to_sparse_spec(spec: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def _sparse_indices_values(spec: np.ndarray, ignore_peak=None) -> Tuple[np.ndarray, np.ndarray]:
+    if spec is None:
+        return np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.float32)
+
     if isinstance(spec, tuple) and len(spec) == 2:
         inds = np.asarray(spec[0], dtype=np.int64)
         vals = np.asarray(spec[1], dtype=np.float32)
@@ -74,8 +77,29 @@ def _num_sparse_peaks(spec: np.ndarray) -> int:
     return int(np.sum(vals > 0))
 
 
-def _cosine_sparse(cand_preds_dict: List[Dict], true_spec: np.ndarray, colli_eng, ignore_peak=None) -> np.ndarray:
+def _has_sparse_peaks(spec: np.ndarray) -> bool:
+    try:
+        return _num_sparse_peaks(spec) > 0
+    except Exception:
+        return False
+
+
+def _transform_sparse_intensities(vals: np.ndarray, sqrt_inten: bool = True) -> np.ndarray:
+    """Return intensities in the space requested by the distance metric."""
+    if sqrt_inten:
+        return vals
+    return np.square(vals, dtype=np.float32)
+
+
+def _cosine_sparse(
+    cand_preds_dict: List[Dict],
+    true_spec: np.ndarray,
+    colli_eng,
+    ignore_peak=None,
+    sqrt_inten=True,
+) -> np.ndarray:
     true_inds, true_vals = _sparse_indices_values(true_spec, ignore_peak=ignore_peak)
+    true_vals = _transform_sparse_intensities(true_vals, sqrt_inten=sqrt_inten)
     true_norm = float(np.sqrt(np.dot(true_vals, true_vals))) + 1e-22
     true_lookup = {int(ind): float(val) for ind, val in zip(true_inds, true_vals)}
 
@@ -87,6 +111,7 @@ def _cosine_sparse(cand_preds_dict: List[Dict], true_spec: np.ndarray, colli_eng
         cand_inds, cand_vals = _sparse_indices_values(cand_pred, ignore_peak=ignore_peak)
         if cand_vals.size == 0:
             continue
+        cand_vals = _transform_sparse_intensities(cand_vals, sqrt_inten=sqrt_inten)
         pred_norm = float(np.sqrt(np.dot(cand_vals, cand_vals))) + 1e-22
         dot = sum(float(val) * true_lookup.get(int(ind), 0.0) for ind, val in zip(cand_inds, cand_vals))
         out[pred_idx] = 1 - dot / (pred_norm * true_norm)
@@ -98,8 +123,15 @@ def _entropy_from_probs(vals: np.ndarray) -> float:
     return float(-np.sum(vals * np.log(vals + 1e-22)))
 
 
-def _entropy_sparse(cand_preds_dict: List[Dict], true_spec: np.ndarray, colli_eng, ignore_peak=None) -> np.ndarray:
+def _entropy_sparse(
+    cand_preds_dict: List[Dict],
+    true_spec: np.ndarray,
+    colli_eng,
+    ignore_peak=None,
+    sqrt_inten=True,
+) -> np.ndarray:
     true_inds, true_vals = _sparse_indices_values(true_spec, ignore_peak=ignore_peak)
+    true_vals = _transform_sparse_intensities(true_vals, sqrt_inten=sqrt_inten)
     true_sum = float(true_vals.sum())
     if true_sum <= 0:
         return np.ones(len(cand_preds_dict), dtype=np.float32)
@@ -114,6 +146,7 @@ def _entropy_sparse(cand_preds_dict: List[Dict], true_spec: np.ndarray, colli_en
         if cand_pred is None:
             continue
         cand_inds, cand_vals = _sparse_indices_values(cand_pred, ignore_peak=ignore_peak)
+        cand_vals = _transform_sparse_intensities(cand_vals, sqrt_inten=sqrt_inten)
         pred_sum = float(cand_vals.sum())
         if pred_sum <= 0:
             continue
@@ -174,6 +207,13 @@ def get_args():
         action="store_true",
         default=True,
         help="Deprecated flag retained for compatibility. Predictions are always evaluated as binned spectra.",
+    )
+    parser.add_argument(
+        "--no-sqrt-inten",
+        dest="sqrt_inten",
+        action="store_false",
+        default=True,
+        help="Square stored sqrt-intensity values before scoring, recovering original intensities.",
     )
     return parser.parse_args()
 
@@ -361,6 +401,7 @@ def dist_bin(
     sparse: bool = True,
     ignore_peak=None,
     func: str = "cos",
+    sqrt_inten: bool = True,
     selected_evs: Optional[Iterable[str]] = None,
     agg: bool = True,
 ) -> np.ndarray:
@@ -385,6 +426,7 @@ def dist_bin(
                     true_spec=true_spec,
                     colli_eng=colli_eng,
                     ignore_peak=ignore_peak,
+                    sqrt_inten=sqrt_inten,
                 )
             )
         elif func == "entropy":
@@ -394,6 +436,7 @@ def dist_bin(
                     true_spec=true_spec,
                     colli_eng=colli_eng,
                     ignore_peak=ignore_peak,
+                    sqrt_inten=sqrt_inten,
                 )
             )
         else:
@@ -656,6 +699,8 @@ def main(args):
     running_lists = defaultdict(list)
     missing_true_candidate = 0
     missing_candidate_mapping = 0
+    dropped_empty_true_spectra = []
+    skipped_empty_true_specs = []
 
     for query_idx, spec_name in enumerate(sorted(true_spec_by_name)):
         selected_indices = pred_name_to_indices.get(spec_name)
@@ -668,8 +713,23 @@ def main(args):
 
         cand_ikeys = pred_ikeys[selected_indices]
         cand_preds = np.asarray([pred_spec_ars[i] for i in selected_indices], dtype=object)
-        true_spec = true_spec_by_name[spec_name]
-        if len(true_spec) == 0 or not any(np.size(value) > 0 for value in true_spec.values()):
+        raw_true_spec = true_spec_by_name[spec_name]
+        true_spec = {
+            colli_eng: spec_value
+            for colli_eng, spec_value in raw_true_spec.items()
+            if _has_sparse_peaks(spec_value)
+        }
+        empty_colli_engs = [
+            str(colli_eng)
+            for colli_eng, spec_value in raw_true_spec.items()
+            if colli_eng not in true_spec
+        ]
+        if empty_colli_engs:
+            dropped_empty_true_spectra.append(
+                {"spec_name": str(spec_name), "collision_energies": empty_colli_engs}
+            )
+        if len(true_spec) == 0:
+            skipped_empty_true_specs.append(str(spec_name))
             continue
         true_smi = name_to_smi[spec_name]
         true_ion = name_to_ion[spec_name]
@@ -689,6 +749,7 @@ def main(args):
                 true_spec_dict=true_spec,
                 sparse=False,
                 ignore_peak=parent_mass_idx,
+                sqrt_inten=args.sqrt_inten,
             )
         elif args.dist_fn == "entropy":
             dist = entropy_dist_bin(
@@ -696,6 +757,7 @@ def main(args):
                 true_spec_dict=true_spec,
                 sparse=False,
                 ignore_peak=parent_mass_idx,
+                sqrt_inten=args.sqrt_inten,
             )
         elif args.dist_fn == "random":
             dist = np.random.randn(len(cand_preds))
@@ -757,34 +819,38 @@ def main(args):
             metric.update(preds_tensor, target_tensor, indexes=indexes_tensor)
             hit_rates[f"hit_rate_at_{k}"] = float(metric.compute().item())
 
+    inten_suffix = "_no_sqrt" if not args.sqrt_inten else ""
     if args.outfile is None:
         outfile = pred_file.parent / f"rerank_eval_{args.dist_fn}.yaml"
         grouped_output_map = {
-            "ion": pred_file.parent / f"rerank_eval_grouped_ion_{args.dist_fn}.tsv",
-            "mass_bin": pred_file.parent / f"rerank_eval_grouped_mass_{args.dist_fn}.tsv",
-            "peak_bin_avg": pred_file.parent / f"rerank_eval_grouped_npeak_{args.dist_fn}.tsv",
-            "class": pred_file.parent / f"rerank_eval_grouped_class_{args.dist_fn}.tsv",
+            "ion": pred_file.parent / f"rerank_eval_grouped_ion_{args.dist_fn}{inten_suffix}.tsv",
+            "mass_bin": pred_file.parent / f"rerank_eval_grouped_mass_{args.dist_fn}{inten_suffix}.tsv",
+            "peak_bin_avg": pred_file.parent / f"rerank_eval_grouped_npeak_{args.dist_fn}{inten_suffix}.tsv",
+            "class": pred_file.parent / f"rerank_eval_grouped_class_{args.dist_fn}{inten_suffix}.tsv",
         }
     else:
         outfile = Path(args.outfile)
         grouped_output_map = {
-            "ion": outfile.parent / f"{outfile.stem}_grouped_ion.tsv",
-            "mass_bin": outfile.parent / f"{outfile.stem}_grouped_mass.tsv",
-            "peak_bin_avg": outfile.parent / f"{outfile.stem}_grouped_npeak.tsv",
-            "class": outfile.parent / f"{outfile.stem}_grouped_class.tsv",
+            "ion": outfile.parent / f"{outfile.stem}_grouped_ion{inten_suffix}.tsv",
+            "mass_bin": outfile.parent / f"{outfile.stem}_grouped_mass{inten_suffix}.tsv",
+            "peak_bin_avg": outfile.parent / f"{outfile.stem}_grouped_npeak{inten_suffix}.tsv",
+            "class": outfile.parent / f"{outfile.stem}_grouped_class{inten_suffix}.tsv",
         }
     if "instrument" in query_df.columns:
-        grouped_output_map["instrument"] = outfile.parent / f"{outfile.stem}_grouped_instrument.tsv"
+        grouped_output_map["instrument"] = outfile.parent / f"{outfile.stem}_grouped_instrument{inten_suffix}.tsv"
 
     final_output = {
         "dataset": dataset,
         "data_folder": str(data_folder),
         "dist_fn": args.dist_fn,
+        "sqrt_inten": bool(args.sqrt_inten),
         "true_labels": str(true_labels_path),
         "full_labels": str(full_cands_path),
         "metrics": hit_rates,
         "missing_true_candidate": int(missing_true_candidate),
         "missing_candidate_mapping": int(missing_candidate_mapping),
+        "dropped_empty_true_spectra": dropped_empty_true_spectra,
+        "skipped_empty_true_specs": skipped_empty_true_specs,
         "individuals": sorted(output_entries, key=lambda x: x["ind_recovered"]),
     }
     for k, v in running_lists.items():
