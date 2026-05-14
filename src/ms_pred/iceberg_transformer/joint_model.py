@@ -219,10 +219,9 @@ class JointModel(pl.LightningModule):
                 dropout=self.inten_dropout
             )
             self.inten_encoder = nn.TransformerEncoder(inten_encoder_layer, self.inten_encoder_layers)
-        self.inten_activation = nn.Softmax(dim=-1)
+        self.inten_activation = nn.Sigmoid()
         self.output_size = (self.max_broken_bonds) * 2 + 1
         self.output_map = nn.Linear(self.hidden_size, self.output_size * 2)
-        self.isomer_attn_out = copy.deepcopy(self.output_map)
         self.cos_fn = nn.CosineSimilarity()
         self.inten_weight = inten_weight
         self.frag_weight = frag_weight
@@ -429,52 +428,25 @@ class JointModel(pl.LightningModule):
     
         # B x L x Output
         output = self.output_map(hidden)
-        attn_weights = self.isomer_attn_out(hidden)
 
-        # Mask attn weights
-        attn_weights.masked_fill_(~valid_pos, -99999)  # -float("inf"))
-
-
-        # Calc inverse indices => B x Out x L x 2 x shift
+        # Calc inverse indices => B x L x 2 x shift
         inverse_indices = torch.clamp(torch.bucketize(masses, self.inten_buckets, right=False), max=len(self.inten_buckets) - 1)
-        # B x Out x (L * 2 * Mass shifts)
+        # B x (L * 2 * Mass shifts)
 
-        # B x Outs x ( L * 2 * mass shifts )
-        pool_weights = ts.scatter_softmax(attn_weights, index=inverse_indices, dim=-1)
-        weighted_out = pool_weights * output
-        weighted_out_reshape = weighted_out.reshape(batch_size, -1)
+        # B x ( L * 2 * mass shifts )
+        output.masked_fill_(~valid_pos, -99999)
+        out_reshape = output.reshape(batch_size, -1)
         inverse_indices_reshaped = inverse_indices.reshape(batch_size, -1)
+        output_unbinned = self.inten_activation(out_reshape)
 
-        # B x Outs x (UNIQUE(L * 2 * mass shifts))
+        # B x (UNIQUE(L * 2 * mass shifts))
         output_binned = ts.scatter_add(
-            weighted_out_reshape,
+            output_unbinned,
             index=inverse_indices_reshaped,
             dim=-1,
             dim_size=self.inten_buckets.shape[-1],
         )
-
-        # B x Outs x binned
-        valid_pos_reshape = valid_pos.expand(*inverse_indices.shape).reshape(batch_size, -1)
-        valid_pos_binned = ts.scatter_max(
-            (valid_pos_reshape).long(),
-            index=inverse_indices_reshaped,
-            dim_size=self.inten_buckets.shape[-1],
-            dim=-1,
-        )[0].bool()
-        output_binned = output_binned.masked_fill(~valid_pos_binned, -99999)
-        output_binned = self.inten_activation(output_binned)
-
-
-        # Index into output binned using inverse_indices_reshaped
-        # Revert the binned output back to frags for attribution
-        # B x Out x (L * 2 * Mass shifts)
-        output_unbinned = torch.take_along_dim(
-            output_binned, inverse_indices_reshaped, dim=-1
-        )
-        max_frags = masses.shape[1]
-        output_unbinned = output_unbinned.reshape(
-            batch_size, max_frags, -1
-        )
+        output_unbinned = output_unbinned.reshape(batch_size, max_frags, -1)
         
         return {"output_binned": output_binned, "output": output_unbinned}
 
@@ -979,6 +951,8 @@ class JointModel(pl.LightningModule):
             frags_pred = pred["frags_pred"]
             output = out["output"]
             out_preds_binned = out["output_binned"]
+
+
             out_preds = [
                 pred[:num_frag, :]
                 for pred, num_frag in zip(output, frags_pred["fragment_count"])
