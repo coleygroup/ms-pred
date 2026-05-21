@@ -1,0 +1,48 @@
+# CPU-only dependency set for GitHub Actions CI.
+# Source of truth for the CI install; runtime users should still follow README.
+
+# ---- PyTorch (CPU) ----
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.4.0
+torchvision==0.19.0
+torchaudio==2.4.0
+
+# ---- PyG extension wheels (CPU build) ----
+--find-links https://data.pyg.org/whl/torch-2.4.0+cpu.html
+torch-scatter==2.1.2
+torch-sparse==0.6.18
+torch-geometric
+
+# ---- DGL (CPU build, py3.10 manylinux) ----
+https://data.dgl.ai/wheels/torch-2.4/dgl-2.4.0-cp310-cp310-manylinux1_x86_64.whl
+
+# ---- Pinned for py3.10 compatibility ----
+numpy<2
+scikit-learn>=1.4,<1.8
+
+# ---- Core runtime deps mirrored from requirements.txt + import surface ----
+CairoSVG
+cython>=3
+einops
+h5py
+ipdb
+lightgbm
+matplotlib
+msbuddy
+omegaconf
+packaging
+pandas
+pathos
+pubchempy
+pytorch-lightning>=2.0
+rdkit
+ray[tune]
+seaborn
+tqdm
+
+# pygmtools is a git source; pin to a commit so CI is reproducible
+pygmtools @ git+https://github.com/Thinklab-SJTU/pygmtools.git@main
+
+# ---- Test-only ----
+pytest>=8
+pytest-xdist
