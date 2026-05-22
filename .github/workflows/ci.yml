@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [efficient-model1]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest (py${{ matrix.python }} / ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python: ["3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2 libxrender1 libglib2.0-0
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Install ms_pred (CPU + test extras)
+        run: uv pip install --system -e ".[cpu,test]"
+
+      - name: Run pytest
+        run: pytest -ra --durations=10 --maxfail=5

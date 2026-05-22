@@ -1,7 +1,130 @@
 [build-system]
-requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2", "numpy", "cython", "pip"]
+requires = ["setuptools>=61", "wheel", "cython>=3", "numpy>=2"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools_scm]
-version_scheme = "no-guess-dev"
-local_scheme = "no-local-version"
+[project]
+name = "ms-gen"
+version = "0.1.0"
+description = "A package for computational tandem mass spectrometry simulation."
+authors = [
+    { name = "Sam Goldman", email = "samlg@mit.edu" },
+    { name = "Runzhong Wang", email = "runzhong@mit.edu" },
+    { name = "Mrunali Manjrekar", email = "mrunali@mit.edu" },
+]
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+
+dependencies = [
+    "scikit-learn",
+    "pathos",
+    "cython",
+    "cairosvg",
+    "ipdb",
+    "pubchempy",
+    "omegaconf",
+    "h5py",
+    "matplotlib",
+    "rdkit==2025.03.*",
+    "ipykernel",
+    "einops",
+    "pytorch-lightning",
+    "pygmtools",
+    "ray",
+    "ray[tune]>=2.49.1",
+    "seaborn",
+    "platformdirs",
+    "torchdata<0.10",
+    "numpy>=2",
+]
+
+[project.optional-dependencies]
+cpu = ["torch==2.6.0", "torchvision==0.21.0", "dgl", "torch-scatter", "torch-sparse", "torch-geometric"]
+cu124 = ["torch==2.6.0+cu124", "torchvision==0.21.0+cu124", "dgl", "torch-scatter", "torch-sparse", "torch-geometric"]
+cu118 = ["torch==2.6.0+cu118", "torchvision==0.21.0+cu118", "dgl", "torch-scatter", "torch-sparse", "torch-geometric"]
+test = ["pytest>=8", "pytest-xdist"]
+
+[tool.uv]
+conflicts = [[{ extra = "cpu" }, { extra = "cu124" }, { extra = "cu118" }]]
+
+[tool.uv.sources]
+pygmtools = { git = "https://github.com/Thinklab-SJTU/pygmtools.git" }
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu124", extra = "cu124" },
+    { index = "pytorch-cu118", extra = "cu118" },
+]
+torchvision = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cu124", extra = "cu124" },
+    { index = "pytorch-cu118", extra = "cu118" },
+]
+torch-scatter = [
+    { index = "pyg-cpu", extra = "cpu" },
+    { index = "pyg-cu124", extra = "cu124" },
+    { index = "pyg-cu118", extra = "cu118" },
+]
+torch-sparse = [
+    { index = "pyg-cpu", extra = "cpu" },
+    { index = "pyg-cu124", extra = "cu124" },
+    { index = "pyg-cu118", extra = "cu118" },
+]
+dgl = [
+    { index = "dgl-cpu", extra = "cpu" },
+    { index = "dgl-cu124", extra = "cu124" },
+    { index = "dgl-cu118", extra = "cu118" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+[[tool.uv.index]]
+name = "dgl-cpu"
+url = "https://data.dgl.ai/wheels/torch-2.6/repo.html"
+format = "flat"
+explicit = true
+
+[[tool.uv.index]]
+name = "dgl-cu124"
+url = "https://data.dgl.ai/wheels/torch-2.6/cu124/repo.html"
+format = "flat"
+explicit = true
+
+[[tool.uv.index]]
+name = "dgl-cu118"
+url = "https://data.dgl.ai/wheels/torch-2.6/cu118/repo.html"
+format = "flat"
+explicit = true
+
+[[tool.uv.index]]
+name = "pyg-cpu"
+url = "https://data.pyg.org/whl/torch-2.6.0+cpu.html"
+format = "flat"
+explicit = true
+
+[[tool.uv.index]]
+name = "pyg-cu124"
+url = "https://data.pyg.org/whl/torch-2.6.0+cu124.html"
+format = "flat"
+explicit = true
+
+[[tool.uv.index]]
+name = "pyg-cu118"
+url = "https://data.pyg.org/whl/torch-2.6.0+cu118.html"
+format = "flat"
+explicit = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
