@@ -1,7 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg id="Layer_2" data-name="Layer 2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48.2 61.72">
+<svg id="Layer_2" data-name="Layer 2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <defs>
     <style>
+      .cls-0 {
+        fill: #fff;
+      }
+
       .cls-1 {
         fill: #6bc3d8;
       }
@@ -11,7 +15,8 @@
       }
     </style>
   </defs>
-  <g id="Layer_1-2" data-name="Layer 1">
+  <g id="Layer_1-2" data-name="Layer 1" transform="translate(11.85 6) scale(.84)">
+    <rect class="cls-1" x="0" y="21.45" width="48.2" height="1.2"/>
     <g>
       <polygon class="cls-1" points="1.09 21.88 7.96 13.95 12.79 5.45 14.66 5.05 19.43 1.08 19.31 13.3 11.95 21.91 1.09 21.88"/>
       <path class="cls-1" d="M18.92,2.16l-.11,10.95-7.08,8.3-9.54-.03,6.15-7.11.06-.07.05-.09,4.67-8.22,1.53-.32.24-.05.19-.16,3.84-3.2M19.94,0l-5.5,4.58-1.97.41-4.89,8.62L0,22.38l12.18.03,7.62-8.93L19.94,0h0Z"/>

@@ -4,8 +4,6 @@ from torch_geometric.data import Data
 from rdkit import Chem
 from rdkit.Chem import rdchem
 
-from . import algos2
-
 # allowable multiple choice node and edge features
 allowable_features = {
     "possible_atomic_num_list": list(range(1, 119)) + ["misc"],
