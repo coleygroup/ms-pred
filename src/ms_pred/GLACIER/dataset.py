@@ -1,4 +1,4 @@
-"""Inten and Frag dataset and featurization utilities for Iceberg Transformer.
+"""Inten and Frag dataset and featurization utilities for GLACIER.
 
 - TreeProcessor: builds root representations (DGL or Graphormer tensors) and fragment targets
 - Optimized Graphormer input creation with vectorized BFS and multi-hop edge features
@@ -39,7 +39,6 @@ class TreeProcessor:
         self.pe_embed_k = pe_embed_k
         self.root_encode = root_encode
         self.embed_elem_group = embed_elem_group
-        self.bins = np.linspace(0, 1500, 15000)
         self.multi_hop_max_dist = multi_hop_max_dist
 
     @staticmethod
@@ -122,10 +121,7 @@ class TreeProcessor:
                 frag_targs_list.append(torch.zeros((len(total_atom_masses),), dtype=torch.bool))
             frag_targs = torch.stack(frag_targs_list, dim=0)
             if include_inten_targs:
-                bin_posts = np.clip(np.digitize(inten_targets[:, 0], self.bins), 0, len(self.bins) - 1)
-                new_out = np.zeros_like(self.bins)
-                for b, inten in zip(bin_posts, inten_targets[:, 1]):
-                    new_out[b] = max(new_out[b], inten)
+                new_out = inten_targets
             else:
                 new_out = None
         else:
@@ -667,7 +663,7 @@ class IntenDataset(DAGDataset):
             num_atoms = batched_reprs.batch_num_nodes()
 
         if batch[0]['inten_targs'] is not None:
-            inten_targs_padded = _unroll_pad(batch, 'inten_targs')
+            inten_targs_padded = torch.nn.utils.rnn.pad_sequence([torch.from_numpy(item['inten_targs']) for item in batch], batch_first=True)
         else:
             inten_targs_padded = None
         precursor_mzs = torch.FloatTensor([j["precursor"] for j in batch])

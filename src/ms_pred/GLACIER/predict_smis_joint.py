@@ -20,7 +20,7 @@ import torch
 import pytorch_lightning as pl
 
 import ms_pred.common as common
-from ms_pred.iceberg_transformer import joint_model 
+from ms_pred.GLACIER import joint_model 
 
 from rdkit import Chem
 from rdkit import rdBase

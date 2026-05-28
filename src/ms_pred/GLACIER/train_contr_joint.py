@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional, Tuple
 import json
 
-from ms_pred.iceberg_transformer import joint_model
+from ms_pred.GLACIER import joint_model
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -26,8 +26,8 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 
 import ms_pred.common as common
-from ms_pred.iceberg_transformer.dataset import IntenContrDataset, TreeProcessor
-from ms_pred.iceberg_transformer.joint_model import JointModel
+from ms_pred.GLACIER.dataset import IntenContrDataset, TreeProcessor
+from ms_pred.GLACIER.joint_model import JointModel
 from pytorch_lightning.strategies import DDPStrategy
 from rdkit import Chem
 
@@ -97,17 +97,19 @@ def add_joint_train_args(parser):
 
     parser.add_argument("--warmup", default=1000, action="store", type=int)
     parser.add_argument("--binned-targs", default=False, action="store_true")
+    parser.add_argument("--num-bins", default=15000, type=int)
+    parser.add_argument("--upper-limit", default=1500, type=int)
     parser.add_argument(
         "--inten-loss-fn",
         default="cosine",
         action="store",
-        choices=["cosine", "entropy", "weighted_entropy"],
+        choices=["cosine", "entropy"],
     )
     parser.add_argument(
         "--contr-loss-fn",
         default="cosine",
         action="store",
-        choices=["cosine", "entropy", "weighted_entropy"],
+        choices=["cosine", "entropy"],
     )
     parser.add_argument(
         "--contr-weight", default=1, type=float
@@ -317,7 +319,9 @@ def train_model():
         lr=kwargs["learning_rate"],
         lr_decay_rate=kwargs["lr_decay_rate"],
         weight_decay=kwargs["weight_decay"],
-        warmup=kwargs["warmup"]
+        warmup=kwargs["warmup"],
+        num_bins=kwargs["num_bins"],
+        upper_limit=kwargs["upper_limit"],
     )
 
     # Create trainer
@@ -372,6 +376,8 @@ def train_model():
         model.magma_warmup_steps = kwargs["magma_warmup_steps"]
         model.magma_decay_rate = kwargs["magma_decay_rate"]
         model.magma_decay_steps = kwargs["magma_decay_steps"]
+        model.num_bins = kwargs["num_bins"]
+        model.upper_limit = kwargs["upper_limit"]
 
     if not kwargs["test_checkpoint"]:
         if kwargs["debug_overfit"]:

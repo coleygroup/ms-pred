@@ -2,13 +2,13 @@ from pathlib import Path
 import subprocess
 import argparse
 
-python_file = "src/ms_pred/iceberg_transformer/predict_inten_joint.py"
+python_file = "src/ms_pred/GLACIER/predict_inten_joint.py"
 node_num = 100
 num_workers = 64
 test_entries = [
-    # {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd1"},
-    # {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd2"},
-    # {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd3"},
+    {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd1"},
+    {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd2"},
+    {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd3"},
     {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd1"},
     {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd2"},
     {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd3"},

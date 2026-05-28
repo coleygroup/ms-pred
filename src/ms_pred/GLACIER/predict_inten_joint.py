@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 
 import ms_pred.common as common
-from ms_pred.iceberg_transformer import dataset, joint_model
+from ms_pred.GLACIER import dataset, joint_model
 
 
 def get_args():
@@ -186,8 +186,8 @@ def predict():
                 root_canonical_smiles=smi,
                 collision_energy=collision_energy.cpu().numpy(),
                 intens=output_spec,
-                num_bins=model.inten_buckets.shape[-1],
-                upper_limit=1500,
+                num_bins=model.num_bins,
+                upper_limit=model.upper_limit,
                 sparse_out=False,
             )
             specdb.write(spec_name, pred_ms)
@@ -203,8 +203,8 @@ def predict():
         #     "smiles": smiles_ar,
         #     "ikeys": inchikeys,
         #     "spec_names": spec_names_ar,
-        #     "num_bins": model.inten_buckets.shape[-1],
-        #     "upper_limit": 1500,
+        #     "num_bins": model.num_bins,
+        #     "upper_limit": model.upper_limit,
         #     "sparse_out": False,
         # }
         # out_file = Path(kwargs["save_dir"]) / "binned_preds.p"

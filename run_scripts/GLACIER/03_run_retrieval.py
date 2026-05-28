@@ -3,10 +3,10 @@ from pathlib import Path
 import subprocess
 import json
 
-pred_file = "src/ms_pred/iceberg_transformer/predict_smis_joint.py"
+pred_file = "src/ms_pred/GLACIER/predict_smis_joint.py"
 retrieve_file = "src/ms_pred/retrieval/retrieval_benchmark.py"
 subform_name = "no_subform"
-devices = [0, 1]
+devices = [1]
 vis_devices = ",".join([str(_) for _ in devices])
 num_cpu_workers = 16
 batch_size = 16
@@ -31,12 +31,11 @@ test_entries = [
     #  "max_k": 50, 
     #  "num_bins": 15000},
     
-    
-    # {"dataset": "nist20",
-    #  "train_split": "scaffold_1_rnd1",
-    #  "test_split": "scaffold_1",
-    #  "max_k": 50,
-    #  "num_bins": 15000},
+    {"dataset": "nist20",
+     "train_split": "scaffold_1_rnd1",
+     "test_split": "scaffold_1",
+     "max_k": 50,
+     "num_bins": 15000},
     
     # {"dataset": "nist20",
     #  "train_split": "scaffold_1_rnd2",
@@ -56,11 +55,11 @@ test_entries = [
     #  "max_k": 256, 
     #  "num_bins": 150000,},
 
-    {"dataset": "msg",
-     "train_split": "split_rnd1",
-     "test_split": "test_formula",
-     "max_k": 256, 
-     "num_bins": 150000,},
+    # {"dataset": "msg",
+    #  "train_split": "split_rnd1",
+    #  "test_split": "test_formula",
+    #  "max_k": 256, 
+    #  "num_bins": 150000,},
 ]
 
 pred_filename = "binned_preds.hdf5" if binned_out else "preds.hdf5"
@@ -71,16 +70,16 @@ for test_entry in test_entries:
     maxk = test_entry['max_k']
     model_dir = Path(f"results/joint_train_{dataset}")
     num_bins = test_entry['num_bins']
-    joint_model = model_dir/train_split/"version_90/best.ckpt"
+    joint_model = model_dir/train_split/"version_2/best.ckpt"
     if not joint_model.exists():
         print(f"Could not find model {joint_model}; skipping\n: {json.dumps(test_entry, indent=1)}")
         continue
     
     labels = f"data/spec_datasets/{dataset}/retrieval/cands_df_{split}_{maxk}.tsv"
 
-    save_dir = joint_model.parent.parent / f"retrieval_{dataset}_{split}_{maxk}_entropy_plus"
+    save_dir = joint_model.parent.parent / f"retrieval_{dataset}_{split}_{maxk}_decoy_3_threshold_0.6"
     save_dir.mkdir(exist_ok=True)
-    num_gpu_workers = len(devices) * 7 if split == "test_mass" else len(devices) * 9
+    num_gpu_workers = len(devices) * 7 if split == "test_mass" else len(devices) * 8
 
     cmd = f"""python {pred_file} \\
     --batch-size {batch_size} \\
@@ -100,8 +99,7 @@ for test_entry in test_entries:
     device_str = f"CUDA_VISIBLE_DEVICES={vis_devices}"
     cmd = f"{device_str} {cmd}"
     print(cmd + "\n")
-
-    # subprocess.run(cmd, shell=True)
+    subprocess.run(cmd, shell=True)
 
     # # Run retrieval
     cmd = f"""python {retrieve_file} \\

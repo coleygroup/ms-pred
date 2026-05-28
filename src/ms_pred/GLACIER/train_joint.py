@@ -25,8 +25,8 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 
 import ms_pred.common as common
-from ms_pred.iceberg_transformer.dataset import IntenDataset, TreeProcessor
-from ms_pred.iceberg_transformer.joint_model import JointModel
+from ms_pred.GLACIER.dataset import IntenDataset, TreeProcessor
+from ms_pred.GLACIER.joint_model import JointModel
 from pytorch_lightning.strategies import DDPStrategy
 
 
@@ -78,6 +78,7 @@ def add_joint_train_args(parser):
     parser.add_argument("--max-breakpoints", default=50, type=int)
     parser.add_argument("--multi-hop-max-dist", default=5, type=int)
     parser.add_argument("--num-edge-dis", default=10, type=int)
+    parser.add_argument("--num-bins", default=15000, type=int)
     parser.add_argument("--enable-aux-loss", default=False, action="store_true")
     parser.add_argument("--enable-decoder-norm", default=False, action="store_true")
 
@@ -92,13 +93,11 @@ def add_joint_train_args(parser):
     parser.add_argument("--magma-decay-steps", default=5000, type=int)
 
     parser.add_argument("--warmup", default=1000, action="store", type=int)
-    parser.add_argument("--binned-targs", default=False, action="store_true")
-    parser
     parser.add_argument(
         "--inten-loss-fn",
         default="cosine",
         action="store",
-        choices=["cosine", "entropy", "weighted_entropy"],
+        choices=["cosine", "entropy"],
     )
     return parser
 
@@ -151,7 +150,6 @@ def train_model():
     # Dataset parameters
     pe_embed_k = kwargs["pe_embed_k"]
     embed_elem_group = kwargs["embed_elem_group"]
-    binned_targs = kwargs["binned_targs"]
     multi_hop_max_dist = kwargs["multi_hop_max_dist"]
 
     # Processor and datasets
@@ -253,7 +251,6 @@ def train_model():
         inten_encoder_layers=kwargs["inten_encoder_layers"],
         inten_dropout=kwargs["inten_dropout"],
         inten_loss_fn=kwargs["inten_loss_fn"],
-        binned_targs=binned_targs,
         sk_tau=kwargs["sk_tau"],
         ppm_tol=kwargs["ppm_tol"],
         inten_weight=kwargs["inten_weight"],
@@ -264,7 +261,8 @@ def train_model():
         lr=kwargs["learning_rate"],
         lr_decay_rate=kwargs["lr_decay_rate"],
         weight_decay=kwargs["weight_decay"],
-        warmup=kwargs["warmup"]
+        warmup=kwargs["warmup"],
+        num_bins=kwargs["num_bins"],
     )
 
     # Create trainer

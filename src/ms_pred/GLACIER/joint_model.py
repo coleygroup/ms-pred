@@ -21,7 +21,7 @@ import ms_pred.common as common
 from LinSATNet import linsat_layer, init_constraints
 import math
 import numpy as np
-from ms_pred.iceberg_transformer.dataset import TreeProcessor
+from ms_pred.GLACIER.dataset import TreeProcessor
 import dgl
 from rdkit import Chem  # type: ignore
 import functools
@@ -50,7 +50,6 @@ class JointModel(pl.LightningModule):
             inten_encoder_layers: int = 3,
             inten_dropout: float = 0,
             inten_loss_fn: str = "cosine",
-            binned_targs:bool = False,
             sk_tau: float = 0.01,
             ppm_tol: float = 20,
             contr_weight: float = 1.0,
@@ -68,6 +67,8 @@ class JointModel(pl.LightningModule):
             lr_decay_rate: float = 0.9,
             weight_decay: float = 0,
             warmup: int = 1000,
+            num_bins: int = 15000,
+            upper_limit: int = 1500,
             **kwargs,
         ):
         super().__init__()
@@ -95,7 +96,6 @@ class JointModel(pl.LightningModule):
         self.inten_encoder_layers = inten_encoder_layers
         self.inten_dropout = inten_dropout
         self.inten_loss_fn = inten_loss_fn
-        self.binned_targs = binned_targs
         self.sk_tau = sk_tau
         self.ppm_tol = ppm_tol
         self.contr_weight = contr_weight
@@ -105,6 +105,8 @@ class JointModel(pl.LightningModule):
         self.graphormer_layers = graphormer_layers
         self.hidden_size=hidden_size
         self.nhead=8
+        self.num_bins = num_bins
+        self.upper_limit = upper_limit
 
 
         self.tree_processor = TreeProcessor(
@@ -174,9 +176,6 @@ class JointModel(pl.LightningModule):
             # Calculate formula dim
             self.formula_in_dim = self.formula_dim * self.embedder.num_dim
             self.formula_mapper = nn.Linear(self.formula_in_dim+self.hidden_size, self.hidden_size)
-        buckets = torch.DoubleTensor(np.linspace(0, 1500, 15000))
-        self.inten_buckets = nn.Parameter(buckets)
-        self.inten_buckets.requires_grad = False
         token_size = self.hidden_size + 2 * self.formula_in_dim + (self.max_broken_bonds + 1)
         self.token_mapper = nn.Linear(token_size, self.hidden_size)
         self.enable_decoder_norm = enable_decoder_norm
@@ -234,20 +233,16 @@ class JointModel(pl.LightningModule):
         self.weight_decay = weight_decay
         self.warmup = warmup
         if inten_loss_fn == "cosine":
-            self.inten_loss_fn = self.cos_loss
+            self.inten_loss_fn = self.cos_loss_sparse
         elif inten_loss_fn == "entropy":
-            self.inten_loss_fn = self.entropy_loss
-        elif inten_loss_fn == "weighted_entropy":
-            self.inten_loss_fn = functools.partial(self.entropy_loss, weighted=True)
+            self.inten_loss_fn = self.entropy_loss_sparse
         else:
             raise NotImplementedError()
 
         if contr_loss_fn == "cosine":
-            self.contr_loss_fn = self.cos_loss
+            self.contr_loss_fn = self.cos_loss_sparse
         elif contr_loss_fn == "entropy":
-            self.contr_loss_fn = self.entropy_loss
-        elif contr_loss_fn == "weighted_entropy":
-            self.contr_loss_fn = functools.partial(self.entropy_loss, weighted=True)
+            self.contr_loss_fn = self.entropy_loss_sparse
         else:
             raise NotImplementedError()
 
@@ -429,26 +424,15 @@ class JointModel(pl.LightningModule):
         # B x L x Output
         output = self.output_map(hidden)
 
-        # Calc inverse indices => B x L x 2 x shift
-        inverse_indices = torch.clamp(torch.bucketize(masses, self.inten_buckets, right=False), max=len(self.inten_buckets) - 1)
-        # B x (L * 2 * Mass shifts)
-
         # B x ( L * 2 * mass shifts )
-        output.masked_fill_(~valid_pos, -99999)
-        out_reshape = output.reshape(batch_size, -1)
-        inverse_indices_reshaped = inverse_indices.reshape(batch_size, -1)
-        output_unbinned = self.inten_activation(out_reshape)
-
-        # B x (UNIQUE(L * 2 * mass shifts))
-        output_binned = ts.scatter_add(
-            output_unbinned,
-            index=inverse_indices_reshaped,
-            dim=-1,
-            dim_size=self.inten_buckets.shape[-1],
-        )
-        output_unbinned = output_unbinned.reshape(batch_size, max_frags, -1)
+        output_unbinned = self.inten_activation(output)
+        output_unbinned = output_unbinned.masked_fill(~valid_pos, 0)
+        output_unbinned = output_unbinned.reshape(batch_size, -1)
+        masses = masses.reshape(batch_size, -1)
+        # Keep [mass, intensity] ordering to match sparse loss binning.
+        inten_output = torch.stack((masses, output_unbinned), dim=-1)
         
-        return {"output_binned": output_binned, "output": output_unbinned}
+        return {"output": inten_output}
 
     def forward(self, graphormer_input, num_atoms, adducts, collision_engs, root_form_vecs, masses, 
                 adduct_mass_shifts, atom_form_vecs, adj_matrices, atom_hs, total_hs, instruments=None,
@@ -529,9 +513,6 @@ class JointModel(pl.LightningModule):
         output_logit_3 = linsat_layer(breakpoint_logit, E=E, f=f_3, no_warning=True, max_iter=1, tau=self.linsat_tau).reshape(B, N, N_atom)
         logit_0 = torch.zeros_like(output_logit_1)
         logits = torch.stack([logit_0, output_logit_1, output_logit_2, output_logit_3], dim=-1)
-        # breakpoint_preds = torch.sum(breakpoint_card.unsqueeze(2) * logits, dim=-1)
-        # loss = torch.sum((breakpoint_preds.unsqueeze(2) - breakpoint_targs.unsqueeze(1)) ** 2, dim=-1)
-        # return {"loss":loss, "preds":breakpoint_preds}
         return logits
 
     def breakpoint_inference(self, breakpoint_logit, breakpoint_card, num_atoms, debug=False):
@@ -657,12 +638,7 @@ class JointModel(pl.LightningModule):
                 frag_targs=batch["frag_targs"] if name=="train" else None,
                 num_frag_targs=batch["num_frag_targs"] if name=="train" else None,
             )
-            if self.binned_targs:
-                pred_inten = pred["inten_pred_end_to_end"]["output_binned"]
-            else:
-                pred_inten = pred["inten_pred_end_to_end"]["output"]
-                pred_inten = torch.stack((batch["masses"], pred_inten), dim=-1)
-                pred_inten = pred_inten.reshape(pred_inten.shape[0], -1, 2)  # B x (Out * Mass shifts) x 2
+            pred_inten = pred["inten_pred_end_to_end"]["output"]
             batch_size = len(batch["names"])
             if name != "train":
                 loss_fn = functools.partial(self.inten_loss_fn, use_hun=True)  # use hungarian in val and test
@@ -673,12 +649,7 @@ class JointModel(pl.LightningModule):
                 )            
                 return loss
             else:
-                if self.binned_targs:
-                    pred_inten_magma = pred["inten_pred_magma"]["output_binned"]
-                else:
-                    pred_inten_magma = pred["inten_pred_end_to_end"]["output"]
-                    pred_inten_magma = torch.stack((batch["masses"], pred_inten_magma), dim=-1)
-                    pred_inten_magma = pred_inten_magma.reshape(pred_inten_magma.shape[0], -1, 2)  # B x (Out * Mass shifts) x 2
+                pred_inten_magma = pred["inten_pred_magma"]["output"]
                 inten_loss_fn = self.inten_loss_fn
                 end_to_end_inten_loss = inten_loss_fn(pred_inten, batch["inten_targs"], parent_mass=batch["precursor_mzs"])["loss"].mean()
                 magma_inten_loss = inten_loss_fn(pred_inten_magma, batch["inten_targs"], parent_mass=batch["precursor_mzs"])["loss"].mean()
@@ -755,9 +726,9 @@ class JointModel(pl.LightningModule):
                 num_frag_targs=None,
             )
             decoy_inten_targs = targ_batch["inten_targs"].repeat_interleave(batch["num_decoys_per_entry"], dim=0)
-            end_to_end_inten_loss = inten_loss_fn(targ_pred["inten_pred_end_to_end"]["output_binned"], targ_batch["inten_targs"], parent_mass=targ_batch["precursor_mzs"])["loss"]
-            decoy_spec_loss = inten_decoy_loss_fn(decoy_pred["inten_pred_end_to_end"]["output_binned"], decoy_inten_targs, parent_mass=decoy_batch["precursor_mzs"])["loss"]
-            targ_contr_loss = inten_decoy_loss_fn(targ_pred["inten_pred_end_to_end"]["output_binned"], targ_batch["inten_targs"], parent_mass=targ_batch["precursor_mzs"])["loss"]
+            end_to_end_inten_loss = inten_loss_fn(targ_pred["inten_pred_end_to_end"]["output"], targ_batch["inten_targs"], parent_mass=targ_batch["precursor_mzs"])["loss"]
+            decoy_spec_loss = inten_decoy_loss_fn(decoy_pred["inten_pred_end_to_end"]["output"], decoy_inten_targs, parent_mass=decoy_batch["precursor_mzs"])["loss"]
+            targ_contr_loss = inten_decoy_loss_fn(targ_pred["inten_pred_end_to_end"]["output"], targ_batch["inten_targs"], parent_mass=targ_batch["precursor_mzs"])["loss"]
             split_end = torch.cumsum(batch["num_decoys_per_entry"], dim=0)
             split_start = split_end - batch["num_decoys_per_entry"]
             decoy_spec_loss = [decoy_spec_loss[s:e] for s, e in zip(split_start, split_end)]
@@ -857,7 +828,7 @@ class JointModel(pl.LightningModule):
         # For LambdaLR, just call step() without arguments
         scheduler.step()
 
-    def predict_mol(self, smi, collision_eng, adduct, device, instrument=None, binned_out=False):
+    def predict_mol(self, smi, collision_eng, adduct, device, instrument=None):
         if not getattr(self, "_predict_prepared", False):
             self.eval()
             self.freeze()
@@ -947,49 +918,21 @@ class JointModel(pl.LightningModule):
                 total_hs=total_hs,
                 instruments=instruments if self.embed_instrument else None,
             )
-            out=pred["inten_pred_end_to_end"]
+            inten_out=pred["inten_pred_end_to_end"]
             frags_pred = pred["frags_pred"]
-            output = out["output"]
-            out_preds_binned = out["output_binned"]
+            output = inten_out["output"]
+            num_shifts = adduct_mass_shift.shape[1] * self.output_size
 
+            out = {"spec": [], "frag": []}
+            fragments = nn_utils.pad_packed_tensor(frags_pred["fragments"], frags_pred["fragment_count"], 0)
 
-            out_preds = [
-                pred[:num_frag, :]
-                for pred, num_frag in zip(output, frags_pred["fragment_count"])
-            ]
+            for i, n in enumerate(frags_pred["fragment_count"]):
+                num_rows = int(n.item()) * num_shifts
+                spec_pred = output[i, :num_rows, :]
+                out_frag = fragments[i, :n].repeat_interleave(num_shifts, dim=0)
+                out["spec"].append(spec_pred)
+                out["frag"].append(out_frag)
 
-            if binned_out:
-                inten_preds = {
-                    "spec": out_preds_binned,
-                }
-                out = inten_preds
-            else:
-                inten_preds = {
-                    "spec": out_preds,
-                }
-                out = {"spec": [], "frag": []}
-                fragments = nn_utils.pad_packed_tensor(frags_pred["fragments"], frags_pred["fragment_count"], 0)
-                max_broken_bonds = self.max_broken_bonds
-                num_shifts = len(adduct_mass_shift[0].reshape(-1)) * (1 + max_broken_bonds * 2)  # number of shifts,
-                hydrogen_shift = torch.arange(-max_broken_bonds, max_broken_bonds + 1, device=device) * common.ELEMENT_TO_MASS["H"]
-                # num_shifts = len(masses[0, 0, :, :].reshape(-1))  # number of shifts,
-                #                                                   # (1 + h_shift * 2) * 2 if include_unshifted_mz==True
-                masses_frag = torch.sum(masses_padded.unsqueeze(1)*fragments, dim=-1)
-                masses_frag_shifted = (
-                    masses_frag[:, :, None, None]
-                    + hydrogen_shift[None, None, None, :]
-                    + adduct_mass_shift[:, None, :, None]
-                )
-                for i, (inten_pred, mass, n) in \
-                        enumerate(zip(inten_preds["spec"], masses_frag_shifted, frags_pred["fragment_count"])):
-                    out_mass = mass[:n].reshape(-1)
-                    out_inten = inten_pred.reshape(-1)
-                    out_frag = fragments[i, :n].repeat_interleave(num_shifts, dim=0)
-
-                    # add to output dict
-                    
-                    out["spec"].append(torch.stack((out_mass, out_inten), dim=1))    
-                    out["frag"].append(out_frag)
             if batched_input:
                 return out
             else:
@@ -1012,20 +955,18 @@ class JointModel(pl.LightningModule):
         out = predict_obj["inten_pred_end_to_end"]
         num_frag_targs = predict_obj["frags_pred"]["fragment_count"]
         output = out["output"]
-        out_preds_binned = out["output_binned"]
+        if binned_out:
+            out_binned = self._bin_unbinned_spectra_batch(output)
+            return {"spec": out_binned}
+
         out_preds = [
             pred[:num_frag, :]
             for pred, num_frag in zip(output, num_frag_targs)
         ]
-
-        if binned_out:
-            out_dict = {
-                "spec": out_preds_binned,
-            }
-        else:
-            out_dict = {
-                "spec": out_preds,
-            }
+        
+        out_dict = {
+            "spec": out_preds,
+        }
         return out_dict
     
     def node_ranking(self, breakpoint_logit, num_atoms):
@@ -1204,88 +1145,175 @@ class JointModel(pl.LightningModule):
 
         loss = torch.sum(loss.masked_fill(frag_targs_mask, 0), dim=-1)/num_frag_targs
         return torch.mean(loss)
-    
-    def cos_loss(self, pred, targ, parent_mass=None, use_hun=False):
-        """cos_loss.
 
-        Args:
-            pred:
-            targ:
+    def cos_loss_sparse(self, pred, targ, parent_mass=None, use_hun=False):
+        """Sparse cosine distance matching retrieval-time sparse scoring.
+
+        Expects unbinned spectra with shape [B, N, 2],
+        where channel 0 is mass and channel 1 is intensity.
         """
-        if not self.binned_targs:
-            tol = parent_mass * self.mass_tol
-            mask = torch.logical_and(
-                torch.abs(pred[:, :, None, 0] - targ[:, None, :, 0]) < tol[:, None, None],
-                targ[:, None, :, 0] > 0
+        if pred.ndim != 3 or targ.ndim != 3 or pred.shape[-1] != 2 or targ.shape[-1] != 2:
+            raise ValueError(
+                f"cos_loss_sparse expects pred/targ shaped [B, N, 2], got {tuple(pred.shape)} and {tuple(targ.shape)}"
             )
-            pred_norm = pred[:, :, 1].norm(dim=-1)
-            targ_norm = targ[:, :, 1].norm(dim=-1)
-            score = pred[:, :, None, 1] * targ[:, None, :, 1] / (pred_norm[:, None, None] * targ_norm[:, None, None])
-            score = torch.where(mask, score, torch.zeros_like(score))
-            target_nums = torch.sum(targ[:, :, 1] != 0, dim=-1)
-            if use_hun:
-                assign = pygm.hungarian(score, n2=target_nums, backend='pytorch')
-            else:
-                _score = torch.where(mask, score, torch.full_like(score, -1e3))
-                assign = pygm.sinkhorn(_score, n2=target_nums, tau=self.sk_tau, dummy_row=True, max_iter=20, backend='pytorch')
-            loss = 1 - torch.sum(assign * score, dim=(1, 2))
-        else:
-            loss = 1 - self.cos_fn(pred, targ)
+        eps = 1e-22
+        compute_dtype = torch.float32
+        batch_size = pred.shape[0]
+
+        pred_batch, pred_bin, pred_val = self._coalesce_unbinned_spectra_sparse(pred, compute_dtype)
+        targ_batch, targ_bin, targ_val = self._coalesce_unbinned_spectra_sparse(targ, compute_dtype)
+
+        pred_norm_sq = torch.zeros(batch_size, dtype=compute_dtype, device=pred.device)
+        targ_norm_sq = torch.zeros(batch_size, dtype=compute_dtype, device=pred.device)
+        if pred_val.numel() > 0:
+            pred_norm_sq.scatter_add_(0, pred_batch, pred_val * pred_val)
+        if targ_val.numel() > 0:
+            targ_norm_sq.scatter_add_(0, targ_batch, targ_val * targ_val)
+
+        dot = torch.zeros(batch_size, dtype=compute_dtype, device=pred.device)
+        if pred_val.numel() > 0 and targ_val.numel() > 0:
+            pred_key = pred_batch * self.num_bins + pred_bin
+            targ_key = targ_batch * self.num_bins + targ_bin
+            targ_sort = torch.argsort(targ_key)
+            targ_key_sorted = targ_key[targ_sort]
+            targ_val_sorted = targ_val[targ_sort]
+
+            pos = torch.searchsorted(targ_key_sorted, pred_key)
+            in_bounds = pos < targ_key_sorted.numel()
+            matched = in_bounds & (targ_key_sorted[pos.clamp_max(targ_key_sorted.numel() - 1)] == pred_key)
+            if torch.any(matched):
+                matched_pos = pos[matched]
+                dot_terms = pred_val[matched] * targ_val_sorted[matched_pos]
+                dot.scatter_add_(0, pred_batch[matched], dot_terms)
+
+        pred_norm = torch.sqrt(pred_norm_sq)
+        targ_norm = torch.sqrt(targ_norm_sq)
+        valid = (pred_norm > 0) & (targ_norm > 0)
+        denom = pred_norm * targ_norm + eps
+        loss_val = 1 - (dot / denom)
+        loss = torch.where(valid, loss_val, torch.ones_like(loss_val))
         return {"loss": loss}
 
-    def entropy_loss(self, pred, targ, parent_mass=None, use_hun=False, weighted=False):
-        """entropy_loss.
+    def _entropy_from_probs_torch(self, vals: torch.Tensor) -> torch.Tensor:
+        vals = vals[vals > 0]
+        if vals.numel() == 0:
+            return torch.zeros((), dtype=vals.dtype, device=vals.device)
+        return -torch.sum(vals * torch.log(vals + 1e-22))
 
-        Args:
-            pred:
-            targ:
+    def _coalesce_unbinned_spectra_sparse(self, specs: torch.Tensor, dtype: torch.dtype):
+        """Coalesce unbinned [B, N, 2] spectra into sparse (batch, bin, value) tuples."""
+        if specs.ndim != 3 or specs.shape[-1] != 2:
+            raise ValueError(f"Expected spectra shaped [B, N, 2], got {tuple(specs.shape)}")
+
+        batch_size = specs.shape[0]
+        mz = specs[:, :, 0]
+        inten = specs[:, :, 1].to(dtype)
+
+        scale = (self.num_bins - 1) / float(self.upper_limit)
+        bin_idx = torch.floor(mz * scale).long() + 1
+        valid = (inten > 0) & (bin_idx >= 0) & (bin_idx < self.num_bins)
+
+        if not torch.any(valid):
+            empty_long = torch.empty(0, dtype=torch.long, device=specs.device)
+            empty_float = torch.empty(0, dtype=dtype, device=specs.device)
+            return empty_long, empty_long, empty_float
+
+        batch_idx = torch.arange(batch_size, device=specs.device).unsqueeze(1).expand_as(bin_idx)
+        batch_flat = batch_idx[valid]
+        bin_flat = bin_idx[valid]
+        inten_flat = inten[valid]
+
+        key = batch_flat * self.num_bins + bin_flat
+        uniq_key, inv = torch.unique(key, sorted=True, return_inverse=True)
+        pooled, _ = ts.scatter_max(inten_flat, inv, dim=0, dim_size=uniq_key.numel())
+        pooled = torch.where(torch.isfinite(pooled), pooled, torch.zeros_like(pooled))
+
+        out_batch = torch.div(uniq_key, self.num_bins, rounding_mode="floor")
+        out_bin = uniq_key % self.num_bins
+        return out_batch, out_bin, pooled
+
+    def _bin_unbinned_spectra_batch(self, specs: torch.Tensor) -> torch.Tensor:
+        """Bin a batch of unbinned spectra shaped [B, N, 2] to [B, num_bins]."""
+        if specs.ndim != 3 or specs.shape[-1] != 2:
+            raise ValueError(f"Expected spectra shaped [B, N, 2], got {tuple(specs.shape)}")
+
+        batch_size = specs.shape[0]
+        mz = specs[:, :, 0]
+        inten = specs[:, :, 1]
+
+        scale = (self.num_bins - 1) / float(self.upper_limit)
+        bin_idx = torch.floor(mz * scale).long() + 1
+        valid = (inten > 0) & (bin_idx >= 0) & (bin_idx < self.num_bins)
+
+        if not torch.any(valid):
+            return torch.zeros((batch_size, self.num_bins), dtype=specs.dtype, device=specs.device)
+
+        offsets = (torch.arange(batch_size, device=specs.device).unsqueeze(1) * self.num_bins)
+        global_idx = (bin_idx + offsets).reshape(-1)
+        valid_flat = valid.reshape(-1)
+        global_idx = global_idx[valid_flat]
+        inten_flat = inten.reshape(-1)[valid_flat]
+
+        pooled_flat, _ = ts.scatter_max(inten_flat, global_idx, dim=0, dim_size=batch_size * self.num_bins)
+        pooled_flat = torch.where(torch.isfinite(pooled_flat), pooled_flat, torch.zeros_like(pooled_flat))
+        return pooled_flat.view(batch_size, self.num_bins)
+
+    def entropy_loss_sparse(self, pred, targ, parent_mass=None, use_hun=False):
+        """Sparse entropy distance matching retrieval-time sparse scoring.
+
+        Expects unbinned spectra with shape [B, N, 2],
+        where channel 0 is mass and channel 1 is intensity.
         """
-        def norm_peaks(prob):
-            return prob / (prob.sum(dim=-1, keepdim=True) + 1e-22)
-        def entropy(prob):
-            return -torch.sum(prob * torch.log(prob + 1e-22), dim=-1) / 1.3862943611198906 # norm by log(4)
-
-        if not self.binned_targs:
-            if weighted:
-                raise NotImplementedError
-            tol = parent_mass * self.mass_tol
-            mask = torch.logical_and(
-                torch.abs(pred[:, :, None, 0] - targ[:, None, :, 0]) < tol[:, None, None],
-                targ[:, None, :, 0] > 0
+        if pred.ndim != 3 or targ.ndim != 3 or pred.shape[-1] != 2 or targ.shape[-1] != 2:
+            raise ValueError(
+                f"entropy_loss_sparse expects pred/targ shaped [B, N, 2], got {tuple(pred.shape)} and {tuple(targ.shape)}"
             )
-            score = pred[:, :, None, 1] * targ[:, None, :, 1]
-            score = torch.where(mask, score, torch.zeros_like(score))
-            target_nums = torch.sum(targ[:, :, 1] != 0, dim=-1)
-            if use_hun:
-                assign = pygm.hungarian(score, n2=target_nums, backend='pytorch')
-            else:
-                _score = torch.where(mask, score, torch.full_like(score, -1e3))
-                assign = pygm.sinkhorn(_score, n2=target_nums, tau=self.sk_tau, dummy_row=True, max_iter=20, backend='pytorch')
-            pred_norm = norm_peaks(pred[:, :, 1])
-            targ_norm = norm_peaks(targ[:, :, 1])
-            merged_peaks = torch.cat((
-                torch.bmm(assign, targ_norm.unsueeze(-1)).squeeze(-1) + pred_norm, # usually n_pred > n_targ
-                (1 - assign.sum(dim=1)) * targ_norm,
-            ), dim=1)
-            entropy_mix = entropy(merged_peaks)
-            entropy_pred = entropy(pred_norm)
-            entropy_targ = entropy(targ_norm)
-            loss = 2 * entropy_mix - entropy_pred - entropy_targ
+        eps = 1e-22
+        compute_dtype = torch.float32
+        log4 = torch.log(torch.tensor(4.0, dtype=compute_dtype, device=pred.device))
+        batch_size = pred.shape[0]
 
-        else:
-            pred_norm = norm_peaks(pred)
-            targ_norm = norm_peaks(targ)
-            if weighted:
-                def reweight_spec(norm_spec):
-                    entropy_spec = entropy(norm_spec)
-                    weight = torch.where(entropy_spec < 3, 0.25 + 0.25 * entropy_spec, torch.ones_like(entropy_spec))
-                    weighted_spec = norm_spec ** weight.unsqueeze(-1)
-                    weighted_spec = norm_peaks(weighted_spec)
-                    return weighted_spec
-                pred_norm = reweight_spec(pred_norm)
-                targ_norm = reweight_spec(targ_norm)
-            entropy_pred = entropy(pred_norm)
-            entropy_targ = entropy(targ_norm)
-            entropy_mix = entropy((pred_norm + targ_norm) / 2)
-            loss = 2 * entropy_mix - entropy_pred - entropy_targ
+        pred_batch, pred_bin, pred_val = self._coalesce_unbinned_spectra_sparse(pred, compute_dtype)
+        targ_batch, targ_bin, targ_val = self._coalesce_unbinned_spectra_sparse(targ, compute_dtype)
+
+        pred_sum = torch.zeros(batch_size, dtype=compute_dtype, device=pred.device)
+        targ_sum = torch.zeros(batch_size, dtype=compute_dtype, device=pred.device)
+        if pred_val.numel() > 0:
+            pred_sum.scatter_add_(0, pred_batch, pred_val)
+        if targ_val.numel() > 0:
+            targ_sum.scatter_add_(0, targ_batch, targ_val)
+
+        valid = (pred_sum > 0) & (targ_sum > 0)
+
+        h_pred = torch.zeros(batch_size, dtype=compute_dtype, device=pred.device)
+        if pred_val.numel() > 0:
+            pred_probs = pred_val / (pred_sum[pred_batch] + eps)
+            pred_h_terms = -(pred_probs * torch.log(pred_probs + eps))
+            h_pred.scatter_add_(0, pred_batch, pred_h_terms)
+
+        h_true = torch.zeros(batch_size, dtype=compute_dtype, device=pred.device)
+        if targ_val.numel() > 0:
+            targ_probs = targ_val / (targ_sum[targ_batch] + eps)
+            targ_h_terms = -(targ_probs * torch.log(targ_probs + eps))
+            h_true.scatter_add_(0, targ_batch, targ_h_terms)
+
+        h_mix = torch.zeros(batch_size, dtype=compute_dtype, device=pred.device)
+        if pred_val.numel() > 0 or targ_val.numel() > 0:
+            pred_key = pred_batch * self.num_bins + pred_bin
+            targ_key = targ_batch * self.num_bins + targ_bin
+            pred_probs = pred_val / (pred_sum[pred_batch] + eps) if pred_val.numel() > 0 else torch.empty(0, dtype=compute_dtype, device=pred.device)
+            targ_probs = targ_val / (targ_sum[targ_batch] + eps) if targ_val.numel() > 0 else torch.empty(0, dtype=compute_dtype, device=pred.device)
+
+            mix_key = torch.cat((pred_key, targ_key), dim=0)
+            mix_comp = torch.cat((0.5 * pred_probs, 0.5 * targ_probs), dim=0)
+            if mix_key.numel() > 0:
+                uniq_mix_key, inv = torch.unique(mix_key, sorted=True, return_inverse=True)
+                mix_probs = torch.zeros(uniq_mix_key.numel(), dtype=compute_dtype, device=pred.device)
+                mix_probs.scatter_add_(0, inv, mix_comp)
+                mix_h_terms = -(mix_probs * torch.log(mix_probs + eps))
+                mix_batch = torch.div(uniq_mix_key, self.num_bins, rounding_mode="floor")
+                h_mix.scatter_add_(0, mix_batch, mix_h_terms)
+
+        loss_val = (2 * h_mix - h_pred - h_true) / log4
+        loss = torch.where(valid, loss_val, torch.ones_like(loss_val))
         return {"loss": loss}

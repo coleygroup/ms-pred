@@ -1,5 +1,5 @@
-launcher_args: {experiment_name: joint_train_msg,
-  script_name: "src/ms_pred/iceberg_transformer/train_contr_joint.py",
+launcher_args: {experiment_name: joint_train_nist20,
+  script_name: "src/ms_pred/GLACIER/train_joint.py",
   slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,
   visible_devices: [0, 1]
@@ -8,7 +8,7 @@ universal_args:
   _slurm_args:
   - {_num_gpu: 1, cpus-per-task: 7, job-name: joint_train, mem-per-cpu: 8G,
     time: '1-12:00:00'}
-  debug: [False]
+  debug: [false]
   gpu: [true]
 
   seed: [1]
@@ -17,24 +17,20 @@ universal_args:
   max-epochs: [200]
   min-epochs: [20]
 
-  dataset-name: [msg]
-  split-name: [split.tsv]
-  dataset-labels: [20250725_labels_spec_sim.tsv]
+  dataset-name: [nist20]
+  dataset-labels: [labels.tsv]
   magma-folder: [magma_outputs]
+  split-name: [split_1.tsv]
 
-  learning-rate: [0.00027]
+  learning-rate: [0.0004]
   lr-decay-rate: [0.9]
   weight-decay: [0]
-  grad-accumulate: [1]
 
   inten-dropout: [0.1]
   frag-dropout: [0.1]
   hidden-size: [256]
   graphormer-layers: [5]
   graphormer-dropout: [0.1]
-  num-decoys: [3]
-  num-fixed-decoys: [3]
-  all-decoy-nums: [10]
   embed-elem-group: [True]
   add-hs: [True]
   embed-adduct: [True]
@@ -49,6 +45,7 @@ universal_args:
   max-breakpoints: [200]
   multi-hop-max-dist: [10]
   num-edge-dis: [10]
+  num-bins: [15000]
   enable-aux-loss: [True]
   enable-decoder-norm: [False]
   sk-tau: [0.05]
@@ -57,17 +54,32 @@ universal_args:
   frag-weight: [0.1]
   warmup: [2000]
   magma-warmup-steps: [2500]
-  magma-decay-rate: [0.9]
+  magma-decay-rate: [1]
   magma-decay-steps: [2500]
-  binned-targs: [True]
-  inten-loss-fn: [entropy]
-  contr-loss-fn: [entropy]
-  contr-weight: [1]
-  contr-threshold: [0.6]
-  pubchem-map-path: ['data/retrieval/pubchem/pubchem_formulae_inchikey.hdf5']
+  inten-loss-fn: [cosine]
 
 iterative_args:
-  -  split-name: [split.tsv]
-     save-dir: [split_rnd1]
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd1]
      seed: [1]
-     train-checkpoint: [results/joint_train_msg/split_rnd1/version_82/best.ckpt]
+     
+  # -  split-name: [split_1.tsv]
+  #    save-dir: [split_1_rnd2]
+  #    seed: [2]
+
+  # -  split-name: [split_1.tsv]
+  #    save-dir: [split_1_rnd3]
+  #    seed: [3]
+
+  # -  split-name: [scaffold_1.tsv]
+  #    save-dir: [scaffold_1_rnd1]
+  #    seed: [1]
+
+  # -  split-name: [scaffold_1.tsv]
+  #    save-dir: [scaffold_1_rnd2]
+  #    seed: [2]
+
+  # -  split-name: [scaffold_1.tsv]
+  #    save-dir: [scaffold_1_rnd3]
+  #    seed: [3]
+

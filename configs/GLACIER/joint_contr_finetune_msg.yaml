@@ -1,5 +1,5 @@
 launcher_args: {experiment_name: joint_train_msg,
-  script_name: "src/ms_pred/iceberg_transformer/train_joint.py",
+  script_name: "src/ms_pred/GLACIER/train_contr_joint.py",
   slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,
   visible_devices: [0, 1]
@@ -19,18 +19,22 @@ universal_args:
 
   dataset-name: [msg]
   split-name: [split.tsv]
-  dataset-labels: [20250725_labels_spec_sim.tsv]
+  dataset-labels: [labels.tsv]
   magma-folder: [magma_outputs]
 
-  learning-rate: [0.0004]
+  learning-rate: [0.00027]
   lr-decay-rate: [0.9]
   weight-decay: [0]
+  grad-accumulate: [1]
 
   inten-dropout: [0.1]
   frag-dropout: [0.1]
   hidden-size: [256]
   graphormer-layers: [5]
   graphormer-dropout: [0.1]
+  num-decoys: [5]
+  num-fixed-decoys: [5]
+  all-decoy-nums: [20]
   embed-elem-group: [True]
   add-hs: [True]
   embed-adduct: [True]
@@ -56,9 +60,15 @@ universal_args:
   magma-decay-rate: [0.9]
   magma-decay-steps: [2500]
   binned-targs: [True]
-  inten-loss-fn: [entropy]
+  inten-loss-fn: [cosine]
+  contr-loss-fn: [entropy]
+  contr-weight: [1]
+  contr-threshold: [0.4]
+  num-bins: [150000]
+  pubchem-map-path: ['data/retrieval/pubchem/pubchem_formulae_inchikey.hdf5']
 
 iterative_args:
   -  split-name: [split.tsv]
      save-dir: [split_rnd1]
      seed: [1]
+     train-checkpoint: [results/joint_train_msg/split_rnd1/version_3/best.ckpt]
