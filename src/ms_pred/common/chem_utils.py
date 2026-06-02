@@ -181,13 +181,13 @@ ion2onehot_pos = {
     "[M]+": 5,
     "[M-H4O2+H]+": 6,
     "[M+H-2H2O]+": 6,
-    # uncomment the following if you need compatibility with the old weights
+    # uncomment the following if you need compatibility with the ICEBERG 2.0 weights
     # "[M-H]-": 7,
     # "[M+Cl]-": 8,
     # "[M-H2O-H]-": 9,
     # "[M-H-H2O]-": 9,
     # "[M-H-CO2]-": 10,
-    # comment the following if you need compatibility with the old weights
+    # comment the following if you need compatibility with the ICEBERG 2.0 weights
     "[M+H-H3N]+": 7,
     "[M-H3N+H]+": 7,
     "[M-NH3+H]+": 7,
@@ -261,6 +261,7 @@ for ion in _ori_ions:
 instrument2onehot_pos = {
     "Orbitrap": 0,  # Orbitrap HCD
     "QTOF": 1,
+    # Comment the following two if you need compatibility with ICEBERG 2.0 weights
     "IT-FT": 2,     # Orbitrap CID
     "Unknown": 3
 }
@@ -721,6 +722,7 @@ def npclassifier_query(smiles):
 
 
 def get_collision_energy(filename):
+    filename = str(filename)
     colli_eng = re.findall('collision +([0-9]+\.?[0-9]*|nan).*', filename)
     if len(colli_eng) > 1:
         raise ValueError(f'Multiple collision energies found in {filename}')
