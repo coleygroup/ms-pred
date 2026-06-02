@@ -7,11 +7,8 @@ num_workers = 32
 python_file = "src/ms_pred/molnetms/predict.py"
 test_entries = [
     {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd1"},
-    {"dataset": "canopus_train_public", "split": "split_1", "folder": "split_1_rnd1"},
     {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd2"},
-    {"dataset": "canopus_train_public", "split": "split_1", "folder": "split_1_rnd2"},
     {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd3"},
-    {"dataset": "canopus_train_public", "split": "split_1", "folder": "split_1_rnd3"},
     {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1"},
 ]
 

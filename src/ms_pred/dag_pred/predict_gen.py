@@ -45,7 +45,7 @@ def get_args():
     parser.add_argument(
         "--checkpoint-pth",
         help="name of checkpoint file",
-        default="results/debug_dag_canopus_train_public/split_1/version_0/best.ckpt",
+        default="results/debug_dag_nist20/split_1/version_0/best.ckpt",
     )
     parser.add_argument("--dataset-name", default="gnps2015_debug")
     parser.add_argument("--dataset-labels", default="labels.tsv")
@@ -61,12 +61,21 @@ def get_args():
     return parser.parse_args()
 
 
+def normalize_instrument(instrument: str) -> str:
+    if pd.isna(instrument) or instrument not in common.instrument2onehot_pos:
+        return "Orbitrap"
+    return instrument
+
+
 def predict():
     args = get_args()
     kwargs = args.__dict__
 
     save_dir = Path(kwargs["save_dir"])
-    common.setup_logger(save_dir, log_name="dag_gen_pred.log", debug=kwargs["debug"])
+    if kwargs["num_decoys"] == 0:
+        common.setup_logger(save_dir, log_name="dag_gen_pred.log", debug=kwargs["debug"])
+    else:
+        common.setup_logger(save_dir, log_name=f"dag_gen_pred_decoy{kwargs['num_decoys']}.log", debug=kwargs["debug"])
     try: 
         pl.utilities.seed.seed_everything(kwargs.get("seed"))
     except Exception as e:
@@ -133,6 +142,7 @@ def predict():
             adduct = entry["ionization"]
             precursor_mz = entry["precursor"]
             instrument = entry["instrument"] if "instrument" in entry else "Orbitrap"  # fallback to Orbitrap
+            instrument = normalize_instrument(instrument)
             collision_energies = [i for i in ast.literal_eval(entry["collision_energies"])]
             smi = common.rm_stereo(smi)
             mol = common.smi_inchi_round_mol(smi)

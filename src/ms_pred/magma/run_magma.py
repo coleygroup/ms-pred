@@ -528,17 +528,17 @@ def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--spectra-dir",
-        default="data/spec_datasets/canopus_train_public/spec_files",
+        default="data/spec_datasets/nist20/spec_files.hdf5",
         help="Directory where spectra are stored",
     )
     parser.add_argument(
         "--spec-labels",
-        default="data/spec_datasets/canopus_train_public/labels.tsv",
+        default="data/spec_datasets/nist20/labels.tsv",
         help="TSV Location containing spectra labels",
     )
     parser.add_argument(
         "--output-dir",
-        default="data/spec_datasets/canopus_train_public/magma_outputs",
+        default="data/spec_datasets/nist20/magma_outputs",
         help="Output directory to save MAGMA files",
     )
     parser.add_argument(

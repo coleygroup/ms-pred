@@ -492,9 +492,6 @@ class DAGDataset(Dataset):
         if 'collision' in list(self.magma_map.keys())[0]:  # spec_id_collision 11.magma
             valid_spec_ids = set([common.rm_collision_str(i) for i in self.magma_map])
         else:  # spec_id.magma
-            # TODO: fix for CANOPUS. 
-            # TODO: temporary fix for CANOPUS, change indexing back
-            #valid_spec_ids = set(["_".join(i.split("_")[:-2]) for i in self.magma_map])
             valid_spec_ids = set(self.magma_map.keys())
 
         valid_specs = [(i in valid_spec_ids and inst in common.instrument2onehot_pos) for i, inst in self.df[["spec", "instrument"]].values]
@@ -509,8 +506,6 @@ class DAGDataset(Dataset):
             self.name_to_dict = {}
             for i in self.magma_map:
                 ori_id = common.rm_collision_str(i)
-                # TODO: temporary fix for CANOPUS, change indexing back
-                #ori_id = "_".join(i.split("_")[:-2])
                 if ori_id in ori_label_map:
                     self.spec_names.append(i)
                     self.name_to_dict[i] = copy.deepcopy(ori_label_map[ori_id])
@@ -523,8 +518,6 @@ class DAGDataset(Dataset):
         adduct_map = dict(self.df[["spec", "ionization"]].values)
         self.name_to_adduct = {
             i: adduct_map[common.rm_collision_str(i)] for i in self.spec_names
-            # TODO: temporary fix for CANOPUS, change indexing back
-            #i: adduct_map["_".join(i.split("_")[:-2])] for i in self.spec_names
         }
         self.name_to_adducts = {
             i: common.ion2onehot_pos[self.name_to_adduct[i]] for i in self.spec_names
@@ -532,8 +525,6 @@ class DAGDataset(Dataset):
         instrument_map = dict(self.df[["spec", "instrument"]].values)
         self.name_to_instrument = {
             i: instrument_map[common.rm_collision_str(i)] for i in self.spec_names
-            # TODO: temporary fix for CANOPUS, change indexing back
-            # i: instrument_map["_".join(i.split("_")[:-2])] for i in self.spec_names
         }
 
         self.name_to_instruments = {
@@ -904,7 +895,6 @@ class IntenContrDataset(DAGDataset):
         outdict.update(dgl_entry)
 
         outlist = [outdict]
-        # query = f'pred_{spec_name}_{colli_eng}' for canopus
         query = f'pred_{spec_name}'
         _, decoy_keys = self.decoy_db.get_entries(query, colli_eng)
         

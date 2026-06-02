@@ -1,2 +1,1 @@
-python launcher_scripts/run_from_config.py configs/massformer/massformer_baseline_canopus.yaml
 python launcher_scripts/run_from_config.py configs/massformer/massformer_baseline_nist20.yaml

@@ -11,10 +11,6 @@ run_models = [
     {"dataset": "nist20", "dir_name":"split_1_rnd1", "test_split": "split_1"},
     {"dataset": "nist20", "dir_name":"split_1_rnd2", "test_split": "split_1"},
     {"dataset": "nist20", "dir_name":"split_1_rnd3", "test_split": "split_1"},
-
-    {"dataset": "canopus_train_public", "dir_name":"split_1_rnd1", "test_split": "split_1"},
-    {"dataset": "canopus_train_public", "dir_name":"split_1_rnd2", "test_split": "split_1"},
-    {"dataset": "canopus_train_public", "dir_name":"split_1_rnd3", "test_split": "split_1"},
 ]
 
 

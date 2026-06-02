@@ -174,7 +174,7 @@ def _entropy_sparse(
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", default="canopus_train_public")
+    parser.add_argument("--dataset", default="nist20")
     parser.add_argument("--formula-dir-name", default="subform_20")
     parser.add_argument(
         "--pred-file",
@@ -280,13 +280,13 @@ def _read_pred_spec_name(
             if "nan" in str(ce):
                 continue
 
-            has_matching_bins = (
-                spec_data.has_binned_spec
-                and getattr(spec_data, "_num_bins", None) == num_bins
-                and getattr(spec_data, "_mass_upper_limit", None) == upper_limit
+            has_matching_bins = spec_data.has_matching_binned_spec(
+                mass_upper_limit=upper_limit,
+                num_bins=num_bins,
+                pool_fn=pool_fn,
             )
             if not has_matching_bins:
-                spec_data.bin_spectrum(
+                spec_data.ensure_binned_spectrum(
                     mass_upper_limit=upper_limit,
                     num_bins=num_bins,
                     pool_fn=pool_fn,
@@ -324,13 +324,7 @@ def process_spec_file(
 
     for colli_label in name_to_colli.get(spec_name, []):
         if spec_h5 is not None:
-            if dataset == "msg":
-                spec_files = [
-                    f"{spec_name}_collision {colli_label} eV.json",
-                    f"{spec_name}_collision {colli_label} eV [imputed].json",
-                ]
-            else:
-                spec_files = [f"{spec_name}_collision {colli_label}.json"]
+            spec_files = [f"{spec_name}_collision {colli_label}.json"]
 
             loaded_json = None
             for spec_file in spec_files:
@@ -476,6 +470,7 @@ def build_output_entry(
     target_mask: np.ndarray,
     candidate_count: int,
     full_candidate_count: int,
+    full_candidate_smiles: Optional[Sequence[str]] = None,
 ) -> dict:
     ind_found, sorted_indices = rank_from_distances(dist_full, target_mask)
     sorted_dist = dist_full[sorted_indices]
@@ -499,6 +494,12 @@ def build_output_entry(
         "true_dist": true_dist,
         "spec_name": str(spec_name),
     }
+    if full_candidate_smiles is not None and len(full_candidate_smiles) > 0:
+        out["true_smiles"] = str(true_smiles)
+        top_1_idx = int(sorted_indices[0])
+        top_1_smiles = full_candidate_smiles[top_1_idx]
+        if pd.notna(top_1_smiles):
+            out["top_1_smiles"] = str(top_1_smiles)
     for k in range(0, min(50, len(sorted_dist))):
         out[f"top_{k + 1}_dist"] = float(sorted_dist[k])
     return out
@@ -689,6 +690,13 @@ def main(args):
         spec_name: grp["inchikey"].astype(str).tolist()
         for spec_name, grp in full_df.groupby("spec", sort=False)
     }
+    if "smiles" in full_df.columns:
+        full_candidate_smiles_by_spec = {
+            spec_name: grp["smiles"].tolist()
+            for spec_name, grp in full_df.groupby("spec", sort=False)
+        }
+    else:
+        full_candidate_smiles_by_spec = {}
 
     k_vals = list(range(1, 11)) + [20]
     hit_rates = {}
@@ -710,6 +718,7 @@ def main(args):
         full_candidate_ikeys = full_candidates_by_spec.get(spec_name)
         if not full_candidate_ikeys:
             continue
+        full_candidate_smiles = full_candidate_smiles_by_spec.get(spec_name)
 
         cand_ikeys = pred_ikeys[selected_indices]
         cand_preds = np.asarray([pred_spec_ars[i] for i in selected_indices], dtype=object)
@@ -786,6 +795,7 @@ def main(args):
             target_mask=target_mask,
             candidate_count=len(cand_ikeys),
             full_candidate_count=len(full_candidate_ikeys),
+            full_candidate_smiles=full_candidate_smiles,
         )
         entry["ion"] = true_ion
         if spec_name in name_to_class:

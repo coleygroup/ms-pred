@@ -4,40 +4,24 @@ from pathlib import Path
 import subprocess
 
 res_entries = [
-    {"folder": "results/scarf_nist20_ablate/", 
-     "dataset": "nist20", 
+    {"folder": "results/scarf_nist20_ablate/",
+     "dataset": "nist20",
      'test_split': "split_1"},
 
-    {"folder": "results/scarf_canopus_train_public_ablate/", 
-     "dataset": "canopus_train_public",
-     "test_split": "split_1",},
-
-    {"folder": "results/scarf_nist20/scaffold_1/", 
+    {"folder": "results/scarf_nist20/scaffold_1/",
      "dataset": "nist20",
      "test_split": "scaffold_1"},
 
-    {"folder": "results/scarf_nist20/split_1_rnd1/", 
+    {"folder": "results/scarf_nist20/split_1_rnd1/",
      "dataset": "nist20",
      "test_split": "split_1"},
 
-    {"folder": "results/scarf_nist20/split_1_rnd2/", 
+    {"folder": "results/scarf_nist20/split_1_rnd2/",
      "dataset": "nist20",
      "test_split": "split_1"},
 
-    {"folder": "results/scarf_nist20/split_1_rnd3/", 
+    {"folder": "results/scarf_nist20/split_1_rnd3/",
      "dataset": "nist20",
-     "test_split": "split_1"},
-
-    {"folder": "results/scarf_canopus_train_public/split_1_rnd1/", 
-     "dataset": "canopus_train_public",
-     "test_split": "split_1"},
-
-    {"folder": "results/scarf_canopus_train_public/split_1_rnd2/", 
-     "dataset": "canopus_train_public",
-     "test_split": "split_1"},
-
-    {"folder": "results/scarf_canopus_train_public/split_1_rnd3/", 
-     "dataset": "canopus_train_public",
      "test_split": "split_1"},
 ]
 

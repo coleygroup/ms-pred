@@ -16,27 +16,12 @@ test_entries = [
      "test_split": "split_1",
      "max_k": 50},
 
-    {"dataset": "canopus_train_public",
-     "train_split": "split_1_rnd1",
-     "test_split": "split_1",
-     "max_k": 50},
-
     {"dataset": "nist20",
      "train_split": "split_1_rnd2",
      "test_split": "split_1",
      "max_k": 50},
 
-    {"dataset": "canopus_train_public",
-     "train_split": "split_1_rnd2",
-     "test_split": "split_1",
-     "max_k": 50},
-
     {"dataset": "nist20",
-     "train_split": "split_1_rnd3",
-     "test_split": "split_1",
-     "max_k": 50},
-
-    {"dataset": "canopus_train_public",
      "train_split": "split_1_rnd3",
      "test_split": "split_1",
      "max_k": 50},

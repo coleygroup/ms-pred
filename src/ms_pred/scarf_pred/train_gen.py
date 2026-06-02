@@ -47,7 +47,7 @@ def add_scarf_train_args(parser):
     date = datetime.now().strftime("%Y_%m_%d")
     parser.add_argument("--save-dir", default=f"results/{date}_scarf_gen/")
 
-    parser.add_argument("--dataset-name", default="canopus_train_debug")
+    parser.add_argument("--dataset-name", default="nist20")
     parser.add_argument("--dataset-labels", default="labels.tsv")
     parser.add_argument("--split-name", default="split_1.tsv")
 

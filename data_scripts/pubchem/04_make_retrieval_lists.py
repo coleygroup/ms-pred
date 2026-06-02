@@ -14,6 +14,17 @@ from tqdm import tqdm
 import ms_pred.common as common
 
 
+def normalize_candidate(smi: str):
+    """Round-trip a candidate SMILES and recompute the matching InChIKey."""
+    norm_smi = common.smi_inchi_round_smi(smi)
+    if norm_smi is None:
+        return None
+    norm_ikey = common.inchikey_from_smiles(norm_smi)
+    if not norm_ikey:
+        return None
+    return norm_smi, norm_ikey
+
+
 def process_example(obj, max_k=50) -> dict:
     """process_example.
 
@@ -29,16 +40,28 @@ def process_example(obj, max_k=50) -> dict:
     """
     if max_k is None:
         max_k = int(1e10)
+    true_norm = normalize_candidate(obj["smiles"])
+    if true_norm is None:
+        return None
+    true_smi, true_ikey = true_norm
+    obj["smiles"] = true_smi
+    obj["inchikey"] = true_ikey
+
     # Note this takes a while and should be done upfront
     # Some didn't pass round trip in frag engine, so repeat it here
-    cands_list = []
+    cands_map = {}
     for i in obj["cands"]:
-        smi = common.smi_inchi_round_smi(i[0])
-        if smi is not None:
-            cands_list.append((smi, i[1]))
+        cand_norm = normalize_candidate(i[0])
+        if cand_norm is None:
+            continue
+        smi, ikey = cand_norm
+        if ikey == true_ikey:
+            continue
+        cands_map.setdefault(ikey, smi)
+    cands_list = [(smi, ikey) for ikey, smi in cands_map.items()]
     cands_list = np.array(cands_list, dtype=object)
     cands = [common.get_morgan_fp_smi(j[0]) for j in cands_list]
-    true_cand = np.array([obj["smiles"], obj["inchikey"]])[None, :]
+    true_cand = np.array([true_smi, true_ikey])[None, :]
     true_tani = np.array([1.0])
     if len(cands) == 0:
         obj["cands"] = true_cand
@@ -140,9 +163,11 @@ def main(max_k, workers, input_map, input_dataset_folder, split_file, subset='te
     # print(f"Num in database with incihikey found: {np.mean(num_found)}")
     if debug or len(out_list) == 0:
         processed = [process_fn(i) for i in out_list]
+        processed = [i for i in processed if i is not None]
         processed = {i["spec"]: i for i in processed}
     else:
         processed = common.chunked_parallel(out_list, process_fn, max_cpu=workers)
+        processed = [i for i in processed if i is not None]
         processed = {i["spec"]: i for i in processed}
 
         # Debugging
@@ -205,7 +230,10 @@ if __name__ == "__main__":
         {"dataset": "nist20", "max_k": 50, "split": "scaffold_1.tsv", "subset": "test"},
         {"dataset": "nist20", "max_k": 50, "split": "split_1.tsv", "subset": "val"},
         {"dataset": "nist20", "max_k": 50, "split": "scaffold_1.tsv", "subset": "val"},
-        # {"dataset": "canopus_train_public", "max_k": 50, "split": "split_1.tsv"},
+        {"dataset": "nist23", "max_k": 50, "split": "split_1.tsv", "subset": "test"},
+        {"dataset": "nist23", "max_k": 50, "split": "scaffold_1.tsv", "subset": "test"},
+        {"dataset": "nist23", "max_k": 50, "split": "split_1.tsv", "subset": "val"},
+        {"dataset": "nist23", "max_k": 50, "split": "scaffold_1.tsv", "subset": "val"},
     ]
 
     for test_entry in compute_entries:
