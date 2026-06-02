@@ -10,6 +10,7 @@ from pathlib import Path
 from datetime import datetime
 import pandas as pd
 import numpy as np
+import h5py
 
 from torch.utils.data import DataLoader
 import resource
@@ -26,17 +27,24 @@ from ms_pred.dag_pred import dag_data, gen_model
 
 
 def build_gen_magma_map(magma_tree_path: Path):
+    legacy_h5 = common.HDF5Dataset(magma_tree_path)
+    all_names = [name for name in legacy_h5.get_all_names() if name not in common.PredSpecDB._SPECIAL_ROOT_GROUPS]
+    if not all_names:
+        return {}
+
+    # Legacy MAGMa stores each spectrum as a top-level HDF5 dataset containing
+    # a serialized JSON blob. Detect that layout immediately
+    sample_obj = legacy_h5.h5_obj[all_names[0]]
+    if isinstance(sample_obj, h5py.Dataset):
+        return {Path(name).stem: name for name in all_names}
+
     predspec_db = common.PredSpecDB(magma_tree_path)
     name_to_entry = {}
-    for name in predspec_db.get_all_names():
+    for name in all_names:
         ces, remarks = predspec_db.get_entries(name)
         for ce, r in zip(ces, remarks):
             name_to_entry[f"{name}_collision {ce}"] = (name, ce, r)
-    if len(name_to_entry) > 0:
-        return name_to_entry
-
-    legacy_h5 = common.HDF5Dataset(magma_tree_path)
-    return {Path(name).stem: name for name in legacy_h5.get_all_names()}
+    return name_to_entry
 
 
 def add_frag_train_args(parser):
@@ -51,6 +59,7 @@ def add_frag_train_args(parser):
 
     date = datetime.now().strftime("%Y_%m_%d")
     parser.add_argument("--save-dir", default=f"results/{date}_tree_pred/")
+    parser.add_argument("--version", default=None, action="store", type=int)
 
     parser.add_argument("--dataset-name", default="gnps2015_debug")
     parser.add_argument("--dataset-labels", default="labels.tsv")
@@ -252,15 +261,30 @@ def train_model():
         kwargs["no_monitor"] = True
         monitor = "train_loss"
 
-    tb_logger = pl_loggers.TensorBoardLogger(save_dir, name="")
+    tb_logger = pl_loggers.TensorBoardLogger(save_dir, name="", version=kwargs["version"])
     console_logger = common.ConsoleLogger()
 
-    tb_path = tb_logger.log_dir
+    tb_path = Path(tb_logger.log_dir)
+    last_checkpoint = tb_path / "last.ckpt"
+    best_checkpoint = tb_path / "best.ckpt"
+    if (
+        tb_path.exists()
+        and not kwargs["test_checkpoint"]
+        and not last_checkpoint.exists()
+        and not best_checkpoint.exists()
+    ):
+        archive_path = tb_path.with_name(
+            f"{tb_path.name}.incomplete_{datetime.now().strftime('%Y_%m_%d-%H%M%S')}"
+        )
+        logging.info(f"Moving incomplete run directory {tb_path} to {archive_path}")
+        tb_path.rename(archive_path)
+
     checkpoint_callback = ModelCheckpoint(
         monitor=monitor,
         dirpath=tb_path,
         filename="best",  # "{epoch}-{val_loss:.2f}",
         save_weights_only=False,
+        save_last=True,
     )
     earlystop_callback = EarlyStopping(monitor=monitor, patience=5)
     callbacks = [earlystop_callback, checkpoint_callback]
@@ -277,11 +301,15 @@ def train_model():
         num_sanity_val_steps=2 if kwargs["debug"] else 0,
     )
 
+    ckpt_path = str(last_checkpoint) if last_checkpoint.exists() else None
+    if ckpt_path:
+        logging.info(f"Resuming training from {ckpt_path}")
+
     if not kwargs["test_checkpoint"]:
         if kwargs["debug_overfit"]:
-            trainer.fit(model, train_loader)
+            trainer.fit(model, train_loader, ckpt_path=ckpt_path)
         else:
-            trainer.fit(model, train_loader, val_loader)
+            trainer.fit(model, train_loader, val_loader, ckpt_path=ckpt_path)
 
         checkpoint_callback = trainer.checkpoint_callback
         test_checkpoint = checkpoint_callback.best_model_path
