@@ -51,6 +51,7 @@ class MassSpec:
         self._binned_spec_dense_cache = None
         self._mass_upper_limit = upper_limit
         self._num_bins = num_bins
+        self._binned_pool_fn = None
 
         if isinstance(collision_energy, str) and 'collision' in collision_energy:
             self.collision_energy = chem_utils.get_collision_energy(collision_energy)
@@ -101,20 +102,21 @@ class MassSpec:
                 kwargs[key] = safe_assign(kwargs[key], np.integer)
         self.meta = kwargs
 
-    def _set_binned_spec_dense(self, binned_spec, upper_limit=None):
+    def _set_binned_spec_dense(self, binned_spec, upper_limit=None, pool_fn=None):
         if binned_spec is None:
             self._binned_inds = None
             self._binned_vals = None
             self._binned_spec_dense_cache = None
+            self._binned_pool_fn = None
             return
         binned_spec = np.asarray(binned_spec, dtype=np.float32)
         if binned_spec.ndim != 1:
             raise ValueError(f"binned_spec must be 1D, got shape {binned_spec.shape}")
         inds = np.flatnonzero(binned_spec > 0).astype(np.uint32)
         vals = binned_spec[inds].astype(np.float32, copy=False)
-        self._set_binned_spec_sparse((inds, vals), num_bins=len(binned_spec), upper_limit=upper_limit)
+        self._set_binned_spec_sparse((inds, vals), num_bins=len(binned_spec), upper_limit=upper_limit, pool_fn=pool_fn)
 
-    def _set_binned_spec_sparse(self, binned_spec_sparse, num_bins=None, upper_limit=None):
+    def _set_binned_spec_sparse(self, binned_spec_sparse, num_bins=None, upper_limit=None, pool_fn=None):
         if isinstance(binned_spec_sparse, dict):
             inds = binned_spec_sparse.get("indices")
             vals = binned_spec_sparse.get("values")
@@ -161,7 +163,61 @@ class MassSpec:
         self._num_bins = int(num_bins)
         if upper_limit is not None:
             self._mass_upper_limit = upper_limit
+        self._binned_pool_fn = pool_fn
         self._binned_spec_dense_cache = None
+
+    @staticmethod
+    def _bin_spec_sparse(spec, num_bins: int = 15000, upper_limit: int = 1500, pool_fn: str = "add"):
+        if isinstance(spec, MassSpec) or hasattr(spec, "spec"):
+            spec = spec.spec
+        if spec is None or len(spec) == 0:
+            return np.zeros(0, dtype=np.uint32), np.zeros(0, dtype=np.float32)
+
+        spec = np.asarray(spec)
+        mz = spec[:, 0]
+        inten = spec[:, 1]
+        scale = (num_bins - 1) / upper_limit
+        bin_idx = np.floor(mz * scale).astype(np.int64) + 1
+        valid = (bin_idx >= 0) & (bin_idx < num_bins)
+        bin_idx = bin_idx[valid]
+        inten = inten[valid].astype(np.float32, copy=False)
+        if len(bin_idx) == 0:
+            return np.zeros(0, dtype=np.uint32), np.zeros(0, dtype=np.float32)
+
+        unique_inds, inverse = np.unique(bin_idx, return_inverse=True)
+        if pool_fn == "add":
+            vals = np.zeros(len(unique_inds), dtype=np.float32)
+            np.add.at(vals, inverse, inten)
+        elif pool_fn == "max":
+            order = np.argsort(inverse, kind="stable")
+            sorted_inverse = inverse[order]
+            sorted_inten = inten[order]
+            starts = np.r_[0, np.flatnonzero(np.diff(sorted_inverse)) + 1]
+            vals = np.maximum.reduceat(sorted_inten, starts).astype(np.float32, copy=False)
+        else:
+            raise NotImplementedError()
+        return unique_inds.astype(np.uint32, copy=False), vals.astype(np.float32, copy=False)
+
+    def has_matching_binned_spec(self, mass_upper_limit=1500, num_bins=15000, pool_fn=None):
+        return (
+            self.has_binned_spec
+            and self._num_bins == int(num_bins)
+            and self._mass_upper_limit == mass_upper_limit
+            and (pool_fn is None or self._binned_pool_fn is None or self._binned_pool_fn == pool_fn)
+        )
+
+    def ensure_binned_spectrum(self, mass_upper_limit=1500, num_bins=15000, pool_fn='add', force=False):
+        if not force and self.has_matching_binned_spec(mass_upper_limit, num_bins, pool_fn):
+            return
+        if self.has_masses and self.has_intens:
+            self._set_binned_spec_sparse(
+                self._bin_spec_sparse(self, num_bins=num_bins, upper_limit=mass_upper_limit, pool_fn=pool_fn),
+                num_bins=num_bins,
+                upper_limit=mass_upper_limit,
+                pool_fn=pool_fn,
+            )
+        else:
+            raise ValueError('Spectrum object should have both masses and intens')
 
     @classmethod
     def from_instance(cls, other_instance, **kwargs):
@@ -369,7 +425,7 @@ class MassSpec:
     @property
     def binned_spec(self):
         if not self.has_binned_spec:
-            self.bin_spectrum()  # use default parameters (0.1 bin)
+            self.ensure_binned_spectrum()  # use default parameters (0.1 bin)
         if self._binned_spec_dense_cache is not None:
             return self._binned_spec_dense_cache
         out = np.zeros(int(self._num_bins), dtype=np.float32)
@@ -380,7 +436,7 @@ class MassSpec:
     @property
     def binned_spec_sparse(self):
         if not self.has_binned_spec:
-            self.bin_spectrum()  # use default parameters (0.1 bin)
+            self.ensure_binned_spectrum()  # use default parameters (0.1 bin)
         return self._binned_inds, self._binned_vals
 
     def binned_spec_dense(self, cache=False):
@@ -535,7 +591,10 @@ class MassSpec:
         else:
             meta = {}
         ce_key = self._standardize_ce(self.collision_energy)
-        new_spec = process_spec_file(meta, [(ce_key, self.spec)], merge_specs=False)[ce_key]
+        processed_specs = process_spec_file(meta, [(ce_key, self.spec)], merge_specs=False) or {}
+        new_spec = processed_specs.get(ce_key)
+        if new_spec is None:
+            new_spec = np.empty((0, 2))
         self.masses, self.intens = new_spec[:, 0], new_spec[:, 1]
 
         if denoise: self.denoise(max_num_inten, inten_thresh)
@@ -553,12 +612,8 @@ class MassSpec:
 
     def bin_spectrum(self, mass_upper_limit=1500, num_bins=15000, pool_fn='add'):
         """turn spectrum into binned vectors, and store the binned spectrum (accessible via self.binned_spec)"""
-        if self.has_masses and self.has_intens:
-            binned_spec = bin_spectra([self], upper_limit=mass_upper_limit, num_bins=num_bins, pool_fn=pool_fn)[0]
-            self._set_binned_spec_dense(binned_spec, upper_limit=mass_upper_limit)
-            return binned_spec
-        else:
-            raise ValueError('Spectrum object should have both masses and intens')
+        self.ensure_binned_spectrum(mass_upper_limit=mass_upper_limit, num_bins=num_bins, pool_fn=pool_fn, force=True)
+        return self.binned_spec
 
     def _filtered_binned_sparse(self, ignore_mass=None):
         inds, vals = self.binned_spec_sparse
@@ -583,27 +638,8 @@ class MassSpec:
         vals = vals[vals > 0]
         return -np.sum(vals * np.log(vals + 1e-22))
 
-    def similarity(self, other, ignore_mass=None, metric='entropy'):
-        if metric == 'entropy':
-            return self.entr_sim(other, ignore_mass)
-        elif metric == 'cosine':
-            return self.cos_sim(other, ignore_mass)
-        else:
-            raise ValueError(f'Unknown metric {metric}')
-
-    def cos_sim(self, other, ignore_mass=None):
-        """
-        Compute cosine similarity between two MassSpec object
-
-        Args:
-            other: compared MassSpec object
-            ignore_mass: any peaks with a larger mass will be ignored
-        """
-        self.binned_spec_sparse
-        other.binned_spec_sparse
-        self._check_binned_compatibility(other)
-        self_inds, self_vals = self._filtered_binned_sparse(ignore_mass)
-        other_inds, other_vals = other._filtered_binned_sparse(ignore_mass)
+    @staticmethod
+    def _cos_sim_sparse(self_inds, self_vals, other_inds, other_vals):
         if len(self_vals) == 0 or len(other_vals) == 0:
             return 0.0
 
@@ -613,19 +649,8 @@ class MassSpec:
         norm_other = np.sqrt(np.dot(other_vals, other_vals)) + 1e-22
         return dot / (norm_self * norm_other)
 
-    def entr_sim(self, other, ignore_mass=None):
-        """
-        Compute entropy similarity between two MassSpec object
-
-        Args:
-            other: compared MassSpec object
-            ignore_mass: any peaks with a larger mass will be ignored
-        """
-        self.binned_spec_sparse
-        other.binned_spec_sparse
-        self._check_binned_compatibility(other)
-        self_inds, self_vals = self._filtered_binned_sparse(ignore_mass)
-        other_inds, other_vals = other._filtered_binned_sparse(ignore_mass)
+    @staticmethod
+    def _entr_sim_sparse(self_inds, self_vals, other_inds, other_vals):
         self_sum = self_vals.sum()
         other_sum = other_vals.sum()
         if self_sum <= 0 or other_sum <= 0:
@@ -633,8 +658,8 @@ class MassSpec:
 
         self_probs = self_vals / (self_sum + 1e-22)
         other_probs = other_vals / (other_sum + 1e-22)
-        entropy_self = self._entropy_from_sparse_probs(self_probs)
-        entropy_other = self._entropy_from_sparse_probs(other_probs)
+        entropy_self = MassSpec._entropy_from_sparse_probs(self_probs)
+        entropy_other = MassSpec._entropy_from_sparse_probs(other_probs)
 
         other_lookup = {}
         for ind, prob in zip(other_inds, other_probs):
@@ -655,6 +680,44 @@ class MassSpec:
             mix_prob = float(prob) / 2
             entropy_mix -= mix_prob * np.log(mix_prob + 1e-22)
         return 1 - (2 * entropy_mix - entropy_self - entropy_other) / np.log(4)
+
+    def similarity(self, other, ignore_mass=None, metric='entropy'):
+        if metric == 'entropy':
+            return self.entr_sim(other, ignore_mass)
+        elif metric == 'cosine':
+            return self.cos_sim(other, ignore_mass)
+        else:
+            raise ValueError(f'Unknown metric {metric}')
+
+    def cos_sim(self, other, ignore_mass=None):
+        """
+        Compute cosine similarity between two MassSpec object
+
+        Args:
+            other: compared MassSpec object
+            ignore_mass: any peaks with a larger mass will be ignored
+        """
+        _ = self.binned_spec_sparse
+        _ = other.binned_spec_sparse
+        self._check_binned_compatibility(other)
+        self_inds, self_vals = self._filtered_binned_sparse(ignore_mass)
+        other_inds, other_vals = other._filtered_binned_sparse(ignore_mass)
+        return self._cos_sim_sparse(self_inds, self_vals, other_inds, other_vals)
+
+    def entr_sim(self, other, ignore_mass=None):
+        """
+        Compute entropy similarity between two MassSpec object
+
+        Args:
+            other: compared MassSpec object
+            ignore_mass: any peaks with a larger mass will be ignored
+        """
+        _ = self.binned_spec_sparse
+        _ = other.binned_spec_sparse
+        self._check_binned_compatibility(other)
+        self_inds, self_vals = self._filtered_binned_sparse(ignore_mass)
+        other_inds, other_vals = other._filtered_binned_sparse(ignore_mass)
+        return self._entr_sim_sparse(self_inds, self_vals, other_inds, other_vals)
 
 
 class CompositeMassSpec:
@@ -737,12 +800,25 @@ class CompositeMassSpec:
 
     def process_spec_file(self, parentmass=None, denoise=False, max_num_inten=20, inten_thresh=0.05):
         self.ce_to_merged_ms = {}
+        filtered_ms = {}
         for k, v in self.ce_to_ms.items():
-            self.ce_to_ms[k] = v.process_spec_file(parentmass, denoise, max_num_inten, inten_thresh)
+            processed_ms = v.process_spec_file(parentmass, denoise, max_num_inten, inten_thresh)
+            if processed_ms.num_peaks > 0:
+                filtered_ms[k] = processed_ms
+        self.ce_to_ms = filtered_ms
 
     def bin_spectrum(self, mass_upper_limit=1500, num_bins=15000, pool_fn='add'):
         for v in self.ce_to_ms.values():
             v.bin_spectrum(mass_upper_limit, num_bins, pool_fn)
+
+    def ensure_binned_spectrum(self, mass_upper_limit=1500, num_bins=15000, pool_fn='add', force=False):
+        for v in self.ce_to_ms.values():
+            v.ensure_binned_spectrum(
+                mass_upper_limit=mass_upper_limit,
+                num_bins=num_bins,
+                pool_fn=pool_fn,
+                force=force,
+            )
 
     def nce_to_ev(self, parentmass=None):
         self.ce_to_merged_ms = {}
@@ -821,7 +897,7 @@ class CompositeMassSpec:
                 sim = self[ce].similarity(other, ignore_mass, metric)
                 sims.append(sim)
             if return_ce:
-                best_ce = np.array(self.keys())[np.argmax(sims)]
+                best_ce = list(self.keys())[np.argmax(sims)]
                 return np.max(sims), float(best_ce)
             else:
                 return np.max(sims)
