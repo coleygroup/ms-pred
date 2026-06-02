@@ -1,6 +1,9 @@
 from pathlib import Path
 import json
 import subprocess
+import time
+from http.client import RemoteDisconnected
+from urllib.error import URLError
 
 import matplotlib
 from platformdirs import user_cache_dir
@@ -73,12 +76,21 @@ def candidates_from_pubchem(
         smiles = [_[0] for _ in smiles_inchikey]
     else:
         def smiles_from_pubchem(form):
-            try:
-                compounds = pcp.get_compounds(form, namespace='formula')
-                return [cmpd.smiles for cmpd in compounds]
-                # Was working: return [cmpd.isomeric_smiles for cmpd in compounds]
-            except pcp.BadRequestError:
-                return []
+            for attempt in range(3):
+                try:
+                    compounds = pcp.get_compounds(form, namespace='formula')
+                    smiles = []
+                    for cmpd in compounds:
+                        value = getattr(cmpd, 'isomeric_smiles', None) or getattr(cmpd, 'canonical_smiles', None)
+                        if value:
+                            smiles.append(value)
+                    return smiles
+                except pcp.BadRequestError:
+                    return []
+                except (pcp.ServerError, RemoteDisconnected, URLError):
+                    if attempt == 2:
+                        raise
+                    time.sleep(2 * (attempt + 1))
         try:
             smiles = smiles_from_pubchem(formula)
         except pcp.ServerError: # retry
@@ -374,8 +386,8 @@ def load_real_spec(
     else:
         raise ValueError(f'Unkown spectrum type {real_spec_type}')
 
-    if 'parentmass' in meta or 'PEPMASS' in meta:
-        meta_pmass = meta.get('parentmass', meta.get('PEPMASS'))
+    if 'parentmass' in meta or 'PEPMASS' in meta or 'precursormass' in meta:
+        meta_pmass = meta.get('parentmass', meta.get('PEPMASS', meta.get('precursormass')))
         if precursor_mass is not None:
             precursor_mass = common.merge_mz(precursor_mass, ppm)
             # check if meta is matched
@@ -459,10 +471,10 @@ def elucidation_over_candidates(
     real_spec = load_real_spec(real_spec, real_spec_type, precursor_mass, nce, ppm, nist_path, **kwargs)
     smiles, pred_specs = load_pred_spec(load_dir)
 
-    # transform spec to binned spectrum
-    real_spec.bin_spectrum(pool_fn='max')  # max aggregation for experimental spectra
+    # transform spec to sparse binned spectrum
+    real_spec.ensure_binned_spectrum(pool_fn='max')  # max aggregation for experimental spectra
     for pred_spec in pred_specs:
-        pred_spec.bin_spectrum(pool_fn='add')  # sum aggregation for predicted spectra
+        pred_spec.ensure_binned_spectrum(pool_fn='add')  # sum aggregation for predicted spectra
 
     # get target inchikey (if any)
     if real_smiles is not None:
