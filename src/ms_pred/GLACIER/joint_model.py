@@ -918,25 +918,130 @@ class JointModel(pl.LightningModule):
                 total_hs=total_hs,
                 instruments=instruments if self.embed_instrument else None,
             )
-            inten_out=pred["inten_pred_end_to_end"]
-            frags_pred = pred["frags_pred"]
-            output = inten_out["output"]
-            num_shifts = adduct_mass_shift.shape[1] * self.output_size
-
-            out = {"spec": [], "frag": []}
-            fragments = nn_utils.pad_packed_tensor(frags_pred["fragments"], frags_pred["fragment_count"], 0)
-
-            for i, n in enumerate(frags_pred["fragment_count"]):
-                num_rows = int(n.item()) * num_shifts
-                spec_pred = output[i, :num_rows, :]
-                out_frag = fragments[i, :n].repeat_interleave(num_shifts, dim=0)
-                out["spec"].append(spec_pred)
-                out["frag"].append(out_frag)
+            out = self._assemble_spec_frag(pred, adduct_mass_shift)
 
             if batched_input:
                 return out
             else:
                 return {k: v[0] for k, v in out.items()}
+
+    def _assemble_spec_frag(self, pred, adduct_mass_shifts):
+        """Turn a raw forward() output into per-molecule sparse spec rows + frag masks.
+
+        Shared by ``predict_mol`` (raw-SMILES path) and ``predict_inten_frag_batch``
+        (DataLoader path). Returns ``{"spec": [Tensor[num_rows, 2], ...],
+        "frag": [Tensor[num_rows, num_atoms], ...]}`` with one entry per molecule.
+        """
+        inten_out = pred["inten_pred_end_to_end"]
+        frags_pred = pred["frags_pred"]
+        output = inten_out["output"]
+        num_shifts = adduct_mass_shifts.shape[1] * self.output_size
+
+        out = {"spec": [], "frag": []}
+        fragments = nn_utils.pad_packed_tensor(frags_pred["fragments"], frags_pred["fragment_count"], 0)
+
+        for i, n in enumerate(frags_pred["fragment_count"]):
+            num_rows = int(n.item()) * num_shifts
+            spec_pred = output[i, :num_rows, :]
+            out_frag = fragments[i, :n].repeat_interleave(num_shifts, dim=0)
+            out["spec"].append(spec_pred)
+            out["frag"].append(out_frag)
+        return out
+
+    def predict_inten_frag_batch(self, batch):
+        """Run forward + spec/frag assembly on an already-collated, on-device batch.
+
+        ``batch`` is the dict produced by ``IntenDataset.collate_fn`` (the same keys
+        ``forward`` consumes). Featurization (incl. ``create_graphormer_input``) has
+        already happened in the DataLoader workers, so this only does GPU work.
+        Returns the same ``{"spec": [...], "frag": [...]}`` structure as
+        ``predict_mol`` with ``batched_input=True``.
+        """
+        if not getattr(self, "_predict_prepared", False):
+            self.eval()
+            self.freeze()
+            self._predict_prepared = True
+        with torch.inference_mode():
+            pred = self.forward(
+                batch["graphormer_input"],
+                batch["num_atoms"],
+                batch["adducts"],
+                batch["collision_engs"],
+                root_form_vecs=batch["root_form_vecs"],
+                masses=batch["masses"],
+                adduct_mass_shifts=batch["adduct_mass_shifts"],
+                atom_form_vecs=batch["atom_form_vecs"],
+                adj_matrices=batch["adj_matrices"],
+                atom_hs=batch["atom_hs"],
+                total_hs=batch["total_hs"],
+                instruments=batch["instruments"] if self.embed_instrument else None,
+            )
+            return self._assemble_spec_frag(pred, batch["adduct_mass_shifts"])
+
+    def predict_inten_frag_batch_sparse(self, batch, sparse_k):
+        """Forward + vectorized sparse top-k selection for a collated, on-device batch.
+
+        Equivalent to ``predict_inten_frag_batch`` followed by per-molecule top-k
+        selection, but done as a few batched GPU ops + 3 host transfers instead of a
+        Python loop with one ``topk``/``.cpu()`` per molecule (which serializes ~2*B
+        GPU syncs per batch and starves the GPU). Returns CPU numpy arrays:
+            masses [B, K], intens [B, K], frags [B, K, N] (uint8), counts [B]
+        where for molecule i only the first ``counts[i]`` rows are valid (matching the
+        old behavior of taking ``min(sparse_k, n_rows)`` rows).
+        """
+        if not getattr(self, "_predict_prepared", False):
+            self.eval()
+            self.freeze()
+            self._predict_prepared = True
+        with torch.inference_mode():
+            pred = self.forward(
+                batch["graphormer_input"],
+                batch["num_atoms"],
+                batch["adducts"],
+                batch["collision_engs"],
+                root_form_vecs=batch["root_form_vecs"],
+                masses=batch["masses"],
+                adduct_mass_shifts=batch["adduct_mass_shifts"],
+                atom_form_vecs=batch["atom_form_vecs"],
+                adj_matrices=batch["adj_matrices"],
+                atom_hs=batch["atom_hs"],
+                total_hs=batch["total_hs"],
+                instruments=batch["instruments"] if self.embed_instrument else None,
+            )
+            output = pred["inten_pred_end_to_end"]["output"]  # [B, R, 2]
+            frag_count = pred["frags_pred"]["fragment_count"]  # [B]
+            fragments = nn_utils.pad_packed_tensor(
+                pred["frags_pred"]["fragments"], frag_count, 0
+            )  # [B, max_frag, N]
+
+            B, R, _ = output.shape
+            device = output.device
+            num_shifts = batch["adduct_mass_shifts"].shape[1] * self.output_size
+            num_rows = frag_count * num_shifts  # [B] valid spec rows per molecule
+
+            # Mask padding rows out of the top-k by intensity.
+            row_ar = torch.arange(R, device=device).unsqueeze(0)  # [1, R]
+            valid = row_ar < num_rows.unsqueeze(1)  # [B, R]
+            masses = output[:, :, 0]
+            intens = output[:, :, 1].masked_fill(~valid, float("-inf"))
+
+            k = min(sparse_k, R)
+            top_int, top_idx = torch.topk(intens, k=k, dim=1)  # [B, k]
+            sel_mass = torch.gather(masses, 1, top_idx)  # [B, k]
+            sel_int = torch.where(torch.isfinite(top_int), top_int, torch.zeros_like(top_int))
+
+            # Each selected spec row j maps to fragment j // num_shifts.
+            frag_idx = torch.div(top_idx, num_shifts, rounding_mode="floor")  # [B, k]
+            N = fragments.shape[2]
+            sel_frag = torch.gather(fragments, 1, frag_idx.unsqueeze(-1).expand(B, k, N))  # [B, k, N]
+            counts = torch.clamp(num_rows, max=k)  # [B]
+
+            return {
+                "masses": sel_mass.cpu().numpy(),
+                "intens": sel_int.cpu().numpy(),
+                "frags": sel_frag.bool().cpu().numpy(),
+                "counts": counts.cpu().numpy(),
+            }
     
     def predict_inten(self, graphormer_input, num_atoms, adducts, collision_engs, root_form_vecs, masses, 
                 adduct_mass_shifts, atom_form_vecs, adj_matrices, atom_hs, total_hs, instruments=None, binned_out=False):

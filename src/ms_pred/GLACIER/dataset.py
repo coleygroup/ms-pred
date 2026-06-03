@@ -6,6 +6,7 @@
 """
 
 from pathlib import Path
+from collections import OrderedDict
 import random
 import ast
 from typing import Dict, Any, List, Set
@@ -486,23 +487,27 @@ class TreeProcessor:
 
         degree = torch.tensor(degrees, dtype=torch.long)
 
-        edge_input = torch.zeros([num_atoms, num_atoms, multi_hop_max_dist, bond_feat_dim], dtype=torch.long)
-        bond_feat_tensor_long = attn_edge_type.long()
+        # Build the multi-hop edge features. Work in numpy (parents is already numpy and
+        # numpy scalar/row indexing is far cheaper than torch element assignment in this
+        # O(N^2 * path_len) loop, which dominates create_graphormer_input's runtime).
+        # Integer one-hot values are identical to the torch path -> bit-identical output.
+        bond_feat_np = attn_edge_type.numpy().astype(np.int64)
+        edge_input_np = np.zeros([num_atoms, num_atoms, multi_hop_max_dist, bond_feat_dim], dtype=np.int64)
         for src in range(num_atoms):
+            par_src = parents[src]
             for tgt in range(num_atoms):
-                if tgt == src or parents[src, tgt] == -1:
+                if tgt == src or par_src[tgt] == -1:
                     continue
                 path_nodes = [tgt]
                 cur = tgt
                 while cur != src:
-                    cur = int(parents[src, cur])
+                    cur = int(par_src[cur])
                     path_nodes.append(cur)
                 path_nodes.reverse()
                 max_hops = min(len(path_nodes) - 1, multi_hop_max_dist)
                 for hop in range(max_hops):
-                    u = path_nodes[hop]
-                    v = path_nodes[hop + 1]
-                    edge_input[src, tgt, hop] = bond_feat_tensor_long[u, v]
+                    edge_input_np[src, tgt, hop] = bond_feat_np[path_nodes[hop], path_nodes[hop + 1]]
+        edge_input = torch.from_numpy(edge_input_np)
 
         attn_bias = torch.where(spatial_pos >= spatial_pos_max, -99999, 0.0)
         attn_bias = F.pad(attn_bias, (1, 0, 1, 0), value=0.0)
@@ -882,6 +887,8 @@ class IntenPredDataset(Dataset):
         root_encode: str = "gnn",
         embed_elem_group: bool = False,
         num_workers: int = 0,
+        sort_for_batching: bool = True,
+        feat_cache_size: int = 8192,
         **kwargs,
     ):
         self.df = df.copy()
@@ -889,6 +896,13 @@ class IntenPredDataset(Dataset):
         self.root_encode = root_encode
         self.embed_elem_group = embed_elem_group
         self.num_workers = num_workers
+        # Per-worker cache of featurized molecules so create_graphormer_input()
+        # runs once per unique (smiles, adduct), not once per (mol, collision-energy)
+        # row. Effective because entries are sorted so identical molecules are
+        # contiguous and each batch is dispatched to a single DataLoader worker.
+        self.sort_for_batching = sort_for_batching
+        self.feat_cache_size = feat_cache_size
+        self._feat_cache = OrderedDict()
 
         if "instrument" not in self.df.columns:
             self.df["instrument"] = "Unknown"
@@ -957,21 +971,61 @@ class IntenPredDataset(Dataset):
 
         logging.info(f"Prepared {len(self.entries)} prediction entries from {len(self.df)} labels rows.")
 
+        if self.sort_for_batching:
+            # Sort by (heavy-atom count, smiles) so (a) identical molecules are
+            # contiguous -> within-batch featurization cache hits, and (b) similarly
+            # sized molecules share a batch -> less graphormer padding waste.
+            n_atoms_cache = {}
+
+            def _num_atoms(smi: str) -> int:
+                if smi not in n_atoms_cache:
+                    m = Chem.MolFromSmiles(smi)
+                    n_atoms_cache[smi] = m.GetNumAtoms() if m is not None else 0
+                return n_atoms_cache[smi]
+
+            order = sorted(
+                range(len(self.entries)),
+                key=lambda i: (_num_atoms(self.entries[i]["smiles"]), self.entries[i]["smiles"]),
+            )
+            self.entries = [self.entries[i] for i in order]
+            self.spec_names = [self.spec_names[i] for i in order]
+
     def __len__(self):
         return len(self.entries)
 
+    def _featurize_cached(self, entry):
+        """Featurize molecule with a small per-worker LRU keyed on (smiles, adduct).
+
+        The graphormer input / fragment engine / form vectors depend only on the
+        molecule + adduct, not the collision energy, so multiple collision-energy
+        rows for the same molecule reuse one featurization. The returned dict is
+        shallow-copied per call so the caller can set a row-specific collision
+        energy without mutating the cached object.
+        """
+        key = (entry["smiles"], entry["adduct"])
+        feat = self._feat_cache.get(key)
+        if feat is None:
+            tree = {
+                "root_canonical_smiles": entry["smiles"],
+                "adduct": entry["adduct"],
+                "collision_energy": entry["collision_energy"],
+            }
+            feat = self.tree_processor.featurize_tree(
+                tree,
+                include_inten_targs=False,
+                include_frag_targs=False,
+            )
+            self._feat_cache[key] = feat
+            if self.feat_cache_size and len(self._feat_cache) > self.feat_cache_size:
+                self._feat_cache.popitem(last=False)
+        else:
+            self._feat_cache.move_to_end(key)
+        return feat
+
     def __getitem__(self, idx: int):
         entry = self.entries[idx]
-        tree = {
-            "root_canonical_smiles": entry["smiles"],
-            "adduct": entry["adduct"],
-            "collision_energy": entry["collision_energy"],
-        }
-        feat = self.tree_processor.featurize_tree(
-            tree,
-            include_inten_targs=False,
-            include_frag_targs=False,
-        )
+        feat = dict(self._featurize_cached(entry))
+        feat["collision_energy"] = entry["collision_energy"]
         outdict = {
             "name": entry["name"],
             "adduct": self.name_to_adducts[entry["name"]],
