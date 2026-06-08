@@ -42,6 +42,7 @@ dependencies = [
 cpu = ["torch==2.6.0", "torchvision==0.21.0", "dgl", "torch-scatter", "torch-sparse", "torch-geometric"]
 cu124 = ["torch==2.6.0+cu124", "torchvision==0.21.0+cu124", "dgl", "torch-scatter", "torch-sparse", "torch-geometric"]
 cu118 = ["torch==2.6.0+cu118", "torchvision==0.21.0+cu118", "dgl", "torch-scatter", "torch-sparse", "torch-geometric"]
+mces = ["myopic-mces>=1.1.0", "pulp[cbc]>=2.7"]
 test = ["pytest>=8", "pytest-xdist"]
 
 [tool.uv]
