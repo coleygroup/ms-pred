@@ -1,4 +1,4 @@
-launcher_args: {experiment_name: marason_inten_msg,
+launcher_args: {experiment_name: marason_msg_allev,
   script_name: "src/ms_pred/marason/train_inten.py",
   slurm_script: launcher_scripts/generic_slurm.sh, 
   launch_method: local,

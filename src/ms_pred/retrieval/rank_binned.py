@@ -19,7 +19,7 @@ def get_args():
     )
     parser.add_argument(
         "--binned-pred-file",
-        default="results/dag_inten_nist20/split_1_rnd1/elucidation_broad_distress/binned_preds.p",
+        default="results/iceberg_nist20/split_1_rnd1/elucidation_broad_distress/binned_preds.p",
     )
     parser.add_argument("--outfile", default=None)
     parser.add_argument("--dist-fn", default="cos")

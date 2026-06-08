@@ -34,7 +34,7 @@ def get_args():
     parser.add_argument(
         "--checkpoint-pth",
         help="name of checkpoint file",
-        default="results/2022_06_22_pretrain/version_3/epoch=99-val_loss=0.87.ckpt",
+        default="results/debug_dag_inten/split_1/ckpt/inten/best.ckpt",
     )
     parser.add_argument(
         "--magma-dag-folder",

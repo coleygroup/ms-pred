@@ -36,7 +36,7 @@ def get_args():
     parser.add_argument(
         "--checkpoint-pth",
         help="name of checkpoint file",
-        default="results/2022_06_22_pretrain/version_3/epoch=99-val_loss=0.87.ckpt",
+        default="results/debug_marason_inten/split_1/ckpt/inten/best.ckpt",
     )
     parser.add_argument(
         "--magma-dag-folder",
@@ -48,7 +48,7 @@ def get_args():
     parser.add_argument("--add-ref", default=False, action="store_true")
     parser.add_argument("--max-ref-count", default=10, action="store", type=int)
     parser.add_argument("--ref-dir", default="data/msg/closest_neighbors/infinite")
-    parser.add_argument("--inten-folder", default="results/dag_nist20/split_1_rnd1/preds_train_100_inten.hdf5")
+    parser.add_argument("--inten-folder", default="results/iceberg_nist20/split_1_rnd1/preds_train_100_inten.hdf5")
     parser.add_argument(
         "--subset-datasets",
         default="none",

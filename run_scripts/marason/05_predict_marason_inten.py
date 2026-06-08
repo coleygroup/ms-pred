@@ -22,8 +22,8 @@ for test_entry in test_entries:
     folder = test_entry['folder']
 
     base_formula_folder = Path(f"results/marason_{dataset}")
-    res_folder = Path(f"results/marason_inten_{dataset}/")
-    model = res_folder / folder / "version_0/best.ckpt"
+    res_folder = Path(f"results/marason_{dataset}/")
+    model = res_folder / folder / "ckpt/inten/best.ckpt"
     if test_entry["folder"] == "split_1_rnd1":
         ref_dir = "data/closest_neighbors/infinite"
     elif test_entry["split"] == "scaffold_1_rnd1":
@@ -43,7 +43,7 @@ for test_entry in test_entries:
         print(model)
         continue
 
-    save_dir = model.parent.parent
+    save_dir = res_folder / folder
 
     save_dir = save_dir / "preds"
 

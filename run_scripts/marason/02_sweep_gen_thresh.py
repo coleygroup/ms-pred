@@ -47,10 +47,10 @@ if debug:
 for res_entry in res_entries:
     res_folder = Path(res_entry['folder'])
     dataset = res_entry['dataset']
-    models = sorted(list((res_folder / "version_0").rglob("*.ckpt")))
+    models = sorted(list((res_folder / "ckpt" / "gen").rglob("*.ckpt")))
     split = res_entry['test_split']
     for model in models:
-        save_dir_base = model.parent.parent
+        save_dir_base = res_folder
 
         save_dir = save_dir_base / "inten_thresh_sweep"
         save_dir.mkdir(exist_ok=True)

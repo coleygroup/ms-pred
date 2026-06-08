@@ -21,17 +21,17 @@ universal_args:
 iterative_args:
 
   -  split-name: [split_1.tsv]
-     checkpoint-pth: [results/marason_nist20/split_1_rnd1/version_0/best.ckpt]
+     checkpoint-pth: [results/marason_nist20/split_1_rnd1/ckpt/gen/best.ckpt]
      save-dir: [split_1_rnd1/preds_train_100]
 
   # -  split-name: [split_1.tsv]
-  #    checkpoint-pth: [results/marason_nist20/split_1_rnd2/version_0/best.ckpt]
+  #    checkpoint-pth: [results/marason_nist20/split_1_rnd2/ckpt/gen/best.ckpt]
   #    save-dir: [split_1_rnd2/preds_train_100]
 
   # -  split-name: [split_1.tsv]
-  #    checkpoint-pth: [results/marason_nist20/split_1_rnd3/version_0/best.ckpt]
+  #    checkpoint-pth: [results/marason_nist20/split_1_rnd3/ckpt/gen/best.ckpt]
   #    save-dir: [split_1_rnd3/preds_train_100]
 
   # -  split-name: [scaffold_1.tsv]
-  #    checkpoint-pth: [results/marason_nist20/scaffold_1/version_0/best.ckpt]
+  #    checkpoint-pth: [results/marason_nist20/scaffold_1/ckpt/gen/best.ckpt]
   #    save-dir: [scaffold_1/preds_train_100]

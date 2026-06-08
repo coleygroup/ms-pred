@@ -3,12 +3,12 @@
 
 example: # modify example to your hostname
   python_path: '/path/to/your/python'
-  gen_ckpt: '/path/to/dag_nist20/split_1_rnd1/version_0/best.ckpt'
-  inten_ckpt: '/path/to/dag_inten_nist20/split_1_rnd1/version_1/best.ckpt'
+  gen_ckpt: '/path/to/iceberg_nist20/split_1_rnd1/ckpt/gen/best.ckpt'
+  inten_ckpt: '/path/to/iceberg_nist20/split_1_rnd1/ckpt/inten_contr/best.ckpt'
   conf_models:  # confidence models. Could be empty if you don't want to use them
-    1: '/path/to/dag_inten_nist20/split_1_rnd1/retrieval_confidence/lr_conf_k1.joblib'
-    3: '/path/to/dag_inten_nist20/split_1_rnd1/retrieval_confidence/lr_conf_k3.joblib'
-    5: '/path/to/dag_inten_nist20/split_1_rnd1/retrieval_confidence/lr_conf_k5.joblib'
+    1: '/path/to/iceberg_nist20/split_1_rnd1/retrieval_confidence/lr_conf_k1.joblib'
+    3: '/path/to/iceberg_nist20/split_1_rnd1/retrieval_confidence/lr_conf_k3.joblib'
+    5: '/path/to/iceberg_nist20/split_1_rnd1/retrieval_confidence/lr_conf_k5.joblib'
   conf_thresholds:  # medium and high confidence thresholds
     1: [ 0.810, 0.9375 ]
     3: [ 0.470, 0.7100 ]
@@ -29,12 +29,12 @@ example: # modify example to your hostname
 # below are example configurations in Coley group nodes
 molgpu01:
   python_path: '/home/runzhong/mambaforge/envs/ms-gen-torch24/bin/python'
-  gen_ckpt: '/home/runzhong/ms-models/iceberg_results_20250816/dag_nist20/split_1_rnd1/version_0/best.ckpt'
-  inten_ckpt: '/home/runzhong/ms-models/iceberg_results_20250816/dag_inten_nist20/split_1_rnd1/version_1/best.ckpt'
+  gen_ckpt: '/home/runzhong/ms-models/iceberg_results_20260413/iceberg_nist23/split_1_rnd1/ckpt/gen/best.ckpt'
+  inten_ckpt: '/home/runzhong/ms-models/iceberg_results_20260413/iceberg_nist23/split_1_rnd1/ckpt/inten_contr/best.ckpt'
   conf_models:
-    1: '/home/runzhong/ms-models/iceberg_results_20250816/dag_inten_nist20/split_1_rnd1/retrieval_confidence/lr_conf_k1.joblib'
-    3: '/home/runzhong/ms-models/iceberg_results_20250816/dag_inten_nist20/split_1_rnd1/retrieval_confidence/lr_conf_k3.joblib'
-    5: '/home/runzhong/ms-models/iceberg_results_20250816/dag_inten_nist20/split_1_rnd1/retrieval_confidence/lr_conf_k5.joblib'
+    1: '/home/runzhong/ms-models/iceberg_results_20260413/iceberg_nist23/split_1_rnd1/retrieval_confidence/lr_conf_k1.joblib'
+    3: '/home/runzhong/ms-models/iceberg_results_20260413/iceberg_nist23/split_1_rnd1/retrieval_confidence/lr_conf_k3.joblib'
+    5: '/home/runzhong/ms-models/iceberg_results_20260413/iceberg_nist23/split_1_rnd1/retrieval_confidence/lr_conf_k5.joblib'
   conf_thresholds:
     1: [ 0.810, 0.9375 ]
     3: [ 0.470, 0.7100 ]

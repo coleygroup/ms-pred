@@ -44,7 +44,7 @@ def get_args():
     parser.add_argument(
         "--checkpoint-pth",
         help="name of checkpoint file",
-        default="results/debug_dag_nist20/split_1/version_0/best.ckpt",
+        default="results/debug_marason/split_1/ckpt/gen/best.ckpt",
     )
     parser.add_argument("--dataset-name", default="gnps2015_debug")
     parser.add_argument("--dataset-labels", default="labels.tsv")

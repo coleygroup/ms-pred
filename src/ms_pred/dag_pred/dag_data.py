@@ -822,7 +822,7 @@ class IntenContrDataset(DAGDataset):
         num_workers=0,
         use_ray: bool = False,
         num_decoys: int = 7,
-        decoy_path: str = 'results/dag_nist20/split_1_rnd1/preds_train_100/decoy_tree_preds/decoy_tree_preds.hdf5',
+        decoy_path: str = 'results/iceberg_nist20/split_1_rnd1/preds_train_100/decoy_tree_preds/decoy_tree_preds.hdf5',
         decoy_h5_nums: int=10,
         **kwargs,
     ):

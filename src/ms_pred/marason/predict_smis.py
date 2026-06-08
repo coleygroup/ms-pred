@@ -56,12 +56,12 @@ def get_args():
     parser.add_argument(
         "--gen-checkpoint",
         help="name of checkpoint file",
-        default="results/2022_06_22_pretrain/version_3/epoch=99-val_loss=0.87.ckpt",
+        default="results/debug_marason/split_1/ckpt/gen/best.ckpt",
     )
     parser.add_argument(
         "--inten-checkpoint",
         help="name of checkpoint file",
-        default="results/2022_06_22_pretrain/version_3/epoch=99-val_loss=0.87.ckpt",
+        default="results/debug_marason_inten/split_1/ckpt/inten/best.ckpt",
     )
     parser.add_argument("--dataset-name", default=None)
     parser.add_argument("--dataset-labels", default="labels.tsv")

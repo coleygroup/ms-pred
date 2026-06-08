@@ -1,4 +1,4 @@
-launcher_args: {experiment_name: marason_inten_nist20,
+launcher_args: {experiment_name: marason_nist20,
   script_name: "src/ms_pred/marason/test_inten.py",
   slurm_script: launcher_scripts/generic_slurm.sh, 
   launch_method: local,
@@ -30,9 +30,9 @@ universal_args:
   reference-dir: ["data/closest_neighbors/infinite"]
   filter-test: [false]
   logger: ["marason_inten_test"]
-  test-checkpoint: ["results/marason_inten_nist20/split_1_rnd1/version_0/best.ckpt"]
+  test-checkpoint: ["results/marason_nist20/split_1_rnd1/ckpt/inten/best.ckpt"]
   # uncomment the next line if you want to compare the visualization of the outputs of different models
-  # test-checkpoint2: ["results/marason_inten_nist20/split_1_rnd1/version_3/best.ckpt"]
+  # test-checkpoint2: ["results/marason_nist20/split_1_rnd1/ckpt/inten/best.ckpt"]
   draw: [false]
   # save-path: ["baseline.csv"]
   save-path: ["marason.csv"]
