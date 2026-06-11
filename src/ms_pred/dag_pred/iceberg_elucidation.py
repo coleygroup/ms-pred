@@ -273,7 +273,10 @@ def iceberg_prediction(
         df.to_csv(save_dir / f'cands_df_{exp_name}.tsv', sep='\t', index=False)
 
         # run iceberg to generate in-silico spectrum
-        cmd = (f'''{python_path} src/ms_pred/dag_pred/predict_smis.py \\
+        # Resolve predict_smis.py relative to this package, not the current working
+        # directory, so it also works when ms_pred is pip-installed (no src/ checkout).
+        predict_script = Path(__file__).resolve().parent / "predict_smis.py"
+        cmd = (f'''{python_path} {predict_script} \\
                --batch-size {batch_size} \\
                --num-workers {num_workers} \\
                --dataset-labels {save_dir / f"cands_df_{exp_name}.tsv"} \\

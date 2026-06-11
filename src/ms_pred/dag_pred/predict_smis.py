@@ -78,7 +78,7 @@ def predict():
     save_dir = Path(kwargs["save_dir"])
     debug = kwargs["debug"]
     common.setup_logger(save_dir, log_name="joint_pred.log", debug=debug)
-    pl.utilities.seed.seed_everything(kwargs.get("seed"))
+    pl.seed_everything(kwargs.get("seed"))
 
     # Dump args
     yaml_args = yaml.dump(kwargs)
@@ -195,7 +195,8 @@ def predict():
             else:
                 device = "cpu"
             model.to(device)
-            torch.cuda.set_device(gpu_id) # avoids error in pe_embedding under multithreading. 
+            if gpu and avail_gpu_num > 0:
+                torch.cuda.set_device(gpu_id)  # avoids error in pe_embedding under multithreading
 
             # for batch in batched_entries:
             smis, spec_names, colli_eng_vals, adducts, instruments, precursor_mzs, h5_names = list(zip(*batch))
