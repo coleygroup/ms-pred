@@ -18,7 +18,7 @@ import ms_pred.magma.fragmentation as fragmentation
 
 # RDKit imports
 from rdkit import Chem
-from rdkit.Chem import Draw
+from rdkit.Chem import Draw, rdMolDescriptors
 from rdkit.Chem.Draw import rdMolDraw2D
 
 # -----------------------------------------------------------------------------
@@ -137,6 +137,204 @@ def prepare_user_spectra(
 
     ev_to_spec = CompositeMassSpec(all_specs)
     return ev_to_spec
+
+
+def smiles_to_lookup_keys(smiles: str) -> Dict[str, str]:
+    """
+    Parse a SMILES string and return canonical SMILES, molecular formula,
+    and InChIKey for atlas lookup.
+
+    Canonicalization matches what joint_model.predict_mol does when building
+    the atlas: SMILES -> InChI -> tautomer-canonical SMILES (via
+    common.smiles_from_inchi). Without this round-trip, tautomer-equivalent
+    user input misses atlas entries whose InChIKey was computed post-canon.
+    """
+    raw_mol = Chem.MolFromSmiles(smiles)
+    if raw_mol is None:
+        raise ValueError("Invalid SMILES")
+
+    inchi = common.inchi_from_smiles(smiles)
+    canonical_smiles = common.smiles_from_inchi(inchi) if inchi else ""
+    if not canonical_smiles:
+        canonical_smiles = Chem.MolToSmiles(raw_mol)
+    canon_mol = Chem.MolFromSmiles(canonical_smiles) or raw_mol
+
+    return {
+        "canonical_smiles": canonical_smiles,
+        "formula": rdMolDescriptors.CalcMolFormula(canon_mol),
+        "inchikey": Chem.MolToInchiKey(canon_mol),
+    }
+
+
+def _canonicalize_smiles_safe(smi: str) -> str:
+    if not smi:
+        return ""
+    mol = Chem.MolFromSmiles(smi)
+    if mol is None:
+        return ""
+    return Chem.MolToSmiles(mol)
+
+
+def inchikey_in_mgf(mgf_path: Path, inchikey: str) -> bool:
+    """
+    Cheap existence check: scan an .mgf file line-by-line for
+    'INCHIKEY=<inchikey>'. Lets us answer "structure not in atlas"
+    without paying the full MGF parse.
+    """
+    if not inchikey:
+        return False
+    needle = f"INCHIKEY={inchikey}"
+    try:
+        with open(mgf_path, "r") as f:
+            for line in f:
+                if needle in line:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def extract_mgf_blocks_by_inchikey(
+    mgf_path: Path, inchikey: str
+) -> List[Tuple[Dict[str, str], np.ndarray]]:
+    """
+    Single-pass scan over an .mgf file. Only blocks whose
+    INCHIKEY header matches `inchikey` are materialized.
+    Returns list of (meta_dict, peaks_array) tuples — same shape as
+    common.parse_spectra_mgf but limited to the matching structure.
+    """
+    needle = f"INCHIKEY={inchikey}"
+    blocks: List[Tuple[Dict[str, str], np.ndarray]] = []
+
+    in_block = False
+    meta: Dict[str, str] = {}
+    peaks: List[Tuple[float, float]] = []
+    matches = False
+
+    with open(mgf_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if line == "BEGIN IONS":
+                in_block = True
+                meta = {}
+                peaks = []
+                matches = False
+                continue
+            if line == "END IONS":
+                if matches and peaks:
+                    blocks.append((meta, np.asarray(peaks, dtype=float)))
+                in_block = False
+                continue
+            if not in_block:
+                continue
+            if "=" in line and not line[0].isdigit():
+                k, _, v = line.partition("=")
+                meta[k] = v
+                if line == needle:
+                    matches = True
+                continue
+            # peak row
+            if matches:
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        peaks.append((float(parts[0]), float(parts[1])))
+                    except ValueError:
+                        pass
+
+    return blocks
+
+
+def build_composite_from_blocks(
+    blocks: List[Tuple[Dict[str, str], np.ndarray]]
+) -> Tuple[Dict[str, Any], CompositeMassSpec] | Tuple[None, None]:
+    """
+    Convert raw (meta, peaks) blocks for a single structure into
+    (representative_meta, CompositeMassSpec). Mirrors the per-block
+    logic of load_library_spectra_grouped but skips the grouping step
+    since all blocks already share the same structure.
+    """
+    if not blocks:
+        return None, None
+
+    specs: List[MassSpec] = []
+    rep_meta: Dict[str, Any] = {}
+
+    for meta, peaks in blocks:
+        if len(peaks) == 0:
+            continue
+        ce_str = meta.get("COLLISION_ENERGY")
+        if ce_str is None:
+            continue
+        try:
+            ce_val = float(ce_str)
+        except ValueError:
+            continue
+
+        masses = peaks[:, 0]
+        intens = peaks[:, 1]
+
+        frags_raw = meta.get("FRAGS")
+        int_frags = None
+        if frags_raw is not None:
+            try:
+                frag_tokens = [
+                    tok for tok in frags_raw.replace(",", " ").split() if tok
+                ]
+                frags = [int(tok) for tok in frag_tokens]
+                if len(frags) == len(masses):
+                    int_frags = np.asarray(frags, dtype=int)
+            except Exception:
+                int_frags = None
+
+        ms = MassSpec(
+            collision_energy=ce_val,
+            root_canonical_smiles=meta.get("SMILES"),
+            adduct=meta.get("ADDUCT"),
+            remark=meta.get("DESCRIPTION"),
+            masses=masses,
+            intens=intens,
+            int_frags=int_frags,
+            **{
+                k: v
+                for k, v in meta.items()
+                if k not in ["SMILES", "ADDUCT", "DESCRIPTION", "COLLISION_ENERGY"]
+            },
+        )
+        specs.append(ms)
+
+        if not rep_meta:
+            rep_meta = dict(meta)
+            rep_meta.pop("COLLISION_ENERGY", None)
+
+    if not specs:
+        return None, None
+    return rep_meta, CompositeMassSpec(specs)
+
+
+def find_structure_in_library(
+    grouped: Dict[str, Dict[str, Any]],
+    inchikey: str,
+    canonical_smiles: str,
+) -> Dict[str, Any] | None:
+    """
+    Locate a structure in a grouped library dict by InChIKey (preferred)
+    or canonical SMILES.
+    """
+    if inchikey:
+        for info in grouped.values():
+            if info["meta"].get("INCHIKEY") == inchikey:
+                return info
+    if canonical_smiles:
+        for info in grouped.values():
+            lib_smi = info["meta"].get("SMILES", "")
+            if lib_smi == canonical_smiles:
+                return info
+            if _canonicalize_smiles_safe(lib_smi) == canonical_smiles:
+                return info
+    return None
 
 
 def _structure_key(meta: Dict[str, Any]) -> str:
@@ -1208,6 +1406,19 @@ def fragment_svg():
     except Exception:
         return jsonify({"error": "Invalid 'frag_id'"}), 400
 
+    # Optional sizing + chemistry context (used by the SMILES lookup panel).
+    try:
+        size_px = int(data.get("size", 300))
+    except Exception:
+        size_px = 300
+    size_px = max(120, min(800, size_px))
+
+    adduct = (data.get("adduct") or "").strip()
+    try:
+        mz_obs = float(data.get("mz")) if data.get("mz") is not None else None
+    except Exception:
+        mz_obs = None
+
     try:
         # Build fragment engine and get highlight information
         engine = fragmentation.FragmentEngine(smiles, mol_str_type="smiles", mol_str_canonicalized=True)
@@ -1218,15 +1429,157 @@ def fragment_svg():
         hbonds = list(draw_dict.get("hbonds") or [])
 
         # Draw highlighted substructure as SVG
-        d2d = rdMolDraw2D.MolDraw2DSVG(300, 300)
+        d2d = rdMolDraw2D.MolDraw2DSVG(size_px, size_px)
         d2d.DrawMolecule(mol, highlightAtoms=hatoms, highlightBonds=hbonds)
         d2d.FinishDrawing()
         svg = d2d.GetDrawingText()
 
-        return jsonify({"svg": svg})
+        # Compute fragment formula, with h-shift inferred from observed m/z if given.
+        h_shift = 0
+        if mz_obs is not None:
+            try:
+                base_mass = float(engine.single_mass(frag_id_int))
+                h_mass = 1.00784
+                h_shift = int(round((mz_obs - base_mass) / h_mass))
+            except Exception:
+                h_shift = 0
+        try:
+            base_formula = engine.formula_from_frag(frag_id_int, h_shift=h_shift)
+        except Exception:
+            base_formula = ""
+
+        charge_sign = ""
+        if adduct.endswith("+"):
+            charge_sign = "+"
+        elif adduct.endswith("-"):
+            charge_sign = "-"
+
+        return jsonify({
+            "svg": svg,
+            "formula": base_formula,
+            "h_shift": h_shift,
+            "charge_sign": charge_sign,
+            "formula_display": (base_formula + charge_sign) if base_formula else "",
+        })
     except Exception as e:
         # Best-effort error message for debugging
         return jsonify({"error": f"Failed to draw fragment: {e}"}), 500
+
+
+@app.route("/api/query_smiles", methods=["GET"])
+def api_query_smiles():
+    """
+    Look up the predicted spectrum for a SMILES in the precomputed atlas.
+
+    Query params:
+        smiles (required)
+        adduct (default '[M+H]+')
+        nce    (default 50, NCE %)
+        instrument (default 'Orbitrap', currently passthrough)
+
+    Returns JSON with canonical_smiles, formula, inchikey, adduct, instrument,
+    requested_nce, requested_ce_ev, matched_ce_ev, available_ces, pred_spectrum.
+    """
+    smiles = (request.args.get("smiles") or "").strip()
+    adduct = (request.args.get("adduct") or "[M+H]+").strip()
+    instrument = (request.args.get("instrument") or "Orbitrap").strip()
+    nce_raw = request.args.get("nce", "50")
+
+    if not smiles:
+        return jsonify({"error": "Missing 'smiles'"}), 400
+
+    if adduct not in ADDUCT_TO_DIR:
+        return jsonify({
+            "error": f"Unsupported adduct '{adduct}'. Supported: {list(ADDUCT_TO_DIR.keys())}"
+        }), 400
+
+    try:
+        nce = float(nce_raw)
+    except ValueError:
+        return jsonify({"error": f"Invalid nce '{nce_raw}'"}), 400
+
+    try:
+        keys = smiles_to_lookup_keys(smiles)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    formula = keys["formula"]
+    canonical_smiles = keys["canonical_smiles"]
+    inchikey = keys["inchikey"]
+
+    mgf_path = get_mgf_path_for_formula(formula, adduct)
+    if not mgf_path.exists():
+        return jsonify({
+            "error": f"No predicted spectra found for formula {formula}",
+            "formula": formula,
+            "canonical_smiles": canonical_smiles,
+            "inchikey": inchikey,
+            "adduct": adduct,
+        }), 404
+
+    # NCE -> eV via precursor m/z (formula + adduct mass offset)
+    try:
+        precursor_mz = common.formula_mass(formula) + common.ion2mass[adduct]
+        ce_ev = float(common.nce_to_ev(nce, precursor_mz))
+    except Exception as e:
+        return jsonify({"error": f"Failed to convert NCE to eV: {e}"}), 500
+
+    # Single-pass MGF scan that materializes only blocks matching `inchikey`.
+    # Avoids paying the ~10s full-parse cost for 400k-line MGFs.
+    try:
+        blocks = extract_mgf_blocks_by_inchikey(mgf_path, inchikey)
+    except Exception as e:
+        return jsonify({"error": f"Failed to scan MGF: {e}"}), 500
+
+    if not blocks:
+        return jsonify({
+            "error": f"Structure not present in atlas for {formula} / {adduct}",
+            "formula": formula,
+            "canonical_smiles": canonical_smiles,
+            "inchikey": inchikey,
+            "adduct": adduct,
+        }), 404
+
+    rep_meta, lib_specs = build_composite_from_blocks(blocks)
+    if lib_specs is None:
+        return jsonify({"error": "Matched structure has no usable spectra"}), 404
+
+    all_ms = list(lib_specs.values())
+    available_ces = sorted({float(getattr(ms, "collision_energy", 0.0)) for ms in all_ms})
+    best_ms = min(all_ms, key=lambda ms: abs(float(getattr(ms, "collision_energy", 0.0)) - ce_ev))
+    matched_ce = float(getattr(best_ms, "collision_energy", 0.0))
+
+    ce_warning = None
+    if abs(matched_ce - ce_ev) > 5.0:
+        ce_warning = (
+            f"No spectrum within ±5 eV of {ce_ev:.1f} (NCE {nce:g}%); "
+            f"showing closest available ({matched_ce:g} eV)."
+        )
+
+    single = CompositeMassSpec([best_ms])
+    payload_list = serialize_pred_spectra_for_frontend(single)
+    pred_spectrum = payload_list[0] if payload_list else None
+
+    return jsonify({
+        "formula": formula,
+        "canonical_smiles": canonical_smiles,
+        "inchikey": inchikey,
+        "adduct": adduct,
+        "instrument": instrument,
+        "requested_nce": nce,
+        "requested_ce_ev": ce_ev,
+        "precursor_mz": precursor_mz,
+        "matched_ce_ev": matched_ce,
+        "available_ces": available_ces,
+        "ce_warning": ce_warning,
+        "pred_spectrum": pred_spectrum,
+        "library_meta": {
+            "SMILES": rep_meta.get("SMILES", "") if rep_meta else "",
+            "INCHIKEY": rep_meta.get("INCHIKEY", "") if rep_meta else "",
+            "FORMULA": rep_meta.get("FORMULA", "") if rep_meta else "",
+            "ADDUCT": rep_meta.get("ADDUCT", "") if rep_meta else "",
+        },
+    })
 
 
 if __name__ == "__main__":

@@ -2631,6 +2631,396 @@
             });
         });
     });
+
+    // ---------------- SMILES lookup panel ----------------
+    document.addEventListener("DOMContentLoaded", function () {
+        const btn = document.getElementById("smi-lookup-btn");
+        if (!btn) return;
+
+        const smilesInput = document.getElementById("smi-smiles");
+        const adductSel = document.getElementById("smi-adduct");
+        const nceInput = document.getElementById("smi-nce");
+        const instSel = document.getElementById("smi-instrument");
+        const statusEl = document.getElementById("smi-status");
+        const resultEl = document.getElementById("smi-result");
+        const errorEl = document.getElementById("smi-error");
+        const molImg = document.getElementById("smi-mol-img");
+        const fragPane = document.getElementById("smi-frag-pane");
+        const fragTitle = document.getElementById("smi-frag-title");
+        const fragAnchor = document.getElementById("smi-frag-anchor");
+        const metaEl = document.getElementById("smi-meta");
+        const ceWarnEl = document.getElementById("smi-ce-warning");
+        const plotContainer = document.getElementById("smi-plot-container");
+        const plotWrapper = document.getElementById("smi-plot-wrapper");
+        const FRAG_WIDTH = 220;
+        const FRAG_GAP_PX = 12;   // vertical gap between plot and fragment box
+
+        // Palette aligned with the mirror plot used elsewhere on this page.
+        const PEAK_COLOR = "#58595B";          // neutral dark gray
+        const PEAK_COLOR_CLICKABLE = "#58595B"; // same; clickability shown via cursor + tooltip
+        const PEAK_COLOR_SELECTED = "#059669"; // emerald-600, high contrast vs #58595B
+        const AXIS_COLOR = "#374151";
+        const TEXT_COLOR = "#374151";
+
+        let selectedPeakIdx = -1;
+        const peakNodeRefs = []; // populated per render: array of { line, fragId, mz }
+
+        function escapeHtml(s) {
+            return String(s == null ? "" : s)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;");
+        }
+
+        // "C3OH" + "+" -> "C<sub>3</sub>OH<sup>+</sup>"
+        function prettyFormula(formula, chargeSign) {
+            const esc = escapeHtml(formula || "");
+            const sub = esc.replace(/(\d+)/g, "<sub>$1</sub>");
+            const charge = chargeSign ? '<sup>' + escapeHtml(chargeSign) + '</sup>' : "";
+            return sub + charge;
+        }
+
+        function showError(msg) {
+            errorEl.textContent = msg;
+            errorEl.style.display = "block";
+            resultEl.style.display = "none";
+        }
+        function clearError() {
+            errorEl.textContent = "";
+            errorEl.style.display = "none";
+        }
+
+        // Pick a "nice" x-axis step that yields integer-ish multiples of 10/20/25/50/...
+        function niceTickStep(range) {
+            if (!isFinite(range) || range <= 0) return 1;
+            const target = range / 6; // aim for ~6 ticks across the range
+            const pow = Math.pow(10, Math.floor(Math.log10(target)));
+            const norm = target / pow;
+            let step;
+            if (norm < 1.5) step = 1;
+            else if (norm < 3) step = 2;
+            else if (norm < 4) step = 2.5;
+            else if (norm < 7.5) step = 5;
+            else step = 10;
+            return step * pow;
+        }
+
+        function clearSelection() {
+            if (selectedPeakIdx >= 0 && peakNodeRefs[selectedPeakIdx]) {
+                const ref = peakNodeRefs[selectedPeakIdx];
+                ref.line.setAttribute("stroke", ref.fragId != null ? PEAK_COLOR_CLICKABLE : PEAK_COLOR);
+                ref.line.setAttribute("stroke-width", "1.5");
+            }
+            selectedPeakIdx = -1;
+        }
+
+        function selectPeak(idx) {
+            clearSelection();
+            const ref = peakNodeRefs[idx];
+            if (!ref) return;
+            ref.line.setAttribute("stroke", PEAK_COLOR_SELECTED);
+            ref.line.setAttribute("stroke-width", "4");
+            selectedPeakIdx = idx;
+            positionFragNearPeak(ref.line);
+        }
+
+        function positionFragNearPeak(peakLine) {
+            if (!peakLine || !plotWrapper) return;
+            const peakRect = peakLine.getBoundingClientRect();
+            const wrapRect = plotWrapper.getBoundingClientRect();
+            const peakXInWrap = (peakRect.left + peakRect.width / 2) - wrapRect.left;
+            const maxLeft = Math.max(0, wrapRect.width - FRAG_WIDTH);
+            const left = Math.max(0, Math.min(maxLeft, peakXInWrap - FRAG_WIDTH / 2));
+            const plotRect = plotContainer.getBoundingClientRect();
+            const plotBottomInWrap = (plotRect.bottom - wrapRect.top);
+            fragAnchor.style.left = left + "px";
+            fragAnchor.style.top = (plotBottomInWrap + FRAG_GAP_PX) + "px";
+            fragAnchor.style.display = "block";
+            // Reserve vertical space so siblings don't overlap with the absolutely-
+            // positioned fragment card.
+            plotWrapper.style.minHeight = (plotBottomInWrap + FRAG_GAP_PX + 260) + "px";
+        }
+
+        function hideFragAnchor() {
+            fragAnchor.style.display = "none";
+            plotWrapper.style.minHeight = "";
+        }
+
+        window.addEventListener("resize", () => {
+            if (selectedPeakIdx >= 0 && peakNodeRefs[selectedPeakIdx]) {
+                positionFragNearPeak(peakNodeRefs[selectedPeakIdx].line);
+            }
+        });
+
+        function drawSpectrumSVG(peaks, smiles, adduct, precursorMz) {
+            plotContainer.innerHTML = "";
+            peakNodeRefs.length = 0;
+            selectedPeakIdx = -1;
+            hideFragAnchor();
+
+            if (!peaks || peaks.length === 0) {
+                plotContainer.innerHTML = '<div style="color:#6b7280;">No peaks.</div>';
+                return;
+            }
+
+            const W = 720, H = 280, padL = 50, padR = 14, padT = 14, padB = 36;
+            const plotW = W - padL - padR;
+            const plotH = H - padT - padB;
+
+            let mzMin = Infinity, mzMax = -Infinity, intMax = 0;
+            for (const p of peaks) {
+                if (p[0] < mzMin) mzMin = p[0];
+                if (p[0] > mzMax) mzMax = p[0];
+                if (p[1] > intMax) intMax = p[1];
+            }
+            if (precursorMz != null && precursorMz > mzMax) mzMax = precursorMz;
+            if (!isFinite(mzMin)) { mzMin = 0; mzMax = 1; }
+            if (mzMin === mzMax) { mzMin -= 1; mzMax += 1; }
+            if (intMax <= 0) intMax = 1;
+
+            const step = niceTickStep(mzMax - mzMin);
+            const xMin = Math.max(0, Math.floor(mzMin / step) * step);
+            const xMax = Math.ceil(mzMax / step) * step;
+
+            function xOf(mz) { return padL + ((mz - xMin) / (xMax - xMin)) * plotW; }
+            function yOf(inten) { return padT + plotH - (inten / intMax) * plotH; }
+
+            const svgNS = "http://www.w3.org/2000/svg";
+            const svg = document.createElementNS(svgNS, "svg");
+            svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+            svg.setAttribute("width", "100%");
+            svg.style.maxWidth = W + "px";
+            svg.style.border = "1px solid #e5e7eb";
+            svg.style.background = "#ffffff";
+
+            // axes
+            const axis = document.createElementNS(svgNS, "path");
+            axis.setAttribute("d", `M ${padL} ${padT} L ${padL} ${padT + plotH} L ${W - padR} ${padT + plotH}`);
+            axis.setAttribute("stroke", AXIS_COLOR);
+            axis.setAttribute("fill", "none");
+            svg.appendChild(axis);
+
+            // x ticks at nice round values
+            const stepIsInt = Math.abs(step - Math.round(step)) < 1e-9;
+            for (let v = xMin; v <= xMax + 1e-9; v += step) {
+                const x = xOf(v);
+                const tick = document.createElementNS(svgNS, "line");
+                tick.setAttribute("x1", x); tick.setAttribute("x2", x);
+                tick.setAttribute("y1", padT + plotH); tick.setAttribute("y2", padT + plotH + 4);
+                tick.setAttribute("stroke", AXIS_COLOR);
+                svg.appendChild(tick);
+                const label = document.createElementNS(svgNS, "text");
+                label.setAttribute("x", x); label.setAttribute("y", padT + plotH + 16);
+                label.setAttribute("text-anchor", "middle");
+                label.setAttribute("font-size", "10");
+                label.setAttribute("fill", TEXT_COLOR);
+                label.textContent = stepIsInt ? Math.round(v).toString() : v.toFixed(1);
+                svg.appendChild(label);
+            }
+            // y ticks: 0, 0.5, 1.0 (relative)
+            for (const yv of [0, 0.5, 1]) {
+                const y = yOf(yv * intMax);
+                const grid = document.createElementNS(svgNS, "line");
+                grid.setAttribute("x1", padL); grid.setAttribute("x2", W - padR);
+                grid.setAttribute("y1", y); grid.setAttribute("y2", y);
+                grid.setAttribute("stroke", "#e5e7eb");
+                grid.setAttribute("stroke-dasharray", "2,3");
+                svg.appendChild(grid);
+                const lbl = document.createElementNS(svgNS, "text");
+                lbl.setAttribute("x", padL - 6); lbl.setAttribute("y", y + 3);
+                lbl.setAttribute("text-anchor", "end");
+                lbl.setAttribute("font-size", "10");
+                lbl.setAttribute("fill", TEXT_COLOR);
+                lbl.textContent = yv.toFixed(1);
+                svg.appendChild(lbl);
+            }
+            // axis titles
+            const xtitle = document.createElementNS(svgNS, "text");
+            xtitle.setAttribute("x", padL + plotW / 2);
+            xtitle.setAttribute("y", H - 6);
+            xtitle.setAttribute("text-anchor", "middle");
+            xtitle.setAttribute("font-size", "11");
+            xtitle.setAttribute("fill", TEXT_COLOR);
+            xtitle.textContent = "m/z";
+            svg.appendChild(xtitle);
+
+            const ytitle = document.createElementNS(svgNS, "text");
+            ytitle.setAttribute("x", -(padT + plotH / 2));
+            ytitle.setAttribute("y", 14);
+            ytitle.setAttribute("transform", "rotate(-90)");
+            ytitle.setAttribute("text-anchor", "middle");
+            ytitle.setAttribute("font-size", "11");
+            ytitle.setAttribute("fill", TEXT_COLOR);
+            ytitle.textContent = "rel. intensity";
+            svg.appendChild(ytitle);
+
+            // precursor m/z marker
+            if (precursorMz != null && precursorMz >= xMin && precursorMz <= xMax) {
+                const px = xOf(precursorMz);
+                const pl = document.createElementNS(svgNS, "line");
+                pl.setAttribute("x1", px); pl.setAttribute("x2", px);
+                pl.setAttribute("y1", padT); pl.setAttribute("y2", padT + plotH);
+                pl.setAttribute("stroke", "#f97316");
+                pl.setAttribute("stroke-width", "1");
+                pl.setAttribute("stroke-dasharray", "3,3");
+                svg.appendChild(pl);
+                const plbl = document.createElementNS(svgNS, "text");
+                plbl.setAttribute("x", px + 3); plbl.setAttribute("y", padT + 10);
+                plbl.setAttribute("font-size", "10");
+                plbl.setAttribute("fill", "#c2410c");
+                plbl.textContent = "precursor " + precursorMz.toFixed(3);
+                svg.appendChild(plbl);
+            }
+
+            // peaks
+            for (let i = 0; i < peaks.length; i++) {
+                const [mz, inten, fragId] = peaks[i];
+                const x = xOf(mz);
+                const y = yOf(inten);
+                const baseY = padT + plotH;
+
+                const g = document.createElementNS(svgNS, "g");
+                g.setAttribute("class", "smi-peak");
+
+                const line = document.createElementNS(svgNS, "line");
+                line.setAttribute("x1", x); line.setAttribute("x2", x);
+                line.setAttribute("y1", baseY); line.setAttribute("y2", y);
+                line.setAttribute("stroke", fragId != null ? PEAK_COLOR_CLICKABLE : PEAK_COLOR);
+                line.setAttribute("stroke-width", "1.5");
+                g.appendChild(line);
+
+                // wider invisible hit target for clicks
+                const hit = document.createElementNS(svgNS, "rect");
+                hit.setAttribute("x", x - 4); hit.setAttribute("y", y - 4);
+                hit.setAttribute("width", 8); hit.setAttribute("height", baseY - y + 8);
+                hit.setAttribute("fill", "transparent");
+                g.appendChild(hit);
+
+                if (fragId != null) {
+                    g.style.cursor = "pointer";
+                    const idx = i;
+                    g.addEventListener("click", () => {
+                        selectPeak(idx);
+                        fetchFragment(smiles, fragId, mz, adduct, fragPane, fragTitle);
+                    });
+                }
+
+                const title = document.createElementNS(svgNS, "title");
+                title.textContent = `m/z ${mz.toFixed(4)}  intensity ${inten.toFixed(3)}` +
+                    (fragId != null ? "  (click to view fragment)" : "");
+                g.appendChild(title);
+
+                svg.appendChild(g);
+                peakNodeRefs.push({ line, fragId, mz });
+            }
+
+            plotContainer.appendChild(svg);
+        }
+
+        function fetchFragment(smiles, fragId, mz, adduct, paneEl, titleEl) {
+            titleEl.textContent = "Loading fragment…";
+            paneEl.innerHTML = '<div style="font-size:0.75rem; color:#6b7280;">Loading…</div>';
+            fetch("/fragment_svg", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    smiles: smiles,
+                    frag_id: fragId,
+                    mz: mz,
+                    adduct: adduct,
+                    size: 220,
+                }),
+            })
+                .then(async (r) => {
+                    const data = await r.json().catch(() => ({}));
+                    if (!r.ok) {
+                        titleEl.textContent = "Selected fragment";
+                        paneEl.innerHTML = '<div style="color:#b91c1c; font-size:0.8rem; padding:0.5rem;">' +
+                            escapeHtml(data.error || ("Error " + r.status)) + "</div>";
+                        return;
+                    }
+                    const prettyFrag = prettyFormula(data.formula, data.charge_sign);
+                    titleEl.innerHTML = "Fragment " +
+                        '<span style="color:#111827; font-weight:600;">' +
+                        prettyFrag + "</span>" +
+                        ' <span style="color:#6b7280;">(m/z ' + mz.toFixed(4) + ")</span>";
+                    paneEl.innerHTML = data.svg || "";
+                })
+                .catch((err) => {
+                    titleEl.textContent = "Selected fragment";
+                    paneEl.innerHTML = '<div style="color:#b91c1c; font-size:0.8rem; padding:0.5rem;">' +
+                        escapeHtml(err.message || String(err)) + "</div>";
+                });
+        }
+
+        btn.addEventListener("click", () => {
+            clearError();
+            const smiles = (smilesInput.value || "").trim();
+            if (!smiles) {
+                showError("Enter a SMILES.");
+                return;
+            }
+            const params = new URLSearchParams({
+                smiles,
+                adduct: adductSel.value,
+                nce: nceInput.value,
+                instrument: instSel.value,
+            });
+            statusEl.textContent = "Looking up…";
+            btn.disabled = true;
+
+            fetch("/api/query_smiles?" + params.toString())
+                .then(async (r) => {
+                    const data = await r.json().catch(() => ({}));
+                    if (!r.ok) {
+                        showError(data.error || ("Error " + r.status));
+                        statusEl.textContent = "";
+                        return;
+                    }
+                    statusEl.textContent = "";
+                    resultEl.style.display = "block";
+
+                    molImg.src = "/mol_png?smiles=" + encodeURIComponent(data.canonical_smiles || smiles);
+                    molImg.alt = data.canonical_smiles || smiles;
+                    fragTitle.textContent = "Selected fragment";
+                    fragPane.innerHTML = '<div style="font-size:0.75rem; color:#9ca3af; text-align:center; padding:0.5rem;">Click a peak to see its fragment.</div>';
+                    hideFragAnchor();
+
+                    const cesStr = (data.available_ces || []).map((c) => c.toFixed(0)).join(", ");
+                    const precStr = data.precursor_mz != null ? data.precursor_mz.toFixed(4) : "—";
+                    metaEl.innerHTML =
+                        "<div><b>Formula:</b> " + prettyFormula(data.formula, "") +
+                        "  <b>Precursor m/z:</b> " + escapeHtml(precStr) + "</div>" +
+                        "<div><b>InChIKey:</b> " + escapeHtml(data.inchikey) + "</div>" +
+                        "<div><b>Adduct:</b> " + escapeHtml(data.adduct) +
+                        "  <b>Instrument:</b> " + escapeHtml(data.instrument) + "</div>" +
+                        "<div><b>Matched CE:</b> " + (data.matched_ce_ev != null ? data.matched_ce_ev.toFixed(1) : "?") +
+                        " eV (requested NCE " + (data.requested_nce != null ? data.requested_nce.toFixed(0) : "?") + "% ≈ " +
+                        (data.requested_ce_ev != null ? data.requested_ce_ev.toFixed(1) : "?") +
+                        " eV; available eV: " + escapeHtml(cesStr || "—") + ")</div>" +
+                        '<div style="margin-top:0.25rem; font-family:monospace; font-size:0.8rem; color:#374151;">' +
+                        escapeHtml(data.canonical_smiles || "") + "</div>";
+
+                    if (data.ce_warning) {
+                        ceWarnEl.textContent = data.ce_warning;
+                        ceWarnEl.style.display = "block";
+                    } else {
+                        ceWarnEl.style.display = "none";
+                    }
+
+                    const peaks = (data.pred_spectrum && data.pred_spectrum.peaks) || [];
+                    drawSpectrumSVG(peaks, data.canonical_smiles || smiles, data.adduct, data.precursor_mz);
+                })
+                .catch((err) => {
+                    showError(err.message || String(err));
+                    statusEl.textContent = "";
+                })
+                .finally(() => {
+                    btn.disabled = false;
+                });
+        });
+    });
     </script>
     {% if retrieval_data %}
     <script>
@@ -2887,6 +3277,62 @@
                 <button type="submit" class="btn btn-primary">Run retrieval</button>
             </div>
         </form>
+    </div>
+
+    <div class="card" id="smi-lookup-card">
+        <h2>Look up predicted spectrum by SMILES</h2>
+        <p style="margin-top:0; font-size:0.85rem; color:#6b7280;">
+            Type a SMILES, choose adduct and collision energy, and view the predicted spectrum
+            from the precomputed atlas. Click a peak to see the ICEBERG fragment that produced it.
+        </p>
+        <div class="row">
+            <div style="flex:2 1 0;">
+                <label for="smi-smiles">SMILES</label>
+                <input type="text" id="smi-smiles" placeholder="e.g. CC(=O)Oc1ccccc1C(=O)O">
+            </div>
+            <div>
+                <label for="smi-adduct">Adduct</label>
+                <select id="smi-adduct">
+                    <option value="[M+H]+" selected>[M+H]+</option>
+                    <option value="[M-H]-">[M-H]-</option>
+                </select>
+            </div>
+            <div>
+                <label for="smi-nce">Collision energy (NCE %)</label>
+                <input type="number" id="smi-nce" value="50" min="0" max="200" step="1">
+            </div>
+            <div>
+                <label for="smi-instrument">Instrument</label>
+                <select id="smi-instrument">
+                    <option value="Orbitrap" selected>Orbitrap</option>
+                </select>
+            </div>
+        </div>
+        <div style="margin-top:0.75rem;">
+            <button type="button" class="btn btn-primary" id="smi-lookup-btn">Look up spectrum</button>
+            <span id="smi-status" style="margin-left:0.75rem; font-size:0.85rem; color:#6b7280;"></span>
+        </div>
+
+        <div id="smi-result" style="display:none; margin-top:1rem; border-top:1px solid #e5e7eb; padding-top:1rem;">
+            <div style="display:flex; gap:1.5rem; flex-wrap:wrap; align-items:flex-start;">
+                <div style="flex:0 0 220px;">
+                    <div style="font-size:0.8rem; color:#6b7280; margin-bottom:0.25rem;">Parent molecule</div>
+                    <img id="smi-mol-img" alt="" style="width:220px; height:220px; border:1px solid #e5e7eb; background:#fff;">
+                </div>
+                <div style="flex:1 1 320px; min-width:320px;">
+                    <div id="smi-meta" style="font-size:0.9rem; line-height:1.5;"></div>
+                    <div id="smi-ce-warning" style="display:none; margin-top:0.5rem; padding:0.5rem; background:#fef3c7; color:#92400e; font-size:0.85rem; border-radius:4px;"></div>
+                </div>
+            </div>
+            <div id="smi-plot-wrapper" style="position:relative; margin-top:0.75rem;">
+                <div id="smi-plot-container"></div>
+                <div id="smi-frag-anchor" style="position:absolute; width:220px; display:none;">
+                    <div id="smi-frag-title" style="font-size:0.8rem; color:#6b7280; margin-bottom:0.25rem;">Selected fragment</div>
+                    <div id="smi-frag-pane" style="width:220px; height:220px; border:1px solid #e5e7eb; background:#fff; display:flex; align-items:center; justify-content:center; box-sizing:border-box; box-shadow:0 1px 3px rgba(0,0,0,0.08);"></div>
+                </div>
+            </div>
+        </div>
+        <div id="smi-error" style="display:none; margin-top:0.75rem; color:#b91c1c; font-size:0.9rem;"></div>
     </div>
 
     <div class="card">
