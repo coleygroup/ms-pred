@@ -65,19 +65,23 @@ def score_function(config, base_args, orig_dir=""):
 
     magma_folder = kwargs["magma_folder"]
     num_workers = kwargs.get("num_workers", 0)
-    magma_tree_folder = data_dir / f"{magma_folder}/magma_tree"
-    all_json_pths = [Path(i) for i in magma_tree_folder.glob("*.json")]
-    name_to_json = {i.stem: i for i in all_json_pths}
+    magma_tree_path = data_dir / f"{magma_folder}/magma_tree.hdf5"
+    name_to_json = gen_train.build_gen_magma_map(magma_tree_path)
 
     pe_embed_k = kwargs["pe_embed_k"]
     root_encode = kwargs["root_encode"]
+    add_hs = kwargs["add_hs"]
+    embed_elem_group = kwargs["embed_elem_group"]
     tree_processor = dag_data.TreeProcessor(
-        pe_embed_k=pe_embed_k, root_encode=root_encode
+        pe_embed_k=pe_embed_k,
+        root_encode=root_encode,
+        add_hs=add_hs,
+        embed_elem_group=embed_elem_group,
     )
     # Build out frag datasets
     train_dataset = dag_data.GenDataset(
         train_df,
-        data_dir=data_dir,
+        magma_h5=magma_tree_path,
         tree_processor=tree_processor,
         magma_map=name_to_json,
         num_workers=num_workers,
@@ -85,7 +89,7 @@ def score_function(config, base_args, orig_dir=""):
     )
     val_dataset = dag_data.GenDataset(
         val_df,
-        data_dir=data_dir,
+        magma_h5=magma_tree_path,
         magma_map=name_to_json,
         num_workers=num_workers,
         tree_processor=tree_processor,
@@ -125,6 +129,11 @@ def score_function(config, base_args, orig_dir=""):
         root_encode=kwargs["root_encode"],
         inject_early=kwargs["inject_early"],
         embed_adduct=kwargs["embed_adduct"],
+        embed_collision=kwargs["embed_collision"],
+        embed_instrument=kwargs["embed_instrument"],
+        embed_elem_group=kwargs["embed_elem_group"],
+        encode_forms=kwargs["encode_forms"],
+        add_hs=add_hs,
     )
 
     # outputs = model(test_batch['fps'])

@@ -1,0 +1,85 @@
+launcher_args: {experiment_name: joint_train_nist20,
+  script_name: "src/ms_pred/GLACIER/train_joint.py",
+  slurm_script: launcher_scripts/generic_slurm.sh,
+  launch_method: local,
+  visible_devices: [0, 1]
+}
+universal_args:
+  _slurm_args:
+  - {_num_gpu: 1, cpus-per-task: 7, job-name: joint_train, mem-per-cpu: 8G,
+    time: '1-12:00:00'}
+  debug: [false]
+  gpu: [true]
+
+  seed: [1]
+  num-workers: [32]
+  batch-size: [16]
+  max-epochs: [200]
+  min-epochs: [20]
+
+  dataset-name: [nist20]
+  dataset-labels: [labels.tsv]
+  magma-folder: [magma_outputs]
+  split-name: [split_1.tsv]
+
+  learning-rate: [0.0004]
+  lr-decay-rate: [0.9]
+  weight-decay: [0]
+
+  inten-dropout: [0.1]
+  frag-dropout: [0.1]
+  hidden-size: [256]
+  graphormer-layers: [5]
+  graphormer-dropout: [0.1]
+  embed-elem-group: [True]
+  add-hs: [True]
+  embed-adduct: [True]
+  embed-collision: [True]
+  embed-instrument: [True]
+  encode-forms: [True]
+  inten-decoder-layers: [4]
+  inten-encoder-layers: [3]
+  frag-encoder-layers: [0]
+  frag-decoder-layers: [4]
+  max-broken-bonds: [6]
+  max-breakpoints: [200]
+  multi-hop-max-dist: [10]
+  num-edge-dis: [10]
+  num-bins: [15000]
+  enable-aux-loss: [True]
+  enable-decoder-norm: [False]
+  sk-tau: [0.05]
+  linsat-tau: [15]
+  inten-weight: [1]
+  frag-weight: [0.1]
+  warmup: [2000]
+  magma-warmup-steps: [2500]
+  magma-decay-rate: [0.9]
+  magma-decay-steps: [2500]
+  inten-loss-fn: [cosine]
+
+iterative_args:
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd1]
+     seed: [1]
+     
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd2]
+     seed: [2]
+
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd3]
+     seed: [3]
+
+  -  split-name: [scaffold_1.tsv]
+     save-dir: [scaffold_1_rnd1]
+     seed: [1]
+
+  -  split-name: [scaffold_1.tsv]
+     save-dir: [scaffold_1_rnd2]
+     seed: [2]
+
+  -  split-name: [scaffold_1.tsv]
+     save-dir: [scaffold_1_rnd3]
+     seed: [3]
+

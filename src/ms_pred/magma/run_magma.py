@@ -443,6 +443,7 @@ def run_magma_augmentation(
     workers: int,
     debug: bool = False,
     ppm_diff: int = 20,
+    write_tsv_h5: bool = False,
 ):
     """run_magma_augmentation.
 
@@ -454,6 +455,7 @@ def run_magma_augmentation(
         spec_labels (str): spec_labels
         max_peaks (int): max_peaks
         ppm_diff (int): PPM diff threshold
+        write_tsv_h5 (bool): Whether to also write magma_tsv.hdf5.
     """
     logging.info("Create magma spectra files")
     output_dir = Path(output_dir)
@@ -487,7 +489,9 @@ def run_magma_augmentation(
     logging.info('Write to hdf5 file output')
 
     def write_output_objs(obj_iter):
-        tsv_h5 = common.HDF5Dataset(output_dir / "magma_tsv.hdf5", mode='w')
+        tsv_h5 = None
+        if write_tsv_h5:
+            tsv_h5 = common.HDF5Dataset(output_dir / "magma_tsv.hdf5", mode='w')
         tree_h5 = common.PredSpecDB(
             output_dir / "magma_tree.hdf5",
             mode='w',
@@ -503,11 +507,13 @@ def run_magma_augmentation(
             for obj in tqdm(obj_iter, total=len(params) if not debug else min(10, len(params)), desc='Write to HDF5'):
                 if obj is None:
                     continue
-                tsv_h5.write_dict(obj[0])
+                if tsv_h5 is not None:
+                    tsv_h5.write_dict(obj[0])
                 for spec_name, tree_spec in obj[1]:
                     tree_h5.write(spec_name, tree_spec)
         finally:
-            tsv_h5.close()
+            if tsv_h5 is not None:
+                tsv_h5.close()
             tree_h5.close()
 
     if debug:
@@ -558,6 +564,12 @@ def get_args():
         default=16,
         help="Number of parallel workers",
         type=int,
+    )
+    parser.add_argument(
+        "--write-tsv-h5",
+        default=False,
+        action="store_true",
+        help="Also write magma_tsv.hdf5. Disabled by default because downstream code uses magma_tree.hdf5.",
     )
     parser.add_argument("--debug", default=False, action="store_true")
     return parser.parse_args()

@@ -1,5 +1,6 @@
 """ nn_utils.py
 """
+from __future__ import annotations
 import copy
 import math
 import numpy as np
@@ -7,9 +8,16 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import einsum, nn
+from torch.nn import init
 import torch_scatter
 import dgl
+
+
+from einops import rearrange, repeat, pack, unpack
+from einops.layers.torch import Rearrange
 from packaging.version import Version
+
 
 if Version(torch.__version__) > Version('2.0.0'):
     _TORCH_SP_SUPPORT = True  # use torch built-in sparse
@@ -317,7 +325,7 @@ class MLPBlocks(nn.Module):
     ):
         super().__init__()
         self.activation = nn.ReLU()
-        self.dropout_layer = nn.Dropout(p=dropout)
+        self.dropout_layer = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
         self.input_layer = nn.Linear(input_size, hidden_size)
         middle_layer = nn.Linear(hidden_size, hidden_size)
         self.layers = get_clones(middle_layer, num_layers - 1)
@@ -364,7 +372,9 @@ class MLPBlocks(nn.Module):
                 output = self.safe_apply_bn(output, self.bn_mids[layer_index])
 
             if self.use_residuals:
-                output += old_op
+                # avoid in-place addition which can break autograd when
+                # tensors required for gradient computation are modified
+                output = output + old_op
                 old_op = output
 
         if self.output_layer is not None:
@@ -620,7 +630,7 @@ class SetTransformerEncoder(nn.Module):
             [-0.0634, -1.1996,  0.6955, -0.9230,  1.4904],
             [-0.9972, -0.7924,  0.6907, -0.5221,  1.6211],
             [-0.7973, -1.3203,  0.0634,  0.5237,  1.5306],
-            [-0.4497, -1.0920,  0.8470, -0.8030,  1.4977],
+            [-0.4497, -1.0920,  0.8470, -08030,  1.4977],
             [-0.4940, -1.6045,  0.2363,  0.4885,  1.3737],
             [-0.9840, -1.0913, -0.0099,  0.4653,  1.6199]],
            grad_fn=<NativeLayerNormBackward>)
@@ -701,6 +711,313 @@ class SetTransformerEncoder(nn.Module):
         for layer in self.layers:
             feat = layer(feat, lengths)
         return feat
+    
+class SlotDecoder(nn.Module):
+    def __init__(self, hidden_dim=256, num_slots=40, nhead=8, num_layers=3, dropout=0.1, enable_norm=False):
+        super().__init__()
+        self.num_slots = num_slots
+
+        # Learnable slot embeddings
+        self.slots = nn.Parameter(torch.empty(num_slots, hidden_dim))
+        # init.xavier_uniform_(self.slots)
+
+        init.orthogonal_(self.slots, gain=0.02)
+        self.dropout = dropout
+
+        # Transformer decoder layers
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=hidden_dim,
+            nhead=nhead,
+            dim_feedforward=hidden_dim * 4,
+            batch_first=True,
+            dropout=self.dropout
+        )
+        self.hidden_dim=hidden_dim
+        self.num_layers = num_layers
+        self.enable_norm = enable_norm
+        self.decoder_norm = nn.LayerNorm(hidden_dim) if self.enable_norm else None
+        self.decoder_layers = get_clones(decoder_layer, self.num_layers)
+        # self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
+
+    def forward(self, graph_tokens, node_embeddings, memory_key_padding_mask=None):
+        """
+        graph_tokens: [B, 1, d]
+        node_embeddings: [B, N, d]
+        """
+        B, N, d = node_embeddings.size()
+        slots = self.slots.unsqueeze(0).expand(B, self.num_slots, self.hidden_dim)        
+        # # Use both graph token and nodes as memory for decoder
+        memory = torch.cat([graph_tokens, node_embeddings], dim=1)  # [B, 1+N, d]
+        outs = []
+        for decoder_layer in self.decoder_layers:
+            slots = decoder_layer(tgt=slots, memory=memory, memory_key_padding_mask=memory_key_padding_mask)  # [B, K, d]
+            if self.enable_norm:
+                outs.append(self.decoder_norm(slots))
+            else:
+                outs.append(slots)
+        return torch.stack(outs, dim=0)
+    
+class SlotAttention(nn.Module):
+    def __init__(self, num_slots, dim, iters = 3, eps = 1e-8, hidden_dim = 128):
+        super().__init__()
+        self.num_slots = num_slots
+        self.iters = iters
+        self.eps = eps
+        self.scale = dim ** -0.5
+
+        self.slots_mu = nn.Parameter(torch.randn(1, 1, dim))
+        self.slots_sigma = nn.Parameter(torch.rand(1, 1, dim))
+
+        self.to_q = nn.Linear(dim, dim)
+        self.to_k = nn.Linear(dim, dim)
+        self.to_v = nn.Linear(dim, dim)
+
+        self.gru = nn.GRUCell(dim, dim)
+
+        hidden_dim = max(dim, hidden_dim)
+
+        self.fc1 = nn.Linear(dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, dim)
+
+        self.norm_input  = nn.LayerNorm(dim)
+        self.norm_slots  = nn.LayerNorm(dim)
+        self.norm_pre_ff = nn.LayerNorm(dim)
+
+    def forward(self, inputs, num_slots = None, key_padding_mask=None):
+        """
+        inputs: [B, N, D]
+        key_padding_mask: [B, N] (bool), True for positions to ignore (masked)
+        """
+        b, n, d = inputs.shape
+        n_s = num_slots if num_slots is not None else self.num_slots
+        
+        mu = self.slots_mu.expand(b, n_s, -1)
+        sigma = self.slots_sigma.expand(b, n_s, -1)
+        slots = torch.normal(mu, sigma)
+
+        inputs = self.norm_input(inputs)        
+        k, v = self.to_k(inputs), self.to_v(inputs)
+
+        if key_padding_mask is not None:
+            # key_padding_mask: [B, N], True for masked positions
+            # We'll use this to mask attention logits later
+            mask = key_padding_mask.unsqueeze(1)  # [B, 1, N]
+        else:
+            mask = None
+
+        for _ in range(self.iters):
+            slots_prev = slots
+
+            slots = self.norm_slots(slots)
+            q = self.to_q(slots)
+
+            dots = torch.einsum('bid,bjd->bij', q, k) * self.scale  # [B, num_slots, N]
+            if mask is not None:
+                dots = dots.masked_fill(mask, float('-inf'))
+
+            attn = dots.softmax(dim=-1) + self.eps
+            attn = attn / attn.sum(dim=-1, keepdim=True)
+
+            updates = torch.einsum('bjd,bij->bid', v, attn)
+
+            slots = self.gru(
+                updates.reshape(-1, d),
+                slots_prev.reshape(-1, d)
+            )
+
+            slots = slots.reshape(b, -1, d)
+            slots = slots + self.fc2(F.relu(self.fc1(self.norm_pre_ff(slots))))
+
+        return slots
+    
+class MultiHeadSlotAttention(nn.Module):
+    def __init__(
+        self,
+        num_slots,
+        dim,
+        heads = 4,
+        dim_head = 64,
+        iters = 3,
+        eps = 1e-8,
+        hidden_dim = 128
+    ):
+        super().__init__()
+        self.dim = dim
+        self.num_slots = num_slots
+        self.iters = iters
+        self.eps = eps
+        self.scale = dim ** -0.5
+
+        self.slots_mu = nn.Parameter(torch.randn(1, 1, dim))
+
+        self.slots_logsigma = nn.Parameter(torch.zeros(1, 1, dim))
+        init.xavier_uniform_(self.slots_logsigma)
+
+        self.norm_input  = nn.LayerNorm(dim)
+        self.norm_slots  = nn.LayerNorm(dim)
+
+        dim_inner = dim_head * heads
+
+        self.split_heads = Rearrange('b n (h d) -> b h n d', h = heads)
+
+        self.to_q = nn.Linear(dim, dim_inner)
+        self.to_k = nn.Linear(dim, dim_inner)
+        self.to_v = nn.Linear(dim, dim_inner)
+
+        self.merge_heads = Rearrange('b h n d -> b n (h d)')
+        self.combine_heads = nn.Linear(dim_inner, dim)
+
+        self.gru = nn.GRUCell(dim, dim)
+
+        hidden_dim = max(dim, hidden_dim)
+
+        self.norm_pre_ff = nn.LayerNorm(dim)
+
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, dim)
+        )
+
+    def forward(
+        self,
+        inputs,
+        num_slots: int | None = None,
+        key_padding_mask=None
+    ):
+        b, n, d, device, dtype = *inputs.shape, inputs.device, inputs.dtype
+        n_s = num_slots if num_slots is not None else self.num_slots
+        
+        mu = repeat(self.slots_mu, '1 1 d -> b s d', b = b, s = n_s)
+        sigma = repeat(self.slots_logsigma.exp(), '1 1 d -> b s d', b = b, s = n_s)
+
+        slots = mu + sigma * torch.randn(mu.shape, device = device, dtype = dtype)
+
+        inputs = self.norm_input(inputs)        
+
+        k, v = self.to_k(inputs), self.to_v(inputs)
+        k, v = map(self.split_heads, (k, v))
+
+        # Apply key_padding_mask to attention logits if provided
+        if key_padding_mask is not None:
+            # key_padding_mask: [B, N], True for masked positions
+            # We need to expand to [B, 1, N] for broadcasting with dots
+            mask = key_padding_mask
+        else:
+            mask = None
+
+        for _ in range(self.iters):
+            slots_prev = slots
+
+            slots = self.norm_slots(slots)
+
+            q = self.to_q(slots)
+            q = self.split_heads(q)
+
+            dots = einsum('... i d, ... j d -> ... i j', q, k) * self.scale  # [B, heads, num_slots, N]
+
+            if mask is not None:
+                # mask: [B, 1, N], dots: [B, heads, num_slots, N]
+                # Broadcast mask to all heads and slots
+                # dots = dots.masked_fill(mask.unsqueeze(1).unsqueeze(2), float('-inf'))
+                dots = dots.masked_fill(mask.unsqueeze(1).unsqueeze(2), -99999)
+
+            attn = dots.softmax(dim = -2)
+            attn = F.normalize(attn + self.eps, p = 1, dim = -1)
+
+            updates = einsum('... j d, ... i j -> ... i d', v, attn)
+            assert updates.ndim == 4, f"Expected 4D tensor, got {updates.shape}"
+            updates = self.merge_heads(updates)
+            updates = self.combine_heads(updates)
+
+            updates, packed_shape = pack([updates], '* d')
+            slots_prev, _ = pack([slots_prev], '* d')
+
+            slots = self.gru(updates, slots_prev)
+
+            slots, = unpack(slots, packed_shape, '* d')
+            slots = slots + self.mlp(self.norm_pre_ff(slots))
+
+        return slots
+    
+class SlotAttentionDecoder(nn.Module):
+    """
+    SlotAttentionDecoder: SlotAttention with self-attention on slots before cross-attention to inputs.
+    Now supports multi-head attention for both self-attention and cross-attention.
+    """
+    def __init__(self, num_slots, dim, iters=3, eps=1e-8, hidden_dim=128, attn_heads=1):
+        super().__init__()
+        self.num_slots = num_slots
+        self.iters = iters
+        self.eps = eps
+        self.scale = dim ** -0.5
+        self.attn_heads = attn_heads
+
+        self.slots_mu = nn.Parameter(torch.randn(1, 1, dim))
+        self.slots_sigma = nn.Parameter(torch.rand(1, 1, dim))
+
+        self.to_q = nn.Linear(dim, dim)
+        self.to_k = nn.Linear(dim, dim)
+        self.to_v = nn.Linear(dim, dim)
+
+        self.gru = nn.GRUCell(dim, dim)
+
+        hidden_dim = max(dim, hidden_dim)
+        self.fc1 = nn.Linear(dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, dim)
+
+        self.norm_input  = nn.LayerNorm(dim)
+        self.norm_slots  = nn.LayerNorm(dim)
+        self.norm_pre_ff = nn.LayerNorm(dim)
+
+        # Self-attention for slots
+        self.self_attn = nn.MultiheadAttention(embed_dim=dim, num_heads=self.attn_heads, batch_first=True)
+        # Cross-attention for slots-to-inputs
+        self.cross_attn = nn.MultiheadAttention(embed_dim=dim, num_heads=self.attn_heads, batch_first=True)
+
+    def forward(self, inputs, num_slots=None, key_padding_mask=None):
+        """
+        inputs: [B, N, D]
+        key_padding_mask: [B, N] (bool), True for positions to ignore (masked)
+        """
+        b, n, d = inputs.shape
+        n_s = num_slots if num_slots is not None else self.num_slots
+        
+        mu = self.slots_mu.expand(b, n_s, -1)
+        sigma = self.slots_sigma.expand(b, n_s, -1)
+        slots = torch.normal(mu, sigma)
+
+        inputs = self.norm_input(inputs)        
+        k, v = self.to_k(inputs), self.to_v(inputs)
+
+        for _ in range(self.iters):
+            slots_prev = slots
+
+            # Self-attention on slots
+            slots_norm = self.norm_slots(slots)
+            slots_sa, _ = self.self_attn(slots_norm, slots_norm, slots_norm)
+            slots = slots + slots_sa
+
+            # Cross-attention: slots as queries, inputs as keys/values
+            # MultiheadAttention expects [B, num_slots, D] for query, [B, N, D] for key/value
+            # key_padding_mask: [B, N] (True for masked)
+            cross_attn_out, _ = self.cross_attn(
+                query=slots, key=k, value=v, key_padding_mask=key_padding_mask
+            )
+            slots = slots + cross_attn_out
+
+            # Feedforward and GRU update
+
+            slots = self.gru(
+                slots.reshape(-1, d),
+                slots_prev.reshape(-1, d)
+            )
+
+            slots = slots.reshape(b, -1, d)
+            slots = slots + self.fc2(F.relu(self.fc1(self.norm_pre_ff(slots))))
+
+        return slots
+
 
 
 def _gen_mask(lengths_x, lengths_y, max_len_x, max_len_y):
@@ -884,3 +1201,5 @@ def dict_to_device(data_dict, device):
         else:
             sent_dict[key] = value
     return sent_dict
+
+

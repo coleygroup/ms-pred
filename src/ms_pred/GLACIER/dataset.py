@@ -1,0 +1,1040 @@
+"""Inten and Frag dataset and featurization utilities for GLACIER.
+
+- TreeProcessor: builds root representations (DGL or Graphormer tensors) and fragment targets
+- Optimized Graphormer input creation with vectorized BFS and multi-hop edge features
+- IntenDataset: merges generation inputs with simplified intensity targets
+"""
+
+from pathlib import Path
+from collections import OrderedDict
+import random
+import ast
+from typing import Dict, Any, List, Set
+import logging
+
+import numpy as np
+import pandas as pd
+import torch
+import dgl
+
+from rdkit import Chem
+from rdkit.Chem import rdPartialCharges
+
+import ms_pred.common as common
+import ms_pred.nn_utils as nn_utils
+import ms_pred.magma.fragmentation as fragmentation
+from ms_pred.dag_pred.dag_data import DAGDataset, _collate_root, _unroll_pad
+import torch.nn.functional as F
+import json
+from ms_pred.dag_pred.graph_mutate import mutate
+from torch.utils.data import Dataset
+
+class TreeProcessor:
+    def __init__(
+        self,
+        pe_embed_k: int = 10,
+        root_encode: str = "gnn",
+        embed_elem_group: bool = False,
+        multi_hop_max_dist: int = 5,
+    ):
+        self.pe_embed_k = pe_embed_k
+        self.root_encode = root_encode
+        self.embed_elem_group = embed_elem_group
+        self.multi_hop_max_dist = multi_hop_max_dist
+
+    @staticmethod
+    def _to_heavy_mol(mol: Any) -> Any:
+        # Drop explicit hydrogens so graph nodes correspond to heavy atoms only
+        if mol is None:
+            return None
+        return Chem.RemoveHs(mol)
+
+    # ---------- lightweight fragment ----------
+    def featurize_frag_lite(self, frag: int, engine: fragmentation.FragmentEngine) -> Dict[str, Any]:
+        kept_atom_inds, _ = engine.get_present_atoms(frag)
+        form = engine.formula_from_kept_inds(kept_atom_inds)
+        return {"kept_indices": np.asarray(kept_atom_inds, dtype=int), "form": form}
+
+    # ---------- main tree ----------
+    def featurize_tree(self, tree: Dict[str, Any], include_inten_targs: bool = True, include_frag_targs: bool = True) -> Dict[str, Any]:
+        root_smiles = tree["root_canonical_smiles"]
+        engine = fragmentation.FragmentEngine(mol_str=root_smiles, mol_str_type="smiles", mol_str_canonicalized=True)
+
+        atom_symbols = engine.atom_symbols
+        total_atom_masses = engine.atom_weights_h
+        num_hs = engine.atom_hs
+        total_hs = engine.total_hs
+
+        atom_form_vecs_np = [common.formula_to_dense(f"{s}H{h}") for s, h in zip(atom_symbols, num_hs)]
+        atom_form_vecs = torch.from_numpy(np.stack(atom_form_vecs_np))
+
+        mol = Chem.MolFromSmiles(root_smiles)
+
+        if mol is None:
+            raise ValueError(f"Cannot create RDKit molecule from SMILES: {root_smiles}")
+        mol = self._to_heavy_mol(mol)
+        if mol is None:
+            raise ValueError(f"Cannot create heavy-atom RDKit molecule from SMILES: {root_smiles}")
+
+        if self.root_encode == "gnn":
+            root_repr = self.rdkit_featurize(mol)
+        elif self.root_encode == "graphormer":
+            root_repr = None
+        else:
+            raise ValueError(f"Unsupported root_encode: {self.root_encode}")
+
+        root_form = common.form_from_smi(root_smiles)
+        adduct_mass_shift = np.array([
+            common.ion2mass[tree["adduct"]],
+            -common.ELECTRON_MASS if common.is_positive_adduct(tree["adduct"]) else common.ELECTRON_MASS,
+        ])
+
+        # fragment targets
+        if include_frag_targs:
+            frag_targs_list = []
+            if isinstance(tree, dict):       
+                for _, sub_frag in tree["frags"].items():
+                    frag = sub_frag["frag"]
+                    info = self.featurize_frag_lite(frag, engine)
+                    kept = info["kept_indices"]
+                    if kept.size == 0:
+                        continue
+                    mask = np.zeros((len(total_atom_masses),), dtype=bool)
+                    mask[kept] = True
+                    frag_targs_list.append(torch.from_numpy(mask))
+                inten_targets = np.asarray(tree["raw_spec"]) if include_inten_targs else None  # [N,2]
+            elif isinstance(tree, common.MassSpec):
+                for frag in tree.int_frags:
+                    info = self.featurize_frag_lite(
+                        frag,
+                        engine,
+                    )
+                    kept = info["kept_indices"]
+                    if kept.size == 0:
+                        continue
+                    mask = np.zeros((len(total_atom_masses),), dtype=bool)
+                    mask[kept] = True
+                    frag_targs_list.append(torch.from_numpy(mask))
+                inten_targets = np.array(tree.info["raw_spec"]) if include_inten_targs else None  # [N,2]
+            else:
+                raise TypeError(f'Unknown type of {tree}')
+            if len(frag_targs_list) == 0:
+                frag_targs_list.append(torch.zeros((len(total_atom_masses),), dtype=torch.bool))
+            frag_targs = torch.stack(frag_targs_list, dim=0)
+            if include_inten_targs:
+                new_out = inten_targets
+            else:
+                new_out = None
+        else:
+            frag_targs = None
+            new_out = None
+
+        if self.pe_embed_k > 0 and self.root_encode == "gnn":
+            root_repr = self.add_pe_embed(root_repr)
+
+        root_form_vec = torch.from_numpy(common.formula_to_dense(root_form))
+
+        adj_matrix = Chem.rdmolops.GetAdjacencyMatrix(mol, useBO=True)
+        adj_matrix = torch.from_numpy(adj_matrix).float()
+
+        graphormer_input = self.create_graphormer_input(mol, multi_hop_max_dist=self.multi_hop_max_dist) if self.root_encode == "graphormer" else None
+
+        return {
+            "root_repr": root_repr,
+            "root_smiles": root_smiles,
+            "root_form": root_form,
+            "adduct_mass_shift": adduct_mass_shift,
+            "frag_targs": frag_targs,
+            "inten_targs": new_out,
+            "masses": torch.tensor(total_atom_masses, dtype=torch.float32),
+            "collision_energy": float(tree["collision_energy"]) if "collision_energy" in tree else 0.0,
+            "atom_symbols": atom_symbols,
+            "root_form_vec": root_form_vec,
+            "atom_form_vecs": atom_form_vecs,
+            "adj_matrix": adj_matrix,
+            "atom_hs": torch.tensor(num_hs, dtype=torch.long),
+            "total_hs": total_hs,
+            "graphormer_input": graphormer_input,
+        }
+
+    # ---------- PE helpers ----------
+    def add_pe_embed(self, graph: Any):
+        pe_embeds = nn_utils.random_walk_pe(graph, k=self.pe_embed_k, eweight_name="e_ind")
+        graph.ndata["h"] = torch.cat((graph.ndata["h"], pe_embeds), -1).float()
+        return graph
+
+    def get_pe_for_tensor(self, mol: Any, node_features: torch.Tensor):
+        adj = Chem.rdmolops.GetAdjacencyMatrix(mol, useBO=True)
+        src, dst = np.nonzero(adj)
+        eweights = adj[(src, dst)]
+        tmp = dgl.graph((src, dst), num_nodes=adj.shape[0])
+        tmp.ndata["h"] = node_features
+        tmp.edata["e_ind"] = torch.tensor(eweights, dtype=torch.float32)
+        pe_embeds = nn_utils.random_walk_pe(tmp, k=self.pe_embed_k, eweight_name="e_ind")
+        return pe_embeds
+
+    # ---------- RDKit featurize for DGL ----------
+    def rdkit_featurize(self, mol: Any):
+        mol = self._to_heavy_mol(mol)
+        if mol is None:
+            raise ValueError("RDKit molecule is None after hydrogen removal")
+        num_atoms = mol.GetNumAtoms()
+        try:
+            rdPartialCharges.ComputeGasteigerCharges(mol)
+        except Exception:
+            pass
+
+        # Precompute SSSR ring info for ring count features
+        sssr = Chem.GetSymmSSSR(mol)
+        atom_ring_counts = [0] * num_atoms
+        bond_ring_counts = {}
+        for bond in mol.GetBonds():
+            key = tuple(sorted((bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())))
+            bond_ring_counts[key] = 0
+        for ring in sssr:
+            ring_atoms = list(ring)
+            r_len = len(ring_atoms)
+            for a in ring_atoms:
+                atom_ring_counts[a] += 1
+            for k in range(r_len):
+                a1 = ring_atoms[k]
+                a2 = ring_atoms[(k + 1) % r_len]
+                key = tuple(sorted((a1, a2)))
+                if key in bond_ring_counts:
+                    bond_ring_counts[key] += 1
+
+        node_features = []
+        for atom_idx in range(num_atoms):
+            atom = mol.GetAtomWithIdx(atom_idx)
+            feats = []
+            atomic_num = atom.GetAtomicNum()
+            feats.extend([float(atomic_num == x) for x in common.VALID_ATOM_NUM])
+            feats.append(float(atomic_num not in common.VALID_ATOM_NUM))
+            degree = atom.GetTotalDegree()-atom.GetTotalNumHs()
+            deg_oh = [float(degree == x) for x in range(common.MAX_COMMON_DEGREE + 1)]
+            deg_oh.append(float(degree > common.MAX_COMMON_DEGREE))
+            feats.extend(deg_oh)
+            formal_charge = atom.GetFormalCharge()
+            chg_oh = [float(formal_charge == x) for x in range(-common.MAX_ABS_FORMAL_CHARGE, common.MAX_ABS_FORMAL_CHARGE + 1)]
+            chg_oh.append(float(abs(formal_charge) > common.MAX_ABS_FORMAL_CHARGE))
+            feats.extend(chg_oh)
+            hyb = atom.GetHybridization()
+            hyb_oh = [float(hyb == x) for x in common.COMMON_HYBRIDIZATION]
+            hyb_oh.append(float(hyb not in common.COMMON_HYBRIDIZATION))
+            feats.extend(hyb_oh)
+            feats.append(float(atom.GetIsAromatic()))
+            nH = atom.GetTotalNumHs()
+            h_oh = [float(nH == x) for x in range(common.COMMON_MAX_HYDROGEN_COUNTS + 1)]
+            h_oh.append(float(nH >= common.COMMON_MAX_HYDROGEN_COUNTS))
+            feats.extend(h_oh)
+            # Ring presence one-hot
+            in_ring = atom.IsInRing()
+            feats.extend([float(not in_ring), float(in_ring)])
+            # Ring size one-hot
+            for rsz in common.COMMON_RING_SIZES:
+                feats.append(float(atom.IsInRingSize(rsz)))
+                feats.append(float(not atom.IsInRingSize(rsz)))
+            # Fused ring one-hot (>=2 rings)
+            arc = atom_ring_counts[atom_idx]
+            fused = arc >= 2
+            feats.extend([float(not fused), float(fused)])
+            chi = atom.GetChiralTag()
+            feats.extend([float(chi == x) for x in common.COMMON_CHIRALITY])
+            try:
+                charge = float(atom.GetProp("_GasteigerCharge"))
+                if np.isnan(charge) or np.isinf(charge):
+                    charge = 0.0
+            except Exception:
+                charge = 0.0
+            feats.append(charge)
+            if self.embed_elem_group:
+                sym = atom.GetSymbol()
+                if sym in common.ELEMENT_TO_GROUP:
+                    feats.extend(common.element_to_group[sym].tolist())
+                else:
+                    feats.extend([0.0] * common.ELEMENT_GROUP_DIM)
+            node_features.append(feats)
+
+        edge_indices = []
+        edge_features = []
+        for bond in mol.GetBonds():
+            i = bond.GetBeginAtomIdx()
+            j = bond.GetEndAtomIdx()
+            edge_indices.extend([(i, j), (j, i)])
+            feats = []
+            # Bond type one-hot (existing)
+            bt = bond.GetBondType()
+            bt_oh = [float(bt == x) for x in common.COMMON_BOND_TYPES]
+            bt_oh.append(float(bt not in common.COMMON_BOND_TYPES))
+            feats.extend(bt_oh)
+            # Conjugation one-hot [not, yes]
+            conj = bond.GetIsConjugated()
+            feats.extend([float(not conj), float(conj)])
+            # Ring presence one-hot [not, in ring]
+            in_ring = bond.IsInRing()
+            feats.extend([float(not in_ring), float(in_ring)])
+            # Ring size one-hot: a bond can belong to multiple ring sizes in fused systems
+            for rsz in common.COMMON_RING_SIZES:
+                feats.append(float(bond.IsInRingSize(rsz)))
+                feats.append(float(not bond.IsInRingSize(rsz)))
+            # Fused ring (>=2 rings) one-hot [not fused, fused]
+            brc = bond_ring_counts.get(tuple(sorted((i, j))), 0)
+            fused = brc >= 2
+            feats.extend([float(not fused), float(fused)])
+            # Stereo one-hot (existing)
+            stereo = bond.GetStereo()
+            feats.extend([float(stereo == x) for x in common.VALID_BOND_STEREO])
+            edge_features.extend([feats, feats])
+
+        if edge_indices:
+            src_nodes, dst_nodes = zip(*edge_indices)
+            assert dgl is not None, "dgl is required for GNN root encoding"
+            g = dgl.graph((src_nodes, dst_nodes), num_nodes=num_atoms)
+            g.edata["e"] = torch.tensor(edge_features, dtype=torch.float32)
+        else:
+            assert dgl is not None, "dgl is required for GNN root encoding"
+            g = dgl.graph(([], []), num_nodes=num_atoms)
+            g.edata["e"] = torch.empty((0, len(edge_features[0]) if edge_features else 12), dtype=torch.float32)
+        g.ndata["h"] = torch.tensor(node_features, dtype=torch.float32)
+        return g
+
+    def get_node_feats(self) -> int:
+        if self.root_encode in ("gnn", "graphormer"):
+            nf = 0
+            nf += len(common.VALID_ELEMENTS) + 1
+            nf += common.MAX_COMMON_DEGREE + 2
+            nf += common.MAX_ABS_FORMAL_CHARGE * 2 + 2
+            nf += len(common.COMMON_HYBRIDIZATION) + 1
+            nf += 1
+            nf += common.COMMON_MAX_HYDROGEN_COUNTS + 2
+            nf += 2  # ring presence one-hot
+            nf += len(common.COMMON_RING_SIZES) * 2  # ring size one-hot
+            nf += 2  # fused ring one-hot
+            nf += len(common.COMMON_CHIRALITY)
+            nf += 1
+            if self.embed_elem_group:
+                nf += common.ELEMENT_GROUP_DIM
+            nf += self.pe_embed_k
+            return nf
+        raise NotImplementedError(f"Unsupported root encoding method: {self.root_encode}")
+
+    def get_edge_feats(self) -> int:
+            nf = 0
+            nf += len(common.COMMON_BOND_TYPES) + 1  # bond type one-hot (+ other)
+            nf += 2  # conjugation one-hot
+            nf += 2  # ring presence one-hot
+            nf += 2*len(common.COMMON_RING_SIZES)  # ring size multi-hot (no extra 'no ring' slot)
+            nf += 2  # fused ring one-hot
+            nf += len(common.VALID_BOND_STEREO) + 1  # stereo one-hot
+            return nf
+
+    # ---------- Graphormer input ----------
+    def create_graphormer_input(
+        self,
+        mol: Any,
+        spatial_pos_max: int = 1024,
+        multi_hop_max_dist: int = 5,
+    ) -> Dict[str, Any]:
+        mol = self._to_heavy_mol(mol)
+        if mol is None:
+            raise ValueError("RDKit molecule is None after hydrogen removal")
+        num_atoms = mol.GetNumAtoms()
+
+        try:
+            rdPartialCharges.ComputeGasteigerCharges(mol)
+        except Exception:
+            pass
+        # Precompute SSSR once for both atom and bond ring count features
+        sssr = Chem.GetSymmSSSR(mol)
+        atom_ring_counts = [0] * num_atoms
+        bond_ring_counts = {}
+        for bond in mol.GetBonds():
+            key = tuple(sorted((bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())))
+            bond_ring_counts[key] = 0
+        for ring in sssr:
+            ring_atoms = list(ring)
+            r_len = len(ring_atoms)
+            for a in ring_atoms:
+                atom_ring_counts[a] += 1
+            for k in range(r_len):
+                a1 = ring_atoms[k]
+                a2 = ring_atoms[(k + 1) % r_len]
+                key = tuple(sorted((a1, a2)))
+                if key in bond_ring_counts:
+                    bond_ring_counts[key] += 1
+
+        node_features = []
+        degrees = []
+        for atom_idx in range(num_atoms):
+            atom = mol.GetAtomWithIdx(atom_idx)
+            feats = []
+            atomic_num = atom.GetAtomicNum()
+            feats.extend([float(atomic_num == x) for x in common.VALID_ATOM_NUM])
+            feats.append(float(atomic_num not in common.VALID_ATOM_NUM))
+            degree = atom.GetTotalDegree()-atom.GetTotalNumHs()
+            deg_oh = [float(degree == x) for x in range(common.MAX_COMMON_DEGREE + 1)]
+            deg_oh.append(float(degree > common.MAX_COMMON_DEGREE))
+            feats.extend(deg_oh)
+            formal_charge = atom.GetFormalCharge()
+            chg_oh = [float(formal_charge == x) for x in range(-common.MAX_ABS_FORMAL_CHARGE, common.MAX_ABS_FORMAL_CHARGE + 1)]
+            chg_oh.append(float(abs(formal_charge) > common.MAX_ABS_FORMAL_CHARGE))
+            feats.extend(chg_oh)
+            hyb = atom.GetHybridization()
+            hyb_oh = [float(hyb == x) for x in common.COMMON_HYBRIDIZATION]
+            hyb_oh.append(float(hyb not in common.COMMON_HYBRIDIZATION))
+            feats.extend(hyb_oh)
+            feats.append(float(atom.GetIsAromatic()))
+            nH = atom.GetTotalNumHs()
+            h_oh = [float(nH == x) for x in range(common.COMMON_MAX_HYDROGEN_COUNTS + 1)]
+            h_oh.append(float(nH > common.COMMON_MAX_HYDROGEN_COUNTS))
+            feats.extend(h_oh)
+            # Ring presence one-hot
+            in_ring = atom.IsInRing()
+            feats.extend([float(not in_ring), float(in_ring)])
+            # Ring size multi-hot
+            for rsz in common.COMMON_RING_SIZES:
+                feats.append(float(atom.IsInRingSize(rsz)))
+                feats.append(float(not atom.IsInRingSize(rsz)))
+            # Fused ring one-hot
+            arc = atom_ring_counts[atom_idx]
+            fused = arc >= 2
+            feats.extend([float(not fused), float(fused)])
+            chi = atom.GetChiralTag()
+            feats.extend([float(chi == x) for x in common.COMMON_CHIRALITY])
+            if self.embed_elem_group:
+                sym = atom.GetSymbol()
+                if sym in common.ELEMENT_TO_GROUP:
+                    feats.extend(common.element_to_group[sym].tolist())
+                else:
+                    feats.extend([0.0] * common.ELEMENT_GROUP_DIM)
+            try:
+                charge = float(atom.GetProp("_GasteigerCharge"))
+                if np.isnan(charge) or np.isinf(charge):
+                    charge = 0.0
+            except Exception:
+                charge = 0.0
+            feats.append(charge)
+            node_features.append(feats)
+            degrees.append(degree)
+        x = torch.tensor(node_features, dtype=torch.float32)
+        if self.pe_embed_k > 0:
+            pe_embeds = self.get_pe_for_tensor(mol, x)
+            x = torch.cat((x, pe_embeds), -1).float()
+
+        adj_matrix = Chem.rdmolops.GetAdjacencyMatrix(mol, useBO=False).astype(np.bool_)
+        n = num_atoms
+        UNREACHABLE = np.int16(32767)
+        dist_matrix = np.full((n, n), UNREACHABLE, dtype=np.int16)
+        parents = np.full((n, n), -1, dtype=np.int16)
+        for src in range(n):
+            visited = np.zeros(n, dtype=bool)
+            frontier = np.zeros(n, dtype=bool)
+            frontier[src] = True
+            visited[src] = True
+            dist_matrix[src, src] = 0
+            parents[src, src] = src
+            depth = np.int16(0)
+            while frontier.any():
+                next_frontier = adj_matrix[frontier].any(axis=0)
+                next_frontier &= ~visited
+                if not next_frontier.any():
+                    break
+                depth = np.int16(depth + 1)
+                dist_matrix[src, next_frontier] = depth
+                candidates = adj_matrix[:, next_frontier] & frontier[:, None]
+                parent_idxs = candidates.argmax(axis=0).astype(np.int16)
+                parents[src, next_frontier] = parent_idxs
+                visited |= next_frontier
+                frontier = next_frontier
+        dist_matrix = np.clip(dist_matrix, 0, spatial_pos_max - 1)
+        spatial_pos = torch.from_numpy(dist_matrix).long()
+
+        bond_features_dict = {}
+        for bond in mol.GetBonds():
+            i = bond.GetBeginAtomIdx()
+            j = bond.GetEndAtomIdx()
+            feats = []
+            # Bond type one-hot
+            bt = bond.GetBondType()
+            bt_oh = [float(bt == x) for x in common.COMMON_BOND_TYPES]
+            bt_oh.append(float(bt not in common.COMMON_BOND_TYPES))
+            feats.extend(bt_oh)
+            # Conjugation one-hot
+            conj = bond.GetIsConjugated()
+            feats.extend([float(not conj), float(conj)])
+            # Ring presence one-hot
+            in_ring = bond.IsInRing()
+            feats.extend([float(not in_ring), float(in_ring)])
+            # Ring size one-hot
+            for rsz in common.COMMON_RING_SIZES:
+                feats.append(float(bond.IsInRingSize(rsz)))
+                feats.append(float(not bond.IsInRingSize(rsz)))
+            # Fused ring one-hot
+            brc = bond_ring_counts.get(tuple(sorted((i, j))), 0)
+            fused = brc >= 2
+            feats.extend([float(not fused), float(fused)])
+            # Stereo one-hot
+            stereo = bond.GetStereo()
+            feats.extend([float(stereo == x) for x in common.VALID_BOND_STEREO])
+            feats.append(float(stereo not in common.VALID_BOND_STEREO))
+            bond_features_dict[(i, j)] = feats
+            bond_features_dict[(j, i)] = feats
+
+        bond_feat_dim = self.get_edge_feats()
+        attn_edge_type = torch.zeros([num_atoms, num_atoms, bond_feat_dim], dtype=torch.float32)
+        for (i, j), feats in bond_features_dict.items():
+            attn_edge_type[i, j] = torch.tensor(feats, dtype=torch.float32)
+
+        degree = torch.tensor(degrees, dtype=torch.long)
+
+        # Build the multi-hop edge features. Work in numpy (parents is already numpy and
+        # numpy scalar/row indexing is far cheaper than torch element assignment in this
+        # O(N^2 * path_len) loop, which dominates create_graphormer_input's runtime).
+        # Integer one-hot values are identical to the torch path -> bit-identical output.
+        bond_feat_np = attn_edge_type.numpy().astype(np.int64)
+        edge_input_np = np.zeros([num_atoms, num_atoms, multi_hop_max_dist, bond_feat_dim], dtype=np.int64)
+        for src in range(num_atoms):
+            par_src = parents[src]
+            for tgt in range(num_atoms):
+                if tgt == src or par_src[tgt] == -1:
+                    continue
+                path_nodes = [tgt]
+                cur = tgt
+                while cur != src:
+                    cur = int(par_src[cur])
+                    path_nodes.append(cur)
+                path_nodes.reverse()
+                max_hops = min(len(path_nodes) - 1, multi_hop_max_dist)
+                for hop in range(max_hops):
+                    edge_input_np[src, tgt, hop] = bond_feat_np[path_nodes[hop], path_nodes[hop + 1]]
+        edge_input = torch.from_numpy(edge_input_np)
+
+        attn_bias = torch.where(spatial_pos >= spatial_pos_max, -99999, 0.0)
+        attn_bias = F.pad(attn_bias, (1, 0, 1, 0), value=0.0)
+
+        return {
+            "x": x,
+            "attn_bias": attn_bias,
+            "attn_edge_type": attn_edge_type,
+            "spatial_pos": spatial_pos,
+            "degree": degree,
+            "edge_input": edge_input,
+            "num_atoms": num_atoms,
+        }
+
+class IntenDataset(DAGDataset):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        magma_h5: Path,
+        magma_map: dict,
+        root_encode: str = "gnn",
+        embed_elem_group: bool = False,
+        tree_processor: TreeProcessor = None,
+        datatype: str = "PredSpecDB",
+        num_workers: int = 0,
+        **kwargs,
+    ):
+        super().__init__(df, magma_h5, magma_map, **kwargs)
+        self.root_encode = root_encode
+        self.embed_elem_group = embed_elem_group
+        self.tree_processor = tree_processor
+        self.read_tree = self.tree_processor.featurize_tree
+        self.datatype = datatype
+        self.num_workers = num_workers
+
+    def __getitem__(self, idx: int):
+        name = self.spec_names[idx]
+        adduct = self.name_to_adducts[name]
+        instrument = self.name_to_instruments[name]
+        precursor = self.name_to_precursors[name]
+        entry = self.read_fn(name)
+        outdict = {"name": name, "adduct": adduct, "precursor": precursor, 'instrument': instrument}
+        outdict.update(entry)
+        return outdict
+
+    @classmethod
+    def get_collate_fn(cls):
+        return IntenDataset.collate_fn
+
+    def load_tree(self, x):
+        if self.datatype == "PredSpecDB":
+            filekeys = self.name_to_dict[x]["magma_file"]
+            if not type(self.magma_h5) is common.PredSpecDB:
+                self.magma_h5 = common.PredSpecDB(self.magma_h5)
+            spec = self.magma_h5.read(*filekeys)
+            return spec
+        elif self.datatype == "HDF5":
+            filename = self.name_to_dict[x]["magma_file"]
+            if not type(self.magma_h5) is common.HDF5Dataset:
+                self.magma_h5 = common.HDF5Dataset(self.magma_h5)
+            fp = self.magma_h5.read_str(filename)
+            return json.loads(fp)
+        else:
+            raise ValueError(f"Unsupported datatype: {self.datatype}")
+
+    @staticmethod
+    def collate_fn(batch):
+        names = [item["name"] for item in batch]
+        smis = [item["root_smiles"] for item in batch]
+        masses = [item["masses"] for item in batch]
+        masses_padded = torch.nn.utils.rnn.pad_sequence(masses, batch_first=True)
+        adduct_mass_shifts = torch.from_numpy(np.stack([item["adduct_mass_shift"] for item in batch])).float()
+
+        if dgl is not None and isinstance(batch[0]["root_repr"], dgl.DGLGraph):
+            batched_reprs = _collate_root(batch)
+        else:
+            batched_reprs = None
+        adducts = torch.FloatTensor([item["adduct"] for item in batch])
+        collision_engs = torch.FloatTensor([float(item["collision_energy"]) for item in batch])
+        supply_instrument = "instrument" in batch[0]
+        if supply_instrument:
+            instruments = [j["instrument"] for j in batch]
+            instruments = torch.FloatTensor(instruments)
+        if batch[0]["frag_targs"] is not None:
+            frag_targs = [item["frag_targs"] for item in batch]
+            num_frags = torch.LongTensor([t.shape[0] for t in frag_targs])
+            max_atoms = max(t.shape[1] for t in frag_targs)
+
+            padded_frag_targs = []
+            for t in frag_targs:
+                if t.shape[1] < max_atoms:
+                    pad_width = max_atoms - t.shape[1]
+                    padded = torch.nn.functional.pad(t, (0, pad_width), value=0)
+                else:
+                    padded = t
+                padded_frag_targs.append(padded)
+            frag_targs = torch.cat(padded_frag_targs, dim=0)
+        else:
+            frag_targs = None
+            num_frags = None
+
+
+        atom_form_vecs = torch.cat([item["atom_form_vecs"] for item in batch], dim=0)
+        root_form_vecs = torch.stack([item["root_form_vec"] for item in batch], dim=0)
+
+        atom_hs_list = [item["atom_hs"] for item in batch]
+        atom_hs_padded = torch.nn.utils.rnn.pad_sequence(atom_hs_list, batch_first=True)
+        total_hs_list = torch.LongTensor([item["total_hs"] for item in batch])
+
+        adj_matrices = [item["adj_matrix"] for item in batch]
+        max_nodes = max(adj.shape[0] for adj in adj_matrices)
+        padded_adj_matrices = []
+        for adj in adj_matrices:
+            if adj.shape[0] < max_nodes:
+                pad_size = max_nodes - adj.shape[0]
+                padded_adj = torch.nn.functional.pad(adj, (0, pad_size, 0, pad_size), value=0)
+            else:
+                padded_adj = adj
+            padded_adj_matrices.append(padded_adj)
+        adj_matrices_batch = torch.stack(padded_adj_matrices, dim=0)
+
+        graphormer_inputs = [item["graphormer_input"] for item in batch if item["graphormer_input"] is not None]
+        graphormer_batch = None
+        if graphormer_inputs:
+            max_nodes_gf = max(gf['x'].shape[0] for gf in graphormer_inputs)
+            max_dist = max(gf['edge_input'].shape[2] for gf in graphormer_inputs)
+            node_feat_dim = graphormer_inputs[0]['x'].shape[1]
+            edge_feat_dim = graphormer_inputs[0]['attn_edge_type'].shape[2]
+            batch_size = len(graphormer_inputs)
+
+            x_batch = torch.zeros([batch_size, max_nodes_gf, node_feat_dim], dtype=torch.float32)
+            attn_bias_batch = torch.full([batch_size, max_nodes_gf + 1, max_nodes_gf + 1], -99999, dtype=torch.float32)
+            attn_edge_type_batch = torch.zeros([batch_size, max_nodes_gf, max_nodes_gf, edge_feat_dim], dtype=torch.float32)
+            spatial_pos_batch = torch.zeros([batch_size, max_nodes_gf, max_nodes_gf], dtype=torch.long)
+            degree_batch = torch.zeros([batch_size, max_nodes_gf], dtype=torch.long)
+            edge_input_batch = torch.zeros([batch_size, max_nodes_gf, max_nodes_gf, max_dist, edge_feat_dim], dtype=torch.float32)
+
+            for i, gf_input in enumerate(graphormer_inputs):
+                num_nodes = gf_input['x'].shape[0]
+                edge_dist = gf_input['edge_input'].shape[2]
+                x_batch[i, :num_nodes] = gf_input['x']
+                attn_bias_batch[i, :num_nodes+1, :num_nodes+1] = gf_input['attn_bias']
+                attn_edge_type_batch[i, :num_nodes, :num_nodes] = gf_input['attn_edge_type']
+                spatial_pos_batch[i, :num_nodes, :num_nodes] = gf_input['spatial_pos']
+                degree_batch[i, :num_nodes] = gf_input['degree']
+                edge_input_batch[i, :num_nodes, :num_nodes, :edge_dist] = gf_input['edge_input']
+
+            graphormer_batch = {
+                'x': x_batch,
+                'attn_bias': attn_bias_batch,
+                'attn_edge_type': attn_edge_type_batch,
+                'spatial_pos': spatial_pos_batch,
+                'degree': degree_batch,
+                'edge_input': edge_input_batch,
+            }
+            num_atoms = torch.tensor([gf['num_atoms'] for gf in graphormer_inputs], dtype=torch.long)
+        else:
+            num_atoms = batched_reprs.batch_num_nodes()
+
+        if batch[0]['inten_targs'] is not None:
+            inten_targs_padded = torch.nn.utils.rnn.pad_sequence([torch.from_numpy(item['inten_targs']) for item in batch], batch_first=True)
+        else:
+            inten_targs_padded = None
+        precursor_mzs = torch.FloatTensor([j["precursor"] for j in batch])
+
+        output = {
+            "smis": smis,
+            "names": names,
+            "root_reprs": batched_reprs,
+            "frag_targs": frag_targs,
+            "adducts": adducts,
+            "collision_engs": collision_engs,
+            "masses": masses_padded,
+            "adduct_mass_shifts": adduct_mass_shifts,
+            "inten_targs": inten_targs_padded,
+            "precursor_mzs": precursor_mzs,
+            "num_frag_targs": num_frags,
+            "root_form_vecs": root_form_vecs,
+            "atom_form_vecs": atom_form_vecs,
+            "adj_matrices": adj_matrices_batch,
+            "atom_hs": atom_hs_padded,
+            "total_hs": total_hs_list,
+            "graphormer_input": graphormer_batch,
+            "num_atoms": num_atoms,
+            "instruments": instruments if supply_instrument else None,
+        }
+        return output
+    
+class IntenContrDataset(IntenDataset):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        magma_h5: Path,
+        magma_map: dict,
+        root_encode: str = "gnn",
+        embed_elem_group: bool = False,
+        tree_processor: TreeProcessor = None,
+        datatype: str = "PredSpecDB",
+        num_workers: int = 0,
+        num_decoys: int = 7,
+        pubchem_path: str = 'data/pubchem/pubchem_formulae_inchikey.hdf5',
+        all_decoy_nums: int=10,
+        fix_decoys: bool = False,
+        filter_decoys_by_retrieval_inchikey: bool = False,
+        retrieval_inchikey_tsv: str = 'data/spec_datasets/nist20/retrieval/cands_df_split_1_50.tsv',
+        **kwargs,
+    ):
+        super().__init__(
+            df,
+            magma_h5,
+            magma_map,
+            root_encode,
+            embed_elem_group,
+            tree_processor,
+            datatype,
+            num_workers,
+            **kwargs,
+        )
+        self.pubchem_path = pubchem_path
+        self.all_decoy_nums = all_decoy_nums
+        self.num_decoys = num_decoys
+        self.fix_decoys = fix_decoys
+        self.filter_decoys_by_retrieval_inchikey = filter_decoys_by_retrieval_inchikey
+        self.retrieval_inchikey_tsv = retrieval_inchikey_tsv
+        self.retrieval_inchikey_filter: Set[str] = set()
+        if self.filter_decoys_by_retrieval_inchikey:
+            self.retrieval_inchikey_filter = self._load_retrieval_inchikey_filter(self.retrieval_inchikey_tsv)
+        if self.fix_decoys:
+            self.fixed_decoys = {}
+
+    @staticmethod
+    def _load_retrieval_inchikey_filter(retrieval_inchikey_tsv: str) -> Set[str]:
+        retrieval_path = Path(retrieval_inchikey_tsv)
+        if not retrieval_path.exists():
+            raise FileNotFoundError(
+                f"Retrieval InChIKey TSV not found: {retrieval_inchikey_tsv}"
+            )
+
+        retrieval_df = pd.read_csv(retrieval_path, sep="\t")
+        if "inchikey" not in retrieval_df.columns:
+            raise ValueError(
+                f"Missing 'inchikey' column in retrieval TSV: {retrieval_inchikey_tsv}"
+            )
+
+        inchikeys = retrieval_df["inchikey"].dropna().astype(str).str.strip()
+        return set(inchikeys[inchikeys != ""].tolist())
+
+    @classmethod
+    def get_collate_fn(cls):
+        return IntenContrDataset.collate_fn
+
+    @staticmethod
+    def collate_fn(
+        input_list,
+    ):
+        """collate_fn.
+
+        Batch a list of graphs and convert.
+
+        Should return dict containing:
+            1. Vector of names.
+            2. Batched root graphs
+            3. Batched fragment graphs
+            5. Number of atoms per frag graph
+            6. Conversion mapping indices between root and children
+            7. Inten targets
+            8. Num broken bonds per atom
+            9. Num frags in each mols dag
+
+        """
+        input_list_targ = [i[0] for i in input_list]
+        input_list_decoy = [i[1] for i in input_list]
+        num_decoys_per_entry = torch.LongTensor([len(decoys) for decoys in input_list_decoy])
+        input_list_decoy_flatten = [decoy for sublist in input_list_decoy for decoy in sublist]
+        targ_output = IntenDataset.collate_fn(input_list_targ)
+        if len(input_list_decoy_flatten) == 0:
+            # All items in this batch have zero valid decoys; fall back to the
+            # non-contrastive path so the model skips the contrastive loss.
+            return targ_output
+        decoy_output = IntenDataset.collate_fn(input_list_decoy_flatten)
+        return {"targ":targ_output, "decoy":decoy_output, "num_decoys_per_entry":num_decoys_per_entry}
+    
+    def generate_decoys(self, smi):
+        # generate 50% mutation decoys + 50% pubchem isomer decoys
+        smi = common.rm_stereo(smi)
+        mol = common.smi_inchi_round_mol(smi)
+        smi = Chem.MolToSmiles(mol)  # canonical smiles
+        inchikey = Chem.MolToInchiKey(mol)
+        pubchem_rate = 0.5
+        formula = common.uncharged_formula(mol, mol_type='mol')
+        h5obj = common.HDF5Dataset(self.pubchem_path)
+        if formula in h5obj:
+            num_pubchem = int(self.all_decoy_nums * pubchem_rate)
+            num_mutation = self.all_decoy_nums - num_pubchem
+        else:
+            num_pubchem = 0
+            num_mutation = self.all_decoy_nums
+
+        # mutate molecules
+        decoy_mols = [mutate(mol, mutation_rate=1.) for _ in range(num_mutation)]
+
+        # get molecules from pubchem
+        if num_pubchem > 0:
+            cand_str = h5obj.read_str(formula)
+            smi_inchi_list = json.loads(cand_str)
+            decoy_mols += [Chem.MolFromSmiles(_[0]) for _ in random.choices(smi_inchi_list, k=num_pubchem)]
+
+        # sanitize & filter duplicated structures
+        decoy_mols = [common.rm_stereo(m, mol_type='mol') for m in decoy_mols]
+        decoy_mols = np.array(common.sanitize(decoy_mols))
+        decoy_inchikeys = np.array([Chem.MolToInchiKey(m) for m in decoy_mols])
+        _, unique_inds = np.unique(decoy_inchikeys, return_index=True)
+
+        decoy_smis = []
+        for new_mol, new_inchikey in zip(decoy_mols[unique_inds], decoy_inchikeys[unique_inds]):
+            new_smi = Chem.MolToSmiles(new_mol)
+            if '.' not in new_smi:
+                if new_inchikey != inchikey:
+                    if self.filter_decoys_by_retrieval_inchikey and new_inchikey in self.retrieval_inchikey_filter:
+                        continue
+                    decoy_smis.append(new_smi)
+        return decoy_smis
+    def __getitem__(self, idx: int):
+
+        name = self.spec_names[idx]
+        colli_eng = common.get_collision_energy(name)
+        adduct = self.name_to_adducts[name]
+        precursor = self.name_to_precursors[name]
+        instrument = self.name_to_instruments[name]
+        dataset_smi = self.name_to_smiles[name]
+        entry = self.read_fn(name)
+        outdict = {"name": name, "adduct": adduct, "precursor": precursor, "instrument": instrument, 'smiles': dataset_smi, 'decoy': 0}
+        outdict.update(entry)
+
+        outlist = [outdict]
+        if self.fix_decoys and name in self.fixed_decoys:
+            decoy_smis = self.fixed_decoys[name]
+        else:
+            decoy_smis = self.generate_decoys(dataset_smi)
+            if len(decoy_smis) > self.num_decoys:
+                decoy_smis = random.sample(decoy_smis, self.num_decoys)
+            if self.fix_decoys:
+                self.fixed_decoys[name] = decoy_smis
+        decoy_outlist = []
+        if len(decoy_smis) > 0:
+            for decoy_smi in decoy_smis:
+                decoy_data = common.MassSpec(colli_eng, decoy_smi, common.onehot_pos2ion[adduct])
+                trees = self.tree_processor.featurize_tree(decoy_data, include_inten_targs= False, include_frag_targs=False)
+                trees.update(
+                    {"name": name + '_decoy', "adduct": adduct, "precursor": precursor, "instrument": instrument,
+                     "collision_energy": colli_eng, "smiles": decoy_data})
+                decoy_outlist.append(trees)
+        outlist.append(decoy_outlist)
+        return outlist
+
+    @staticmethod
+    def sanitize(mol_list: List[Chem.Mol]) -> List[Chem.Mol]:
+        """sanitize.py"""
+        new_mol_list = []
+        smiles_set = set()
+        for mol in mol_list:
+            if mol is not None:
+                try:
+                    smiles = Chem.MolToSmiles(mol)
+                    if smiles is not None and smiles not in smiles_set:
+                        smiles_set.add(smiles)
+                        new_mol_list.append(mol)
+                except ValueError:
+                    logging.warning(f"Bad smiles")
+        return new_mol_list
+
+class IntenPredDataset(Dataset):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        tree_processor: TreeProcessor,
+        root_encode: str = "gnn",
+        embed_elem_group: bool = False,
+        num_workers: int = 0,
+        sort_for_batching: bool = True,
+        feat_cache_size: int = 8192,
+        **kwargs,
+    ):
+        self.df = df.copy()
+        self.tree_processor = tree_processor
+        self.root_encode = root_encode
+        self.embed_elem_group = embed_elem_group
+        self.num_workers = num_workers
+        # Per-worker cache of featurized molecules so create_graphormer_input()
+        # runs once per unique (smiles, adduct), not once per (mol, collision-energy)
+        # row. Effective because entries are sorted so identical molecules are
+        # contiguous and each batch is dispatched to a single DataLoader worker.
+        self.sort_for_batching = sort_for_batching
+        self.feat_cache_size = feat_cache_size
+        self._feat_cache = OrderedDict()
+
+        if "instrument" not in self.df.columns:
+            self.df["instrument"] = "Unknown"
+
+        required_cols = ["spec", "smiles", "ionization", "collision_energies"]
+        missing_cols = [col for col in required_cols if col not in self.df.columns]
+        if len(missing_cols) > 0:
+            raise ValueError(f"Missing required columns for IntenPredDataset: {missing_cols}")
+
+        self.entries = []
+        self.spec_names = []
+        self.name_to_smiles = {}
+        self.name_to_adducts = {}
+        self.name_to_instruments = {}
+        self.name_to_precursors = {}
+
+        for _, row in self.df.iterrows():
+            spec_name = row["spec"]
+            instrument = row["instrument"]
+            adduct = row["ionization"]
+            smi = row["smiles"]
+
+            if instrument not in common.instrument2onehot_pos:
+                continue
+            if adduct not in common.ion2onehot_pos:
+                continue
+            if not isinstance(smi, str) or len(smi) == 0:
+                continue
+
+            ce_raw = row["collision_energies"]
+            try:
+                ce_list = ast.literal_eval(ce_raw) if isinstance(ce_raw, str) else ce_raw
+            except (SyntaxError, ValueError):
+                ce_list = []
+
+            if ce_list is None:
+                ce_list = []
+
+            for ce in ce_list:
+                ce_val = common.collision_energy_to_float(ce)
+                if np.isnan(ce_val):
+                    continue
+
+                entry_name = f"{spec_name}_collision {ce_val:.0f}"
+                precursor = row["precursor"] if "precursor" in row and pd.notna(row["precursor"]) else None
+                if precursor is None:
+                    precursor = common.mass_from_smi(smi) + common.ion2mass[adduct]
+
+                self.entries.append(
+                    {
+                        "name": entry_name,
+                        "spec": spec_name,
+                        "smiles": smi,
+                        "adduct": adduct,
+                        "instrument": instrument,
+                        "precursor": float(precursor),
+                        "collision_energy": float(ce_val),
+                    }
+                )
+
+                self.spec_names.append(entry_name)
+                self.name_to_smiles[entry_name] = smi
+                self.name_to_adducts[entry_name] = common.ion2onehot_pos[adduct]
+                self.name_to_instruments[entry_name] = common.instrument2onehot_pos[instrument]
+                self.name_to_precursors[entry_name] = float(precursor)
+
+        logging.info(f"Prepared {len(self.entries)} prediction entries from {len(self.df)} labels rows.")
+
+        if self.sort_for_batching:
+            # Sort by (heavy-atom count, smiles) so (a) identical molecules are
+            # contiguous -> within-batch featurization cache hits, and (b) similarly
+            # sized molecules share a batch -> less graphormer padding waste.
+            n_atoms_cache = {}
+
+            def _num_atoms(smi: str) -> int:
+                if smi not in n_atoms_cache:
+                    m = Chem.MolFromSmiles(smi)
+                    n_atoms_cache[smi] = m.GetNumAtoms() if m is not None else 0
+                return n_atoms_cache[smi]
+
+            order = sorted(
+                range(len(self.entries)),
+                key=lambda i: (_num_atoms(self.entries[i]["smiles"]), self.entries[i]["smiles"]),
+            )
+            self.entries = [self.entries[i] for i in order]
+            self.spec_names = [self.spec_names[i] for i in order]
+
+    def __len__(self):
+        return len(self.entries)
+
+    def _featurize_cached(self, entry):
+        """Featurize molecule with a small per-worker LRU keyed on (smiles, adduct).
+
+        The graphormer input / fragment engine / form vectors depend only on the
+        molecule + adduct, not the collision energy, so multiple collision-energy
+        rows for the same molecule reuse one featurization. The returned dict is
+        shallow-copied per call so the caller can set a row-specific collision
+        energy without mutating the cached object.
+        """
+        key = (entry["smiles"], entry["adduct"])
+        feat = self._feat_cache.get(key)
+        if feat is None:
+            tree = {
+                "root_canonical_smiles": entry["smiles"],
+                "adduct": entry["adduct"],
+                "collision_energy": entry["collision_energy"],
+            }
+            feat = self.tree_processor.featurize_tree(
+                tree,
+                include_inten_targs=False,
+                include_frag_targs=False,
+            )
+            self._feat_cache[key] = feat
+            if self.feat_cache_size and len(self._feat_cache) > self.feat_cache_size:
+                self._feat_cache.popitem(last=False)
+        else:
+            self._feat_cache.move_to_end(key)
+        return feat
+
+    def __getitem__(self, idx: int):
+        entry = self.entries[idx]
+        feat = dict(self._featurize_cached(entry))
+        feat["collision_energy"] = entry["collision_energy"]
+        outdict = {
+            "name": entry["name"],
+            "adduct": self.name_to_adducts[entry["name"]],
+            "precursor": self.name_to_precursors[entry["name"]],
+            "instrument": self.name_to_instruments[entry["name"]],
+        }
+        outdict.update(feat)
+        return outdict
+
+    @classmethod
+    def get_collate_fn(cls):
+        return IntenDataset.collate_fn

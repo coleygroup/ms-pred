@@ -23,6 +23,24 @@ from ms_pred.marason import dag_data, inten_model
 import scipy.sparse as sparse
 
 
+def build_pred_magma_map(magma_tree_path: Path, strip_pred_prefix: bool = False):
+    predspec_db = common.PredSpecDB(magma_tree_path)
+    name_to_entry = {}
+    for name in predspec_db.get_all_names():
+        map_name = name[5:] if strip_pred_prefix and name.startswith("pred_") else name
+        ces, remarks = predspec_db.get_entries(name)
+        for ce, remark in zip(ces, remarks):
+            name_to_entry[f"{map_name}_collision {ce}"] = (name, ce, remark)
+    if len(name_to_entry) > 0:
+        return name_to_entry
+
+    legacy_h5 = common.HDF5Dataset(magma_tree_path)
+    return {
+        Path(name).stem.replace("pred_", "") if strip_pred_prefix else Path(name).stem: name
+        for name in legacy_h5.get_all_names()
+    }
+
+
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -76,14 +94,26 @@ def predict():
     # Get dataset
     # Load smiles dataset and split into 3 subsets
     dataset_name = kwargs["dataset_name"]
-    data_dir = Path("data/spec_datasets") / dataset_name
+    data_dir = common.get_data_dir(dataset_name)
     labels = data_dir / kwargs["dataset_labels"]
 
     # Get train, val, test inds
     df = pd.read_csv(labels, sep="\t")
+    if "spec" not in df.columns and "name" in df.columns:
+        df = df.rename(columns={"name": "spec"})
+    if "spec" not in df.columns:
+        raise ValueError(
+            f"Expected a 'spec' column in {labels}, found columns: {list(df.columns)}"
+        )
 
     if kwargs["subset_datasets"] != "none":
         splits = pd.read_csv(data_dir / "splits" / kwargs["split_name"], sep="\t")
+        if "spec" not in splits.columns and "name" in splits.columns:
+            splits = splits.rename(columns={"name": "spec"})
+        if "spec" not in splits.columns:
+            raise ValueError(
+                "Split file must contain a 'spec' column or a legacy 'name' column."
+            )
         folds = set(splits.keys())
         folds.remove("spec")
         fold_name = list(folds)[0]
@@ -105,6 +135,8 @@ def predict():
 
     # Create model and load
     # Load from checkpoint
+    if kwargs["debug"]:
+        df = df.head(10)
     best_checkpoint = kwargs["checkpoint_pth"]
     model = inten_model.IntenGNN.load_from_checkpoint(best_checkpoint)
     logging.info(f"Loaded model with from {best_checkpoint}")
@@ -114,8 +146,7 @@ def predict():
     add_hs = model.add_hs
     embed_elem_group = model.embed_elem_group
     magma_dag_folder = Path(kwargs["magma_dag_folder"])
-    magma_tree_h5 = common.HDF5Dataset(magma_dag_folder)
-    name_to_json = {Path(i).stem.replace("pred_", ""): i for i in magma_tree_h5.get_all_names()}
+    name_to_keys = build_pred_magma_map(magma_dag_folder, strip_pred_prefix=True)
     num_workers = kwargs.get("num_workers", 0)
 
     tree_processor = dag_data.TreeProcessor(
@@ -128,15 +159,19 @@ def predict():
         inten_folder = Path(kwargs["inten_folder"])
         db_df = pd.read_csv(ref_dir/"train_subset.csv")
 
-        db_magma_tree_h5 = common.HDF5Dataset(inten_folder)
-        db_name_to_json = {Path(i).stem.replace("pred_", ""): i for i in db_magma_tree_h5.get_all_names()}
+        db_magma_tree_h5 = common.PredSpecDB(inten_folder)
+        db_name_to_keys = {}
+        for name in db_magma_tree_h5.get_all_names():
+            ces, remarks = db_magma_tree_h5.get_entries(name)
+            for ce, remark in zip(ces, remarks):
+                db_name_to_keys[f"{name}_collision {ce}"] = (name, ce, remark)
         db = dag_data.IntenDataset(
             db_df,         
             tree_processor=tree_processor,
             num_workers=num_workers,
             # data_dir=data_dir,
             magma_h5=inten_folder,
-            magma_map=db_name_to_json
+            magma_map=db_name_to_keys
         )
         if kwargs["subset_datasets"] == "test_only":
             test_ref_df = pd.read_csv(ref_dir / "test.csv")
@@ -153,7 +188,7 @@ def predict():
         tree_processor=tree_processor,
         num_workers=num_workers,
         magma_h5=magma_dag_folder,
-        magma_map=name_to_json,
+        magma_map=name_to_keys,
         ref_spec_names=ref_spec_names,
         closest=closest,
         closest_distances = distance,
@@ -281,20 +316,34 @@ def predict():
 
     # Export pred objects
     if binned_out:
-        h5 = common.HDF5Dataset(Path(kwargs["save_dir"]) / "binned_preds.hdf5", mode='w')
-        h5.attrs['num_bins'] = model.inten_buckets.shape[-1]
-        h5.attrs['upper_limit'] = 1500
-        h5.attrs['sparse_out'] = False
+        h5_path = Path(kwargs["save_dir"]) / "binned_preds.hdf5"
+        specdb = common.PredSpecDB(
+            h5_path=h5_path,
+            mode='w',
+            has_probs=False,
+            has_brokens=False,
+            has_masses=False,
+            has_masses_no_adduct=False,
+            has_frag_form_vecs=False,
+            has_frags=False,
+            has_intens=True,
+            has_pulled_atoms=False,
+        )
         for output_obj in pred_list:
             spec_name = output_obj["spec_name"]
             smi = output_obj["smiles"]
-            inchikey = common.inchikey_from_smiles(smi)
             collision_energy = output_obj["collision_energy"]
             output_spec = output_obj["output_spec"]
-            h5_name = f'pred_{spec_name}/ikey {inchikey}/collision {collision_energy}'
-            h5.write_data(h5_name + '/spec', output_spec)
-            h5.update_attr(h5_name, {'smiles': smi, 'ikey': inchikey, 'spec_name': spec_name})
-        h5.close()
+            pred_ms = common.MassSpec(
+                root_canonical_smiles=smi,
+                collision_energy=collision_energy.cpu().numpy(),
+                intens=output_spec,
+                num_bins=model.inten_buckets.shape[-1],
+                upper_limit=1500,
+                sparse_out=False,
+            )
+            specdb.write(spec_name, pred_ms)
+        specdb.close()
 
         # spec_names_ar = [str(i["spec_name"]) for i in pred_list]
         # smiles_ar = [str(i["smiles"]) for i in pred_list]

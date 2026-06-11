@@ -22,7 +22,21 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 
 import ms_pred.common as common
-from ms_pred.marason import dag_data, gen_model
+from ms_pred.dag_pred import dag_data, gen_model
+
+
+def build_gen_magma_map(magma_tree_path: Path):
+    predspec_db = common.PredSpecDB(magma_tree_path)
+    name_to_entry = {}
+    for name in predspec_db.get_all_names():
+        ces, remarks = predspec_db.get_entries(name)
+        for ce, r in zip(ces, remarks):
+            name_to_entry[f"{name}_collision {ce}"] = (name, ce, r)
+    if len(name_to_entry) > 0:
+        return name_to_entry
+
+    legacy_h5 = common.HDF5Dataset(magma_tree_path)
+    return {Path(name).stem: name for name in legacy_h5.get_all_names()}
 
 
 def add_frag_train_args(parser):
@@ -111,8 +125,6 @@ def train_model():
     df = pd.read_csv(labels, sep="\t")
     if kwargs["debug"]:
         df = df[:100]
-    if "instrument" not in df:
-        df["instrument"] = "Orbitrap"
 
     spec_names = df["spec"].values
     if kwargs["debug_overfit"]:
@@ -137,8 +149,8 @@ def train_model():
 
     magma_folder = kwargs["magma_folder"]
     num_workers = kwargs.get("num_workers", 0)
-    magma_tree_h5 = common.HDF5Dataset(data_dir / f"{magma_folder}/magma_tree.hdf5")
-    name_to_json = {Path(i).stem: i for i in magma_tree_h5.get_all_names()}
+    magma_tree_path = data_dir / f"{magma_folder}/magma_tree.hdf5"
+    name_to_json = build_gen_magma_map(magma_tree_path)
 
     pe_embed_k = kwargs["pe_embed_k"]
     root_encode = kwargs["root_encode"]
@@ -149,14 +161,14 @@ def train_model():
     # Build out frag datasets
     train_dataset = dag_data.GenDataset(
         train_df,
-        magma_h5=data_dir / f"{magma_folder}/magma_tree.hdf5",
+        magma_h5=magma_tree_path,
         magma_map=name_to_json,
         num_workers=num_workers,
         tree_processor=tree_processor,
     )
     val_dataset = dag_data.GenDataset(
         val_df,
-        magma_h5=data_dir / f"{magma_folder}/magma_tree.hdf5",
+        magma_h5=magma_tree_path,
         magma_map=name_to_json,
         num_workers=num_workers,
         tree_processor=tree_processor,
@@ -164,7 +176,7 @@ def train_model():
 
     test_dataset = dag_data.GenDataset(
         test_df,
-        magma_h5=data_dir / f"{magma_folder}/magma_tree.hdf5",
+        magma_h5=magma_tree_path,
         magma_map=name_to_json,
         num_workers=num_workers,
         tree_processor=tree_processor,
@@ -183,6 +195,7 @@ def train_model():
         persistent_workers=persistent_workers,
         multiprocessing_context=mp_contex,
     )
+    # get example entry from train loader
     val_loader = DataLoader(
         val_dataset,
         num_workers=kwargs["num_workers"],

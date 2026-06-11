@@ -1,0 +1,100 @@
+launcher_args: {experiment_name: joint_train_nist20,
+  script_name: "src/ms_pred/GLACIER/train_contr_joint.py",
+  slurm_script: launcher_scripts/generic_slurm.sh,
+  launch_method: local,
+  visible_devices: [0, 1]
+}
+universal_args:
+  _slurm_args:
+  - {_num_gpu: 1, cpus-per-task: 7, job-name: joint_train, mem-per-cpu: 8G,
+    time: '1-12:00:00'}
+  debug: [False]
+  gpu: [true]
+  seed: [1]
+  num-workers: [32]
+  batch-size: [16]
+  max-epochs: [200]
+  min-epochs: [20]
+
+  dataset-name: [nist20]
+  split-name: [split_1.tsv]
+  dataset-labels: [labels.tsv]
+  magma-folder: [magma_outputs]
+
+  learning-rate: [0.00027]
+  lr-decay-rate: [0.9]
+  weight-decay: [0]
+  grad-accumulate: [2]
+
+  inten-dropout: [0.1]
+  frag-dropout: [0.1]
+  hidden-size: [256]
+  graphormer-layers: [5]
+  graphormer-dropout: [0.1]
+  num-decoys: [5]
+  num-fixed-decoys: [5]
+  all-decoy-nums: [20]
+  embed-elem-group: [True]
+  add-hs: [True]
+  embed-adduct: [True]
+  embed-collision: [True]
+  embed-instrument: [True]
+  encode-forms: [True]
+  inten-decoder-layers: [4]
+  inten-encoder-layers: [3]
+  frag-encoder-layers: [0]
+  frag-decoder-layers: [4]
+  max-broken-bonds: [6]
+  max-breakpoints: [200]
+  multi-hop-max-dist: [10]
+  num-edge-dis: [10]
+  enable-aux-loss: [True]
+  enable-decoder-norm: [False]
+  sk-tau: [0.05]
+  linsat-tau: [15]
+  inten-weight: [1]
+  frag-weight: [0.1]
+  warmup: [2000]
+  magma-warmup-steps: [2500]
+  magma-decay-rate: [0.9]
+  magma-decay-steps: [2500]
+  binned-targs: [True]
+  inten-loss-fn: [cosine]
+  contr-loss-fn: [entropy]
+  contr-weight: [1]
+  contr-threshold: [0.4]
+  num-bins: [15000]
+  pubchem-map-path: ['data/retrieval/pubchem/pubchem_formulae_inchikey.hdf5']
+  filter-decoys-by-retrieval-inchikey: [false]
+  retrieval-inchikey-tsv: ['data/spec_datasets/nist20/retrieval/cands_df_split_1_50.tsv']
+
+iterative_args:
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd1]
+     seed: [1]
+     train-checkpoint: [results/joint_train_nist20/split_1_rnd1/version_0/best.ckpt]
+
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd2]
+     seed: [2]
+     train-checkpoint: [results/joint_train_nist20/split_1_rnd2/version_0/best.ckpt]
+
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd3]
+     seed: [3]
+     train-checkpoint: [results/joint_train_nist20/split_1_rnd3/version_0/best.ckpt]
+
+  -  split-name: [scaffold_1.tsv]
+     save-dir: [scaffold_1_rnd1]
+     seed: [1]
+     train-checkpoint: [results/joint_train_nist20/scaffold_1_rnd1/version_0/best.ckpt]
+
+  -  split-name: [scaffold_1.tsv]
+     save-dir: [scaffold_1_rnd2]
+     seed: [2]
+     train-checkpoint: [results/joint_train_nist20/scaffold_1_rnd2/version_0/best.ckpt]
+
+  -  split-name: [scaffold_1.tsv]
+     save-dir: [scaffold_1_rnd3]
+     seed: [3]
+     train-checkpoint: [results/joint_train_nist20/scaffold_1_rnd3/version_0/best.ckpt]

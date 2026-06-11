@@ -104,9 +104,9 @@ and the latter is permissive and allows all entries to pass.
 ```
 
 
-### ICEBERG Processing
+### ICEBERG and GLACIER Processing
 
-In addition to building processed subformulae, to train ICEBERG, we must
+In addition to building processed subformulae, to train ICEBERG and GLACIER, we must
 annotate substructures and create a labeled dataset over the breakage process, 
 which we do with the MAGMa algorithm.
 
@@ -184,6 +184,7 @@ training, and predict calls can be  made using the following scripts respectivel
 An example of how to use ICEBERG for structural elucidation campaigns can be found at ``notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb``.
 
 ### MARASON
+> Note that MARASON is not actively maintained and is not compatible with this repo at the moment. 
 
 MARASON is trained in two parts: a learned fragment generator (the same as the one in ICEBERG) and an RAG-based intensity predictor. The pipeline for training and evaluating this model can be accessed in `run_scripts/marason/`. 
 There is an all-in-one script ``run_scripts/marason/run_all.sh`` that trains the up-to-date version of MARASON on NIST'20 and MassSpecGym dataset. 
@@ -223,6 +224,15 @@ training, and predict calls can be made using the following scripts respectively
 3. `python src/ms_pred/marason/predict_smis.py`
 
 You can use `python launcher_scripts/run_from_config.py configs/marason/marason_inten_test_nist.yaml` to generate relevant analysis and visualizations in the MARASON paper. You can draw the matching pattern and the spectra visualization by setting `draw` and `plot-spec` to be true respectively. If you want to do the similarity-grouped analysis described in the paper, set `draw` and `plot-spec` to be false. The bootstrap analysis for MassSpecGym retrieval task can be carried out by running `analysis/msg_bootstrap.py`.
+
+### GLACIER
+GLACIER is the first ms/ms machine learning model that predict multi-breakpoint fragmentation process in single pass. You can reproduce the experiments in our paper with the following scripts.
+
+1. *Train model*: `run_scripts/GLACIER/01_train_joint.sh`   
+2. *Predict spectral intensity*: `run_scripts/GLACIER/02_predict_inten.py`     
+3. *Retrieval*: `run_scripts/GLACIER/03_run_retrieval.py`   
+
+> You need two GPUs with at least 24GB RAM to train GLACIER (we used NVIDIA A5000 for development). 
 
 ### SCARF
 

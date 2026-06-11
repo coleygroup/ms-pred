@@ -38,6 +38,7 @@ class IntFeaturizer(nn.Module):
             (*orig_shape, self.embedding_dim), device=tensor.device
         )
         extra_embed = tensor >= self.MAX_COUNT_INT
+        tensor[extra_embed] = torch.clamp(min=self.MAX_COUNT_INT, max= self.MAX_COUNT_INT + self.NUM_EXTRA_EMBEDDINGS - 1, input=tensor[extra_embed])
 
         tensor = tensor.long()
         norm_embeds = self.int_to_feat_matrix[tensor[~extra_embed]]

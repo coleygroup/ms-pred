@@ -8,7 +8,6 @@ import multiprocess.process
 import random
 import math
 import ast
-import json
 from tqdm import tqdm
 from datetime import datetime
 import yaml
@@ -39,6 +38,24 @@ rdBase.DisableLog("rdApp.error")
 RDLogger.DisableLog("rdApp.*")
 
 
+def build_gen_magma_map(magma_tree_path: Path, strip_pred_prefix: bool = False):
+    predspec_db = common.PredSpecDB(magma_tree_path)
+    name_to_entry = {}
+    for name in predspec_db.get_all_names():
+        map_name = name[5:] if strip_pred_prefix and name.startswith("pred_") else name
+        ces, remarks = predspec_db.get_entries(name)
+        for ce, remark in zip(ces, remarks):
+            name_to_entry[f"{map_name}_collision {ce}"] = (name, ce, remark)
+    if len(name_to_entry) > 0:
+        return name_to_entry
+
+    legacy_h5 = common.HDF5Dataset(magma_tree_path)
+    return {
+        Path(name).stem.replace("pred_", "") if strip_pred_prefix else Path(name).stem: name
+        for name in legacy_h5.get_all_names()
+    }
+
+
 def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--debug", default=False, action="store_true")
@@ -48,7 +65,8 @@ def get_args():
     parser.add_argument("--sparse-k", default=100, action="store", type=int)
     parser.add_argument("--binned-out", default=False, action="store_true")
     parser.add_argument('--adduct-shift',default=False, action="store_true")
-    parser.add_argument("--num-workers", default=0, action="store", type=int)
+    parser.add_argument("--num-gpu-workers", default=0, action="store", type=int)
+    parser.add_argument("--num-cpu-workers", default=32, action="store", type=int)
     parser.add_argument("--batch-size", default=64, action="store", type=int)
     date = datetime.now().strftime("%Y_%m_%d")
     parser.add_argument("--save-dir", default=f"results/{date}_ffn_pred/")
@@ -135,8 +153,12 @@ def predict():
     if kwargs["debug"]:
         #df = df[:10]
         df = df[:10000]
+        kwargs["num_cpu_workers"] = 0
+        kwargs["num_gpu_workers"] = 0
         print(df.spec.value_counts())
         # print(df.spec.unique()) # should be 1 if there are 256 entries / decoys per actual test entry.. 
+
+    use_gpu = kwargs["gpu"] and torch.cuda.device_count() > 0
 
     if kwargs["subset_datasets"] != "none":
         splits = pd.read_csv(data_dir / "splits" / kwargs["split_name"], sep="\t")
@@ -184,8 +206,7 @@ def predict():
     if kwargs["ref_dir"] is not None and kwargs["add_ref"]:
         num_workers = kwargs.get("num_workers", 0)
         magma_dag_folder = Path(kwargs["magma_dag_folder"])
-        magma_tree_h5 = common.HDF5Dataset(magma_dag_folder)
-        name_to_json = {Path(i).stem.replace("pred_", ""): i for i in magma_tree_h5.get_all_names()}
+        name_to_json = build_gen_magma_map(magma_dag_folder, strip_pred_prefix=True)
 
         pe_embed_k = kwargs["pe_embed_k"]
         root_encode = kwargs["root_encode"]
@@ -217,14 +238,20 @@ def predict():
         )
 
         def load_infos(name):
-            tree_h5 = common.HDF5Dataset(magma_dag_folder)
-            tree = json.loads(tree_h5.read_str(f"{name}.json"))
-            smi = tree['root_canonical_smiles']
+            tree = ref_dataset.load_tree(name)
+            if isinstance(tree, dict):
+                smi = tree["root_canonical_smiles"]
+                colli_eng = float(tree["collision_energy"])
+                adduct = tree["adduct"]
+                instrument = tree.get("instrument", "Orbitrap")
+            else:
+                smi = tree.root_canonical_smiles
+                colli_eng = float(tree.collision_energy)
+                adduct = tree.adduct
+                instrument = tree.info.get("instrument", "Orbitrap")
             morgan_fp = common.get_morgan_fp_smi(smi, isbool=True)
-            colli_eng = float(common.get_collision_energy(name))
-            adducts = common.ion2onehot_pos[tree["adduct"]]
-            instrument = common.instrument2onehot_pos[tree["instrument"]]
-            tree_h5.close()
+            adducts = common.ion2onehot_pos[adduct]
+            instrument = common.instrument2onehot_pos[instrument]
             return [morgan_fp, colli_eng, adducts, instrument] 
         db_infos = common.chunked_parallel(ref_dataset.spec_names,load_infos, max_cpu=64)
         db_engs_array, root_morgans_array, data_adducts_array, db_instruments = [], [], [], []
@@ -273,12 +300,11 @@ def predict():
             precursor_mz = entry["precursor"]
             instrument = entry["instrument"]
             name = entry["spec"]
-            # inchikey = common.inchikey_from_smiles(smi)
             if type(smi) is not str:
                 logging.error(smi, type(smi))
                 logging.error(f"SMILES is not a string: {smi}")
                 logging.error(f"Possible inchikey: {entry.get('inchikey', None)}")
-                return None
+                return []
             try:
                 inchikey = common.inchikey_from_smiles(smi)
             except Exception as e:
@@ -304,23 +330,34 @@ def predict():
                     closest_engs_diff = np.abs(closest_engs - colli_eng_val)
                     closest_engs_rank = np.argsort(closest_engs_diff)
                     closest = np.take(closest, closest_engs_rank)
-                                        
-                tup_to_process.append((smi, name, colli_eng_val, adduct, instrument, precursor_mz,
-                                       f"pred_{name}/ikey {inchikey}/collision {colli_eng}", 
-                                       min_distance, valid_ref_count, closest))
+
+                tup_to_process.append(
+                    (
+                        smi,
+                        f"pred_{name}",
+                        colli_eng_val,
+                        adduct,
+                        instrument,
+                        precursor_mz,
+                        f"ikey {inchikey}",
+                        min_distance,
+                        valid_ref_count,
+                        closest,
+                    )
+                )
             return tup_to_process
 
         all_rows = [j for _, j in df.iterrows()]
 
         logging.info('Preparing entries')
-        if kwargs["num_workers"] == 0:
+        if kwargs["num_cpu_workers"] == 0:
             predict_entries = [prepare_entry(i) for i in tqdm(all_rows)]
         else:
             predict_entries = common.chunked_parallel(
                 all_rows,
                 prepare_entry,
                 chunks=1000,
-                max_cpu=64,
+                max_cpu=kwargs["num_cpu_workers"],
             )
         predict_entries = [i for j in predict_entries for i in j]  # unroll
         random.shuffle(predict_entries)  # shuffle to evenly distribute graph size across batches
@@ -331,10 +368,13 @@ def predict():
             predict_entries[i: i + batch_size] for i in range(0, len(predict_entries), batch_size)
         ]
 
+        out_name = "binned_preds.hdf5" if binned_out else "preds.hdf5"
+        save_path = save_dir / out_name
+
         def producer_func(batch):
             torch.set_num_threads(1)
-            if gpu and avail_gpu_num >= 0:
-                if kwargs["num_workers"] > 0:
+            if use_gpu:
+                if kwargs["num_gpu_workers"] > 0:
                     worker_id = multiprocess.process.current_process()._identity[0]  # get worker id
                     gpu_id = worker_id % avail_gpu_num
                 else:
@@ -343,9 +383,10 @@ def predict():
             else:
                 device = "cpu"
             model.to(device)
+            if use_gpu:
+                torch.cuda.set_device(gpu_id)
 
-            # for batch in batched_entries:
-            smis, spec_names, colli_eng_vals, adducts, instruments, precursor_mzs, h5_names, min_distances, valid_ref_counts, closests = list(zip(*batch))
+            smis, spec_names, colli_eng_vals, adducts, instruments, precursor_mzs, remarks, min_distances, valid_ref_counts, closests = list(zip(*batch))
             full_outputs = model.predict_mol(
                 smis,
                 precursor_mz=precursor_mzs,
@@ -360,61 +401,74 @@ def predict():
                 min_distances = min_distances,
                 valid_ref_counts = valid_ref_counts,
                 closests = closests,
-                name = h5_names,
+                name = spec_names,
             )
             return_list = []
-            if binned_out:
-                for output_spec, spec_name, smi, h5_name in \
-                        zip(full_outputs["spec"], spec_names, smis, h5_names):
-                    if kwargs["sparse_out"]:
-                        sparse_k = kwargs["sparse_k"]
-                        best_inds = np.argsort(output_spec, -1)[::-1][:sparse_k]
-                        best_intens = np.take_along_axis(output_spec, best_inds, -1)
-                        output_spec = np.stack([best_inds, best_intens], -1)
-
-                    inchikey = common.inchikey_from_smiles(smi)
-                    return_list.append((h5_name, spec_name, smi, inchikey, output_spec, None))
-            else:
-                for output_spec, spec_name, smi, h5_name, pred_frag in \
-                        zip(full_outputs["spec"], spec_names, smis, h5_names, full_outputs["frag"]):
-                    assert kwargs["sparse_out"], 'sparse_out must be True for non-binned output'
+            for output_ind, (output_spec, spec_name, smi, remark, adduct, pred_frag, collision_energy) in enumerate(
+                zip(
+                    full_outputs["spec"],
+                    spec_names,
+                    smis,
+                    remarks,
+                    adducts,
+                    full_outputs["frag"],
+                    colli_eng_vals,
+                )
+            ):
+                if kwargs["sparse_out"]:
                     sparse_k = kwargs["sparse_k"]
                     best_inds = np.argsort(output_spec[:, 1], -1)[::-1][:sparse_k]
                     output_spec = output_spec[best_inds, :]
-                    if model.inten_model_obj.include_unshifted_mz:
-                        inten_output_size = model.inten_model_obj.output_size * 2
-                    else:
-                        inten_output_size = model.inten_model_obj.output_size
-                    pred_frag = np.array(pred_frag)[best_inds // inten_output_size]
-                    inchikey = common.inchikey_from_smiles(smi)
-                    return_list.append((h5_name, spec_name, smi, inchikey, output_spec, pred_frag))
+                    pred_frag = pred_frag[best_inds]
+
+                pred_ms = common.MassSpec(
+                    root_canonical_smiles=smi,
+                    adduct=adduct,
+                    collision_energy=collision_energy,
+                    masses=output_spec[:, 0],
+                    intens=output_spec[:, 1],
+                    frags=pred_frag,
+                    remark=remark,
+                    binned_spec=full_outputs["binned_spec"][output_ind] if kwargs["binned_out"] else None,
+                    num_bins=kwargs["num_bins"] if kwargs["binned_out"] else None,
+                    upper_limit=kwargs["upper_limit"] if kwargs["binned_out"] else None,
+                )
+                return_list.append((spec_name, pred_ms))
             return return_list
 
-        if binned_out:
-            out_name = "binned_preds.hdf5"
-        else:
-            out_name = "preds.hdf5"
-
         def write_h5_func(out_entries):
-            h5 = common.HDF5Dataset(save_dir / out_name, mode='w')
-            h5.attrs['num_bins'] = 15000
-            h5.attrs['upper_limit'] = 1500
-            h5.attrs['sparse_out'] = kwargs["sparse_out"]
+            specdb = common.PredSpecDB(
+                h5_path=save_path,
+                mode='w',
+                has_probs=False,
+                has_brokens=False,
+                has_masses=True,
+                has_masses_no_adduct=False,
+                has_frag_form_vecs=False,
+                has_frags=True,
+                has_intens=True,
+                has_pulled_atoms=False,
+                has_binned_spec=kwargs["binned_out"],
+            )
             for out_batch in out_entries:
-                for out_item in out_batch:
-                    h5_name, spec_name, smi, inchikey, output_spec, pred_frag = out_item
-                    h5.write_data(h5_name + '/spec', output_spec)
-                    if pred_frag is not None:
-                        h5.write_str(h5_name + '/frag', json.dumps(pred_frag.tolist()))  # save as string avoids overflow
-                    h5.update_attr(h5_name, {'smiles': smi, 'ikey': inchikey, 'spec_name': spec_name})
-            h5.close()
+                for name, spec in out_batch:
+                    specdb.write(name, spec)
+            specdb.close()
 
-        if kwargs["num_workers"] == 0:
-            output_entries = [producer_func(batch) for batch in tqdm(all_batched_entries)]
-            write_h5_func(output_entries)
+        if use_gpu:
+            if kwargs["num_gpu_workers"] == 0:
+                output_entries = [producer_func(batch) for batch in tqdm(all_batched_entries)]
+                write_h5_func(output_entries)
+            else:
+                common.chunked_parallel(all_batched_entries, producer_func, output_func=write_h5_func,
+                                        chunks=1000, max_cpu=kwargs["num_gpu_workers"])
         else:
-            common.chunked_parallel(all_batched_entries, producer_func, output_func=write_h5_func,
-                                    chunks=1000, max_cpu=kwargs["num_workers"])
+            if kwargs["num_cpu_workers"] == 0:
+                output_entries = [producer_func(batch) for batch in tqdm(all_batched_entries)]
+                write_h5_func(output_entries)
+            else:
+                common.chunked_parallel(all_batched_entries, producer_func, output_func=write_h5_func,
+                                        chunks=1000, max_cpu=kwargs["num_cpu_workers"])
 
 
 if __name__ == "__main__":

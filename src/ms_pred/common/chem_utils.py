@@ -13,6 +13,9 @@ import rdkit.sping
 import torch
 from rdkit import Chem
 from rdkit.Chem import Atom
+from rdkit.Chem import BondStereo
+from rdkit.Chem.rdchem import HybridizationType, BondType, ChiralType
+
 from rdkit.Chem.rdMolDescriptors import CalcMolFormula
 from rdkit.Chem.Descriptors import ExactMolWt
 from functools import lru_cache
@@ -87,6 +90,17 @@ ATOM_NUM_TO_ONEHOT = torch.zeros((max(VALID_ATOM_NUM) + 1, CHEM_ELEMENT_NUM))
 # Convert to onehot
 ATOM_NUM_TO_ONEHOT[VALID_ATOM_NUM, torch.arange(CHEM_ELEMENT_NUM)] = 1
 
+VALID_BOND_STEREO = [BondStereo.STEREONONE, BondStereo.STEREOANY, BondStereo.STEREOZ, BondStereo.STEREOE]
+COMMON_BOND_TYPES = [BondType.SINGLE, BondType.DOUBLE, BondType.TRIPLE, BondType.AROMATIC]
+COMMON_HYBRIDIZATION = [HybridizationType.SP, HybridizationType.SP2, HybridizationType.SP3, HybridizationType.SP3D, HybridizationType.SP3D2]
+COMMON_CHIRALITY = [ChiralType.CHI_UNSPECIFIED,
+                ChiralType.CHI_TETRAHEDRAL_CW,
+                ChiralType.CHI_TETRAHEDRAL_CCW,
+                ChiralType.CHI_OTHER]
+COMMON_MAX_HYDROGEN_COUNTS = 4  # 0 to 4 hydrogens
+COMMON_RING_SIZES = list(range(3, 9)) # 3 to 8 membered rings
+MAX_ABS_FORMAL_CHARGE = 2  # -2 to +2
+MAX_COMMON_DEGREE=5
 # Use Monoisotopic
 # VALID_MASSES = np.array([Atom(i).GetMass() for i in VALID_ELEMENTS])
 VALID_MONO_MASSES = np.array(
@@ -200,6 +214,8 @@ ion2onehot_pos = {
     "[M-H-H2O]-": 12,
     "[M-H-CO2]-": 13,
 }
+
+onehot_pos2ion = {ion2onehot_pos[k]:k for k in ion2onehot_pos}
 
 ion_pos2extra_multihot = {v: set() for v in ion2onehot_pos.values()}
 for k, v in ion2onehot_pos.items():

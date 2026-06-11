@@ -272,7 +272,6 @@ class TreeProcessor:
         all_form_vecs = [common.formula_to_dense(i) for i in forms]
         all_form_vecs = np.array(all_form_vecs)
         root_form_vec = common.formula_to_dense(root_form)
-
         out_dict = {
             "root_repr": root_repr,
             "dgl_frags": dgl_inputs,
@@ -493,6 +492,8 @@ class DAGDataset(Dataset):
             valid_spec_ids = set([common.rm_collision_str(i) for i in self.magma_map])
         else:  # spec_id.magma
             valid_spec_ids = set(self.magma_map.keys())
+        if 'instrument' not in self.df.columns:
+            self.df['instrument'] = 'Unknown'
 
         valid_specs = [(i in valid_spec_ids and inst in common.instrument2onehot_pos) for i, inst in self.df[["spec", "instrument"]].values]
         self.df_sub = self.df[valid_specs]

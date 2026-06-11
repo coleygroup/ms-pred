@@ -19,7 +19,7 @@ universal_args:
 
   dataset-name: [msg]
   split-name: [split.tsv]
-  dataset-labels: [labels_withev_validinst.tsv]
+  dataset-labels: [labels.tsv]
 
   learning-rate: [0.0002]
   lr-decay-rate: [0.825]
@@ -52,8 +52,8 @@ universal_args:
   sk-tau: [0.05]
   softmax-tau: [0.02]
   add-reference: [true]
-  load-reference: [false]
-  save-reference: [true]
+  load-reference: [true]
+  save-reference: [false]
   reference-dir: ["data/msg/closest_neighbors/infinite"]
   max-ref-count: [3]
   matching-method: ["softmax"]
@@ -64,16 +64,16 @@ universal_args:
 
 iterative_args:
   -  split-name: [split.tsv]
-     save-dir: [split_rnd1_entropy]
-     magma-dag-folder: [results/marason_msg_allev/split_rnd1/preds_train_100_inten.hdf5]
+     save-dir: [split_rnd1]
+     magma-dag-folder: [results/marason_msg/split_rnd1/preds_train_100_inten.hdf5]
      seed: [1]
 
   # -  split-name: [split.tsv]
   #    save-dir: [split_rnd2_entropy]
-  #    magma-dag-folder: [results/marason_msg_allev/split_rnd2/preds_train_100_inten.hdf5]
+  #    magma-dag-folder: [results/marason_msg/split_rnd2/preds_train_100_inten.hdf5]
   #    seed: [2]
 
   # -  split-name: [split.tsv]
   #    save-dir: [split_rnd3_entropy]
-  #    magma-dag-folder: [results/marason_msg_allev/split_rnd3/preds_train_100_inten.hdf5]
+  #    magma-dag-folder: [results/marason_msg/split_rnd3/preds_train_100_inten.hdf5]
   #    seed: [3]
