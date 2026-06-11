@@ -10,6 +10,7 @@ authors = [
     { name = "Sam Goldman", email = "samlg@mit.edu" },
     { name = "Runzhong Wang", email = "runzhong@mit.edu" },
     { name = "Mrunali Manjrekar", email = "mrunali@mit.edu" },
+    { name = "Rui-Xi Wang", email = "rxwangtw@mit.edu" },
 ]
 readme = "README.md"
 license = { text = "MIT" }
