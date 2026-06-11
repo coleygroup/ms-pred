@@ -45,7 +45,7 @@ universal_args:
   max-breakpoints: [200]
   multi-hop-max-dist: [10]
   num-edge-dis: [10]
-  num-bins: [15000, 150000]
+  num-bins: [150000]
   enable-aux-loss: [True]
   enable-decoder-norm: [False]
   sk-tau: [0.05]

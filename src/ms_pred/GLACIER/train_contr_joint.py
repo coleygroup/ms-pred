@@ -143,7 +143,7 @@ def train_model():
     kwargs = args.__dict__
 
     save_dir = kwargs["save_dir"]
-    common.setup_logger(save_dir, log_name=f"joint_contr_finetune_decoy{kwargs['num_decoys']}_fixed_decoy{kwargs['num_fixed_decoys']}_contr_threshold_{kwargs['contr_threshold']}.log", debug=kwargs["debug"])
+    common.setup_logger(save_dir, log_name="joint_contr_finetune.log", debug=kwargs["debug"])
     pl.seed_everything(kwargs.get("seed"))
 
     # Dump args

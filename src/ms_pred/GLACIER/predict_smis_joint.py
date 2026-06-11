@@ -27,7 +27,9 @@ import os
 import math
 import ast
 import queue
+import shutil
 import threading
+import tempfile
 from collections import OrderedDict
 from datetime import datetime
 import yaml
@@ -93,6 +95,17 @@ def get_args():
     parser.add_argument("--batch-size", default=64, action="store", type=int)
     parser.add_argument("--prefetch-factor", default=4, action="store", type=int)
     parser.add_argument(
+        "--feat-cache-size",
+        default=8192,
+        action="store",
+        type=int,
+        help=(
+            "Approximate per-shard featurization cache budget. When multiple "
+            "DataLoader workers are used, this budget is divided across workers "
+            "to avoid runaway host-memory use."
+        ),
+    )
+    parser.add_argument(
         "--no-dedup",
         default=False,
         action="store_true",
@@ -104,6 +117,15 @@ def get_args():
     parser.add_argument("--save-dir", default=f"results/{date}_ffn_pred/")
     parser.add_argument("--out-name", default="preds.hdf5")
     parser.add_argument("--num-h5-chunks", default=1, type=int)
+    parser.add_argument(
+        "--local-write-dir",
+        default=None,
+        help=(
+            "Optional node-local scratch directory for staging HDF5 prediction outputs. "
+            "If set, shard files are written locally first and moved to --save-dir "
+            "after they close cleanly."
+        ),
+    )
     parser.add_argument(
         "--checkpoint",
         help="name of checkpoint file",
@@ -182,6 +204,60 @@ def _prepare_entries_parallel(all_rows, num_workers):
     else:
         nested = [prepare_entry(r) for r in all_rows]
     return [t for sub in nested for t in sub]
+
+
+def _resolve_loader_settings(num_entries, requested_workers, dedup, requested_cache_size):
+    """Bound DataLoader memory use while preserving throughput.
+
+    The expensive featurization cache lives inside each worker process, so the
+    total resident cache roughly scales with `num_workers * feat_cache_size`.
+    Treat `requested_cache_size` as a per-shard budget and divide it across
+    workers so high-worker-count runs do not OOM the host.
+    """
+    if requested_workers <= 0 or num_entries <= 1:
+        num_workers = 0 if requested_workers <= 0 else min(requested_workers, 1)
+    else:
+        num_workers = min(requested_workers, num_entries)
+
+    if not dedup or requested_cache_size <= 0:
+        feat_cache_size = 0
+    elif num_workers <= 1:
+        feat_cache_size = requested_cache_size
+    else:
+        feat_cache_size = max(64, math.ceil(requested_cache_size / num_workers))
+
+    return num_workers, feat_cache_size
+
+
+def _stage_output_paths(out_path: Path, local_write_dir: str | None, device: str):
+    final_out_path = Path(out_path)
+    if not local_write_dir:
+        return final_out_path, None
+
+    scratch_root = Path(local_write_dir).expanduser().resolve()
+    scratch_root.mkdir(parents=True, exist_ok=True)
+    stage_dir = Path(
+        tempfile.mkdtemp(
+            prefix=f"{final_out_path.stem}_{device.replace(':', '_')}_",
+            dir=scratch_root,
+        )
+    )
+    return stage_dir / final_out_path.name, stage_dir
+
+
+def _move_staged_outputs(staged_out_path: Path, final_out_path: Path, num_h5_chunks: int):
+    staged_paths = common.PredSpecDB._resolve_h5_paths(
+        Path(staged_out_path), mode="w", num_h5s=num_h5_chunks
+    )
+    final_paths = common.PredSpecDB._resolve_h5_paths(
+        Path(final_out_path), mode="w", num_h5s=num_h5_chunks
+    )
+
+    final_out_path.parent.mkdir(parents=True, exist_ok=True)
+    for staged_path, final_path in zip(staged_paths, final_paths):
+        if final_path.exists():
+            final_path.unlink()
+        shutil.move(str(staged_path), str(final_path))
 
 
 class GraphormerFeatDataset(Dataset):
@@ -283,7 +359,14 @@ def run_shard(entries, checkpoint, device, out_path, kwargs):
     assert kwargs["sparse_out"], "sparse_out must be True"
     _lazy_imports()
     sparse_k = kwargs["sparse_k"]
-    num_workers = kwargs["num_cpu_workers"]
+    dedup = not kwargs.get("no_dedup", False)
+    requested_workers = kwargs["num_cpu_workers"]
+    num_workers, feat_cache_size = _resolve_loader_settings(
+        num_entries=len(entries),
+        requested_workers=requested_workers,
+        dedup=dedup,
+        requested_cache_size=kwargs.get("feat_cache_size", 8192),
+    )
 
     # Keep the model on CPU for now -- see the iter()/`.to(device)` ordering below.
     model = joint_model.JointModel.load_from_checkpoint(checkpoint)
@@ -296,7 +379,16 @@ def run_shard(entries, checkpoint, device, out_path, kwargs):
         embed_elem_group=model.embed_elem_group,
         multi_hop_max_dist=model.multi_hop_max_dist,
     )
-    dedup = not kwargs.get("no_dedup", False)
+    logging.info(
+        "Shard %s DataLoader config: entries=%s requested_workers=%s effective_workers=%s "
+        "feat_cache_per_worker=%s dedup=%s",
+        device,
+        len(entries),
+        requested_workers,
+        num_workers,
+        feat_cache_size,
+        dedup,
+    )
     pred_dataset = GraphormerFeatDataset(
         entries,
         tree_processor=tree_processor,
@@ -304,7 +396,7 @@ def run_shard(entries, checkpoint, device, out_path, kwargs):
         # graphormer padding ~2x (measured 1457 vs 658 rows/s). Independent of dedup.
         sort_for_batching=True,
         # Cache reuses one featurization across a molecule's collision energies.
-        feat_cache_size=8192 if dedup else 0,
+        feat_cache_size=feat_cache_size,
     )
     loader_kwargs = dict(
         num_workers=num_workers,
@@ -330,6 +422,16 @@ def run_shard(entries, checkpoint, device, out_path, kwargs):
     model = model.to(device)
 
     no_write = kwargs.get("no_write", False)
+    staged_out_path, stage_dir = _stage_output_paths(
+        Path(out_path), kwargs.get("local_write_dir"), device
+    )
+    if stage_dir is not None:
+        logging.info(
+            "Shard %s staging HDF5 outputs locally at %s before moving to %s",
+            device,
+            stage_dir,
+            out_path,
+        )
 
     # MassSpec construction + HDF5 writing are pure CPU/IO and, done inline, serialize
     # with the GPU forward and starve it. Offload them to a single background thread fed
@@ -342,7 +444,7 @@ def run_shard(entries, checkpoint, device, out_path, kwargs):
         try:
             if not no_write:
                 specdb = common.PredSpecDB(
-                    h5_path=out_path, mode="w", num_h5s=kwargs["num_h5_chunks"],
+                    h5_path=staged_out_path, mode="w", num_h5s=kwargs["num_h5_chunks"],
                     has_probs=False, has_brokens=False, has_masses=True, has_masses_no_adduct=False,
                     has_frag_form_vecs=False, has_frags=True, has_intens=True, has_pulled_atoms=False,
                 )
@@ -393,6 +495,11 @@ def run_shard(entries, checkpoint, device, out_path, kwargs):
                 break
     write_q.put(None)
     writer_thread.join()
+    if stage_dir is not None and not no_write and not writer_error:
+        _move_staged_outputs(staged_out_path, Path(out_path), kwargs["num_h5_chunks"])
+        shutil.rmtree(stage_dir, ignore_errors=True)
+    elif stage_dir is not None:
+        shutil.rmtree(stage_dir, ignore_errors=True)
     if writer_error:
         raise writer_error[0]
 

@@ -54,7 +54,7 @@ universal_args:
   frag-weight: [0.1]
   warmup: [2000]
   magma-warmup-steps: [2500]
-  magma-decay-rate: [1]
+  magma-decay-rate: [0.9]
   magma-decay-steps: [2500]
   inten-loss-fn: [cosine]
 
@@ -63,23 +63,23 @@ iterative_args:
      save-dir: [split_1_rnd1]
      seed: [1]
      
-  # -  split-name: [split_1.tsv]
-  #    save-dir: [split_1_rnd2]
-  #    seed: [2]
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd2]
+     seed: [2]
 
-  # -  split-name: [split_1.tsv]
-  #    save-dir: [split_1_rnd3]
-  #    seed: [3]
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd3]
+     seed: [3]
 
-  # -  split-name: [scaffold_1.tsv]
-  #    save-dir: [scaffold_1_rnd1]
-  #    seed: [1]
+  -  split-name: [scaffold_1.tsv]
+     save-dir: [scaffold_1_rnd1]
+     seed: [1]
 
-  # -  split-name: [scaffold_1.tsv]
-  #    save-dir: [scaffold_1_rnd2]
-  #    seed: [2]
+  -  split-name: [scaffold_1.tsv]
+     save-dir: [scaffold_1_rnd2]
+     seed: [2]
 
-  # -  split-name: [scaffold_1.tsv]
-  #    save-dir: [scaffold_1_rnd3]
-  #    seed: [3]
+  -  split-name: [scaffold_1.tsv]
+     save-dir: [scaffold_1_rnd3]
+     seed: [3]
 

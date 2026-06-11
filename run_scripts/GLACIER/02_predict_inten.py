@@ -3,7 +3,6 @@ import subprocess
 import argparse
 
 python_file = "src/ms_pred/GLACIER/predict_inten_joint.py"
-node_num = 100
 num_workers = 64
 test_entries = [
     {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd1"},
@@ -13,7 +12,7 @@ test_entries = [
     {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd2"},
     {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd3"},
 ]
-devices = ",".join([str(_) for _ in [0, 1, 2]])
+devices = ",".join([str(_) for _ in [0, 1]])
 
 for test_entry in test_entries:
     split = test_entry['split']
@@ -21,7 +20,7 @@ for test_entry in test_entries:
     folder = test_entry['folder']
 
     res_folder = Path(f"results/joint_train_{dataset}/")
-    model = res_folder / folder / "version_0/best.ckpt"  # if no contrastive finetuning, change version_1 to version_0
+    model = res_folder / folder / "version_1/best.ckpt"  # if no contrastive finetuning, change version_1 to version_0
 
     if not model.exists(): 
         continue

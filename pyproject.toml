@@ -36,6 +36,7 @@ dependencies = [
     "platformdirs",
     "torchdata<0.10",
     "numpy>=2",
+    linsatnet,
 ]
 
 [project.optional-dependencies]

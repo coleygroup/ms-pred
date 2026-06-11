@@ -13,6 +13,7 @@ import h5py
 import hashlib
 import torch
 import math
+import re
 from collections import defaultdict
 
 import ms_pred.common.chem_utils as chem_utils
@@ -1040,6 +1041,49 @@ class PredSpecDB:
     """
     _SPECIAL_ROOT_GROUPS = {_MANIFEST_GROUP}
 
+    @staticmethod
+    def _path_sort_key(path: Path):
+        stem = path.stem
+        shard_match = re.search(r"_shard(\d+)(?:_chunk_\d+)?$", stem)
+        chunk_match = re.search(r"_chunk_(\d+)$", stem)
+        shard_idx = int(shard_match.group(1)) if shard_match else -1
+        chunk_idx = int(chunk_match.group(1)) if chunk_match else -1
+        return (shard_idx, chunk_idx, path.name)
+
+    @classmethod
+    def _resolve_h5_paths(cls, h5_path: Path, mode: str, num_h5s: int):
+        if num_h5s > 1:
+            return [
+                h5_path.parent / (h5_path.stem + f'_chunk_{i}' + h5_path.suffix)
+                for i in range(num_h5s)
+            ]
+
+        if mode == 'w':
+            return [h5_path]
+
+        shard_chunk_paths = sorted(
+            h5_path.parent.glob(f"{h5_path.stem}_shard*_chunk_*{h5_path.suffix}"),
+            key=cls._path_sort_key,
+        )
+        if shard_chunk_paths:
+            return shard_chunk_paths
+
+        shard_paths = sorted(
+            h5_path.parent.glob(f"{h5_path.stem}_shard*{h5_path.suffix}"),
+            key=cls._path_sort_key,
+        )
+        if shard_paths:
+            return shard_paths
+
+        chunk_paths = sorted(
+            h5_path.parent.glob(f"{h5_path.stem}_chunk_*{h5_path.suffix}"),
+            key=cls._path_sort_key,
+        )
+        if chunk_paths:
+            return chunk_paths
+
+        return [h5_path]
+
     def __init__(self, h5_path, mode="r", num_h5s=1,
                  has_probs=True, has_brokens=True, has_masses=False, has_masses_no_adduct=True, has_frag_form_vecs=True,
                  has_frags=True, has_intens=False, has_pulled_atoms=False, has_binned_spec=False,
@@ -1050,13 +1094,11 @@ class PredSpecDB:
                            (default: True for write mode, False for read mode)
         """
         h5_path = Path(h5_path)
-        if num_h5s > 1:
-            self.all_h5_paths = [h5_path.parent / (h5_path.stem + f'_chunk_{i}' + h5_path.suffix) for i in range(num_h5s)]
-        else:
-            self.all_h5_paths = [h5_path]
+        self.all_h5_paths = self._resolve_h5_paths(h5_path, mode, num_h5s)
 
         self.mode = mode
         self.h5_persistent = h5_persistent
+        self._name_to_h5_idx = {}
         h5_dataset_0 = HDF5Dataset(self.all_h5_paths[0], self.mode)
         if self.mode == 'w':  # create new file
             self.has_probs   = has_probs
@@ -1242,6 +1284,20 @@ class PredSpecDB:
     def read(self, name, collision_energy=None, remark=None, ignore_keys=None):
         """read a specific spectrum"""
         h5_dataset = self._get_h5_dataset(name)
+        try:
+            return self._read_from_dataset(
+                h5_dataset,
+                name=name,
+                collision_energy=collision_energy,
+                remark=remark,
+                ignore_keys=ignore_keys,
+            )
+        finally:
+            if not self.h5_persistent:
+                h5_dataset.close()
+
+    def _read_from_dataset(self, h5_dataset, name, collision_energy=None, remark=None, ignore_keys=None):
+        """read a specific spectrum from a specific HDF5 dataset"""
         full_name  = self._get_full_name(name, collision_energy, remark)
 
         key_dict = h5_dataset.read_attr(full_name)
@@ -1295,20 +1351,25 @@ class PredSpecDB:
 
     def read_from_name(self, name):
         """read all entries with the same name (all remarks, all collision energies)"""
-        colli_engs, remarks = self.get_entries(name)
+        dataset_entries = self._get_entries_by_dataset(name)
         all_spec_dict = {}
         has_remark = False
-        for c, r in zip(colli_engs, remarks):
-            spec_obj = self.read(name, c, r)
-            c_key = f'collision {c}'
-            if r is None:
-                all_spec_dict[c_key] = spec_obj
-                has_remark = False
-            else:
-                if r not in all_spec_dict:
-                    all_spec_dict[r] = {}
-                all_spec_dict[r][c_key] = spec_obj
-                has_remark = True
+        try:
+            for h5_dataset, entries in dataset_entries:
+                for c, r in entries:
+                    spec_obj = self._read_from_dataset(h5_dataset, name, c, r)
+                    c_key = f'collision {c}'
+                    if r is None:
+                        all_spec_dict[c_key] = spec_obj
+                    else:
+                        if r not in all_spec_dict:
+                            all_spec_dict[r] = {}
+                        all_spec_dict[r][c_key] = spec_obj
+                        has_remark = True
+        finally:
+            if not self.h5_persistent:
+                for h5_dataset, _ in dataset_entries:
+                    h5_dataset.close()
         return all_spec_dict, has_remark
 
     def _get_chunk_index(self, name):
@@ -1333,12 +1394,28 @@ class PredSpecDB:
             return f'collision nan'
 
     def _get_h5_dataset(self, name):
-        cur_i = self._get_chunk_index(name)
-        if self.h5_persistent:
-            h5_dataset = self.h5datasets[cur_i]
-        else:
-            h5_dataset = HDF5Dataset(self.all_h5_paths[cur_i], self.mode)
-        return h5_dataset
+        cur_i = self._name_to_h5_idx.get(name)
+        if cur_i is None:
+            cur_i = self._get_chunk_index(name)
+
+        def _open_dataset(idx):
+            if self.h5_persistent:
+                return self.h5datasets[idx]
+            return HDF5Dataset(self.all_h5_paths[idx], self.mode)
+
+        if self.mode == 'w' or len(self.all_h5_paths) == 1:
+            return _open_dataset(cur_i)
+
+        candidate_indices = [cur_i] + [i for i in range(len(self.all_h5_paths)) if i != cur_i]
+        for idx in candidate_indices:
+            h5_dataset = _open_dataset(idx)
+            if name in h5_dataset:
+                self._name_to_h5_idx[name] = idx
+                return h5_dataset
+            if not self.h5_persistent:
+                h5_dataset.close()
+
+        return _open_dataset(cur_i)
 
     def get_all_names(self):
         if self.h5_persistent:
@@ -1349,53 +1426,91 @@ class PredSpecDB:
         all_names = [i for j in all_names for i in j if i not in self._SPECIAL_ROOT_GROUPS]
         return all_names
 
-    def get_entries(self, name, collision_energy=None):
-        """return collision energies and remarks under each name"""
-        h5_dataset = self._get_h5_dataset(name)
+    def _iter_h5_datasets_with_name(self, name):
+        if self.h5_persistent:
+            all_h5s = self.h5datasets
+        else:
+            all_h5s = [HDF5Dataset(p, self.mode) for p in self.all_h5_paths]
+
+        found = []
+        for idx, h5_dataset in enumerate(all_h5s):
+            if name in h5_dataset:
+                found.append((idx, h5_dataset))
+
+        if len(found) == 1:
+            self._name_to_h5_idx[name] = found[0][0]
+        elif len(found) > 1:
+            self._name_to_h5_idx.pop(name, None)
+
+        return found
+
+    def _enumerate_entry_pairs(self, h5_dataset, name):
         if name not in h5_dataset.h5_obj:  # no entry
-            return [], []
+            return []
 
         root_obj = h5_dataset.h5_obj[name]
         if isinstance(root_obj, h5py.Dataset):
             # Legacy MAGMa trees store each entry as a dataset payload rather than
             # a nested PredSpecDB group. Let callers fall back to HDF5Dataset.
-            return [], []
+            return []
 
-        # Iteratively enumerate all paths that end at groups with attrs["override"]
         all_paths = []
         from collections import deque
         queue = deque()
 
-        # Initialize queue with first layer under root
         for key in root_obj.keys():
-            queue.append((root_obj[key], key))  # (object, path_str)
+            queue.append((root_obj[key], key))
 
         while queue:
             obj, path = queue.popleft()
-            # If this group is a data group, record the path and don't go deeper
             if obj.attrs and "override" in obj.attrs:
                 all_paths.append(path)
             else:
-                # Go one layer deeper
                 for key in obj.keys():
                     queue.append((obj[key], f"{path}/{key}"))
 
-        colli_engs, remarks = [], []
+        entry_pairs = []
         for path in all_paths:
             keys = path.split('/')
-            if len(keys) == 1:  # collision energy
-                remarks.append(None)
-                get_ce = chem_utils.get_collision_energy(keys[0])
-                if collision_energy is None or float(collision_energy) == float(get_ce):
-                    colli_engs.append(get_ce)
-            elif len(keys) == 2:  # collision energy + remark
-                get_ce = chem_utils.get_collision_energy(keys[1])
-                if collision_energy is None or float(collision_energy) == float(get_ce):
-                    remarks.append(keys[0])
-                    colli_engs.append(get_ce)
+            if len(keys) == 1:
+                entry_pairs.append((chem_utils.get_collision_energy(keys[0]), None))
+            elif len(keys) == 2:
+                entry_pairs.append((chem_utils.get_collision_energy(keys[1]), keys[0]))
             else:
                 raise ValueError(f'HDF5 path is not accepted: {path}')
 
+        return entry_pairs
+
+    def _get_entries_by_dataset(self, name):
+        dataset_entries = []
+        for _, h5_dataset in self._iter_h5_datasets_with_name(name):
+            entry_pairs = self._enumerate_entry_pairs(h5_dataset, name)
+            if entry_pairs:
+                dataset_entries.append((h5_dataset, entry_pairs))
+        return dataset_entries
+
+    def get_entries(self, name, collision_energy=None):
+        """return collision energies and remarks under each name"""
+        dataset_entries = self._get_entries_by_dataset(name)
+        try:
+            entry_pairs = []
+            for _, entries in dataset_entries:
+                entry_pairs.extend(entries)
+        finally:
+            if not self.h5_persistent:
+                for h5_dataset, _ in dataset_entries:
+                    h5_dataset.close()
+
+        if collision_energy is not None:
+            entry_pairs = [
+                (ce, remark)
+                for ce, remark in entry_pairs
+                if float(collision_energy) == float(ce)
+            ]
+
+        deduped_pairs = list(dict.fromkeys(entry_pairs))
+        colli_engs = [ce for ce, _ in deduped_pairs]
+        remarks = [remark for _, remark in deduped_pairs]
         return colli_engs, remarks
 
     def _ensure_manifest_for_h5(self, h5_dataset: "HDF5Dataset"):
