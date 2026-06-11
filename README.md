@@ -185,6 +185,7 @@ An example of how to use ICEBERG for structural elucidation campaigns can be fou
 
 ### MARASON
 > Note that MARASON is not actively maintained and is not compatible with this repo at the moment. 
+
 MARASON is trained in two parts: a learned fragment generator (the same as the one in ICEBERG) and an RAG-based intensity predictor. The pipeline for training and evaluating this model can be accessed in `run_scripts/marason/`. 
 There is an all-in-one script ``run_scripts/marason/run_all.sh`` that trains the up-to-date version of MARASON on NIST'20 and MassSpecGym dataset. 
 The internal pipeline used to conduct experiments can be followed below:
