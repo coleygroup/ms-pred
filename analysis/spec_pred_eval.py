@@ -54,7 +54,7 @@ def entropy_sim_fn(pred_ar, true_spec):
 def get_args():
     """get_args."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", default="canopus_train_public")
+    parser.add_argument("--dataset", default="nist20")
     parser.add_argument("--formula-dir-name", default="subform_20")
     parser.add_argument("--binned-pred-file")
     parser.add_argument("--outfile", default=None)

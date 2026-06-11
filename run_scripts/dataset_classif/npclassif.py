@@ -15,7 +15,6 @@ from ms_pred import common
 output_folder = "results/dataset_analyses/"
 labels_files = [
     "data/spec_datasets/nist20/labels.tsv",
-    "data/spec_datasets/canopus_train_public/labels.tsv",
 ]
 save_str = "ikey_to_classes.p"
 debug = False

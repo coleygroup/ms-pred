@@ -47,7 +47,7 @@ def extract_cfm_file(spectra_file, out_dir, max_node):
         json.dump(json_out, fp, indent=2)
 
 
-datasets = ["canopus_train_public", "nist20"]
+datasets = ["nist20"]
 max_nodes = [10, 20, 30, 40, 50, 100, 200]
 subform_name = "magma_subform_50"
 split_override = None

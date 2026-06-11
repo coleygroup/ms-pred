@@ -9,8 +9,6 @@ max_nodes = 300
 dist = "cos"
 test_entries = [
     {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd1", "binned_out": False},
-    {"dataset": "canopus_train_public", "split": "split_1", 
-     "folder": "split_1_rnd1", "binned_out": False},
 ]
 
 for test_entry in test_entries:

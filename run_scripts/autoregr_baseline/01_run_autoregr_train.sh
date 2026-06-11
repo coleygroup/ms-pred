@@ -1,2 +1,1 @@
-python launcher_scripts/run_from_config.py configs/autoregr/autoregr_train_canopus.yaml
 python launcher_scripts/run_from_config.py configs/autoregr/autoregr_train_nist.yaml

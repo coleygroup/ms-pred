@@ -49,12 +49,12 @@ def get_args():
     parser.add_argument(
         "--gen-checkpoint",
         help="name of checkpoint file",
-        default="results/2022_06_22_pretrain/version_3/epoch=99-val_loss=0.87.ckpt",
+        default="results/debug_dag_nist20/split_1/ckpt/gen/best.ckpt",
     )
     parser.add_argument(
         "--inten-checkpoint",
         help="name of checkpoint file",
-        default="results/2022_06_22_pretrain/version_3/epoch=99-val_loss=0.87.ckpt",
+        default="results/debug_dag_inten/split_1/ckpt/inten/best.ckpt",
     )
     parser.add_argument("--dataset-name", default=None)
     parser.add_argument("--dataset-labels", default="labels.tsv")
@@ -73,6 +73,12 @@ def get_args():
     )
 
     return parser.parse_args()
+
+
+def normalize_instrument(instrument: str) -> str:
+    if pd.isna(instrument) or instrument not in common.instrument2onehot_pos:
+        return "Orbitrap"
+    return instrument
 
 
 def predict():
@@ -159,6 +165,7 @@ def predict():
             adduct = entry["ionization"]
             precursor_mz = entry["precursor"]
             instrument = entry["instrument"] if "instrument" in entry else "Orbitrap"  # fallback to Orbitrap
+            instrument = normalize_instrument(instrument)
             name = entry["spec"]
             inchikey = common.inchikey_from_smiles(smi)
             if strict_sanitize:
@@ -207,16 +214,17 @@ def predict():
             torch.set_num_threads(1)
             if use_gpu:
                 if kwargs["num_gpu_workers"] > 0:
-                    worker_id = multiprocess.process.current_process()._identity[0]  # get worker id
+                    worker_identity = multiprocess.process.current_process()._identity
+                    worker_id = worker_identity[0] - 1 if worker_identity else 0
                     gpu_id = worker_id % avail_gpu_num
                 else:
                     gpu_id = 0
                 device = f"cuda:{gpu_id}"
+                # Avoids error in pe_embedding under multiprocessing.
+                torch.cuda.set_device(gpu_id)
             else:
                 device = "cpu"
             model.to(device)
-            # avoids error in pe_embedding under multithreading.
-            torch.cuda.set_device(gpu_id)
 
             # for batch in batched_entries:
             smis, spec_names, colli_eng_vals, adducts, instruments, precursor_mzs, ikeys = list(zip(*batch))

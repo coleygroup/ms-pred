@@ -3,6 +3,7 @@ import signal
 import queue
 import time
 import itertools
+import inspect
 from tqdm import tqdm
 import multiprocess.context as ctx
 ctx._force_start_method('spawn')
@@ -74,14 +75,53 @@ def chunked_parallel(
     """
     # Adding it here fixes somessetting disrupted elsewhere
 
+    def can_splat(input_item):
+        if isinstance(input_item, (str, bytes, dict)):
+            return False
+        try:
+            iter(input_item)
+            return True
+        except TypeError:
+            return False
+
+    def call_with_input(function, input_item):
+        """Call function with either one input, *input, or **input.
+
+        Choose the call form from the function signature before execution so a
+        TypeError raised inside the function is not mistaken for an arity error.
+        """
+        try:
+            sig = inspect.signature(function)
+        except (TypeError, ValueError):
+            return function(input_item)
+
+        try:
+            sig.bind(input_item)
+        except TypeError as single_arg_error:
+            if isinstance(input_item, dict):
+                try:
+                    sig.bind(**input_item)
+                except TypeError:
+                    pass
+                else:
+                    return function(**input_item)
+
+            if can_splat(input_item):
+                try:
+                    sig.bind(*input_item)
+                except TypeError:
+                    pass
+                else:
+                    return function(*input_item)
+
+            raise single_arg_error
+        else:
+            return function(input_item)
+
     def batch_func(list_inputs):
         outputs = []
         for i in list_inputs:
-            try:
-                outp = function(i)
-            except TypeError: # missing argument
-                outp = function(*i)
-            outputs.append(outp)
+            outputs.append(call_with_input(function, i))
         return outputs
 
     list_len = len(input_list)

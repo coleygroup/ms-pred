@@ -41,6 +41,7 @@ def add_frag_train_args(parser):
     parser.add_argument("--num-workers", default=0, action="store", type=int)
     date = datetime.now().strftime("%Y_%m_%d")
     parser.add_argument("--save-dir", default=f"results/{date}_tree_pred/")
+    parser.add_argument("--version", default="inten", action="store", type=str)
 
     parser.add_argument("--dataset-name", default="gnps2015_debug")
     parser.add_argument("--dataset-labels", default="labels.tsv")
@@ -605,7 +606,7 @@ def train_model():
         kwargs["no_monitor"] = True
         monitor = "train_loss"
 
-    tb_logger = pl_loggers.TensorBoardLogger(save_dir, name="")
+    tb_logger = pl_loggers.TensorBoardLogger(str(Path(save_dir) / "ckpt"), name="", version=kwargs["version"])
     console_logger = common.ConsoleLogger()
 
     tb_path = tb_logger.log_dir

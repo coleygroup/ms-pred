@@ -18,7 +18,7 @@ import ms_pred.common as common
 def get_args():
     """get_args."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", default="canopus_train_public")
+    parser.add_argument("--dataset", default="nist20")
     parser.add_argument(
         "--subform-name",
         default="magma_outputs",

@@ -11,13 +11,6 @@ run_models = [
     {"test_dataset": "nist20", "dataset": "nist20", "folder": "split_1_rnd1", "split": "split_1"},
     {"test_dataset": "nist20", "dataset": "nist20", "folder": "split_1_rnd2", "split": "split_1"},
     {"test_dataset": "nist20", "dataset": "nist20", "folder": "split_1_rnd3", "split": "split_1"},
-
-    {"test_dataset": "canopus_train_public", "dataset": "canopus_train_public", "folder": "split_1_rnd1", "split": "split_1"},
-    {"test_dataset": "canopus_train_public", "dataset": "canopus_train_public", "folder": "split_1_rnd2", "split": "split_1"},
-    {"test_dataset": "canopus_train_public", "dataset": "canopus_train_public", "folder": "split_1_rnd3", "split": "split_1"},
-
-    #{"test_dataset": "casmi22", "dataset": "canopus_train_public", "folder": "split_1_rnd1", "split": "all_split"},
-    #{"test_dataset": "casmi22", "dataset": "nist20", "folder": "split_1_rnd1", "split": "all_split"},
 ]
 
 

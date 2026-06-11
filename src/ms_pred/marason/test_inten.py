@@ -65,7 +65,7 @@ def add_frag_train_args(parser):
     parser.add_argument("--load-reference", default=False, action="store_true")
     parser.add_argument("--filter-test", default=False, action="store_true")
     parser.add_argument("--draw", default=False, action="store_true")
-    parser.add_argument("--test-checkpoint", default="results/marason_inten_nist20/split_1_rnd1/version_0/best.ckpt")
+    parser.add_argument("--test-checkpoint", default="results/marason_nist20/split_1_rnd1/ckpt/inten/best.ckpt")
     parser.add_argument("--test-checkpoint2", default=None)
     parser.add_argument("--save-path", default="baseline.csv")
     parser.add_argument("--plot-spec", default=False, action="store_true")

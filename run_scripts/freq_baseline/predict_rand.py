@@ -46,7 +46,6 @@ def predict_rand(input_name, smiles, formula, max_nodes, outdir):
 
 test_entries = [
     {"dataset": "nist20", "split": "split_1"},
-    {"dataset": "canopus_train_public", "split": "split_1"}
 ]
 
 subform_name = "magma_subform_50"

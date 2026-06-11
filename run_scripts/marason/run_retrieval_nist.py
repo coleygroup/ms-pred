@@ -63,8 +63,8 @@ for test_entry in test_entries:
     train_split = test_entry['train_split']
     split = test_entry['test_split']
     maxk = test_entry['max_k']
-    inten_dir = Path(f"results/marason_inten_{dataset}")
-    inten_model = inten_dir / train_split / f"version_0/best.ckpt"
+    inten_dir = Path(f"results/marason_{dataset}")
+    inten_model = inten_dir / train_split / "ckpt/inten/best.ckpt"
     print(inten_model)
     if not inten_model.exists():
         print(f"Could not find model {inten_model}; skipping\n: {json.dumps(test_entry, indent=1)}")
@@ -72,12 +72,12 @@ for test_entry in test_entries:
 
     labels = f"data/spec_datasets/{dataset}/retrieval/cands_df_{split}_{maxk}.tsv"
 
-    save_dir = inten_model.parent.parent / f"retrieval_{dataset}_{split}_{maxk}"
+    save_dir = inten_dir / train_split / f"retrieval_{dataset}_{split}_{maxk}"
     save_dir.mkdir(exist_ok=True)
 
-    args = yaml.safe_load(open(inten_model.parent.parent / "args.yaml", "r"))
+    args = yaml.safe_load(open(inten_dir / train_split / "args.yaml", "r"))
     form_folder = Path(args["magma_dag_folder"])
-    gen_model = form_folder.parent / "version_0/best.ckpt"
+    gen_model = form_folder.parent / "ckpt/gen/best.ckpt"
 
     save_dir = save_dir
     save_dir.mkdir(exist_ok=True)

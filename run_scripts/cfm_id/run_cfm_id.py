@@ -4,7 +4,7 @@ from pathlib import Path
 from ms_pred import common
 
 
-datasets = ["nist20", "canopus_train_public"]
+datasets = ["nist20"]
 # datasets = ["casmi22"]
 num_threads = 96
 
