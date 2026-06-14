@@ -1,0 +1,82 @@
+launcher_args: {experiment_name: dag_inten_msg_spec,
+  script_name: "src/ms_pred/dag_pred/train_contr_inten.py",
+  slurm_script: launcher_scripts/generic_slurm.sh, 
+  launch_method: local,
+  visible_devices: [2, 3]
+}
+universal_args:
+  _slurm_args:
+  - {_num_gpu: 1, cpus-per-task: 7, job-name: forward_train, mem-per-cpu: 8G, 
+    nodelist: 'node[1236]', time: '1-18:00:00'}
+  debug: [false]
+  debug-overfit: [false]
+  gpu: [true]
+
+  seed: [1]
+  num-workers: [64]
+  batch-size: [32]
+  max-epochs: [10]
+  num-decoys: [3]
+
+  dataset-name: [msg]
+  split-name: [split.tsv]
+  dataset-labels: [labels.tsv]
+
+  learning-rate: [0.0005]
+  lr-decay-rate: [0.825]
+  contr-weight: [1]
+
+  dropout: [0.1]
+  mpnn-type: [GGNN]
+  pe-embed-k: [0]
+  pool-op: [avg]
+  hidden-size: [256]
+  weight-decay: [1e-7]
+  set-layers: [0]
+  frag-set-layers: [3]
+  mlp-layers: [1]
+  gnn-layers: [4]
+  root-encode: [gnn]
+  inject-early: [false]
+
+  include-unshifted-mz: [true]
+  binned-targs: [true] 
+  embed-adduct: [true]
+  embed-collision: [true]
+  embed-elem-group: [true]
+  grad-accumulate: [1]
+  encode-forms: [true]
+  add-hs: [true]
+  sk-tau: [0.05]
+
+iterative_args:
+  -  split-name: [split.tsv]
+     save-dir: [split_1_rnd1]
+     magma-dag-folder: [results/dag_gen_msg_spec/split_rnd1/preds_train_100_inten.hdf5]
+     decoy-path: ['results/dag_gen_msg_spec/split_rnd1/preds_train_100/decoy_tree_preds/decoy_tree_preds_chunk_{}.hdf5']
+     train-checkpoint: [results/dag_inten_msg_spec/split_1_rnd1/version_0/best.ckpt]
+     seed: [1]
+     loss-fn: [cosine]
+     track-cosine: [false]
+
+  -  split-name: [split.tsv]
+     save-dir: [split_1_rnd2]
+     magma-dag-folder: [results/dag_gen_msg_spec/split_rnd2/preds_train_100_inten.hdf5]
+     decoy-path: ['results/dag_gen_msg_spec/split_rnd2/preds_train_100/decoy_tree_preds/decoy_tree_preds_chunk_{}.hdf5']
+     train-checkpoint: [results/dag_inten_msg_spec/split_1_rnd2/version_0/best.ckpt]
+     seed: [2]
+     loss-fn: [cosine]
+     track-cosine: [false]
+
+  -  split-name: [split.tsv]
+     save-dir: [split_1_rnd3]
+     magma-dag-folder: [results/dag_gen_msg_spec/split_rnd3/preds_train_100_inten.hdf5]
+     decoy-path: ['results/dag_gen_msg_spec/split_rnd3/preds_train_100/decoy_tree_preds/decoy_tree_preds_chunk_{}.hdf5']
+     train-checkpoint: [results/dag_inten_msg_spec/split_1_rnd3/version_0/best.ckpt]
+     seed: [3]
+     loss-fn: [cosine]
+     track-cosine: [false]
+
+  # Can also tweak these to train on entropy loss if you wish. 
+
+
