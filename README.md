@@ -1,12 +1,12 @@
 #  Mass Spectrum Predictor
 
 This repository contains implementations for the following spectrum simulator models predicting molecular tandem mass spectra from molecules: 
-
+- 🏔️ GLACIER 🏔️: GLACIER: Rethinking Mass Spectrum Prediction as an Object Detection Problem
 - 🧊 ICEBERG 🧊️: [Inferring CID by Estimating Breakage Events and Reconstructing their Graphs](http://arxiv.org/abs/2304.13136) and [Neural Spectral Prediction for Structure Elucidation with Tandem Mass Spectrometry](https://www.biorxiv.org/content/10.1101/2025.05.28.656653v1)
 - 🏃‍ MARASON 🏃‍: [Neural Graph Matching Improves Retrieval Augmented Generation in Molecular Machine Learning](https://arxiv.org/html/2502.17874)
 - 🧣 SCARF 🧣: [Subformula Classification for Autoregressively Reconstructing Fragmentations](https://arxiv.org/abs/2303.06470)
 
-ICEBERG predicts spectra at the level of molecular fragments, whereas SCARF predicts spectra at the level of chemical formula. In order to fairly compare various spectra models, we implement a number of baselines and alternative models using equivalent settings across models (i.e., same covariates, hyeprparmaeter sweeps for each, etc.):
+GLACIER and ICEBERG predicts spectra at the level of molecular fragments, whereas SCARF predicts spectra at the level of chemical formula. In order to fairly compare various spectra models, we implement a number of baselines and alternative models using equivalent settings across models (i.e., same covariates, hyeprparmaeter sweeps for each, etc.):
  
 1. *NEIMS* using both FFN and GNN encoders from [Rapid prediction of electron–ionization mass spectrometry using neural networks](https://pubs.acs.org/doi/full/10.1021/acscentsci.9b00085)    
 2. *MassFormer* from [MassFormer: Tandem Mass Spectrum Prediction for Small Molecules using Graph Transformers](https://arxiv.org/abs/2111.04824)  
@@ -227,10 +227,12 @@ You can use `python launcher_scripts/run_from_config.py configs/marason/marason_
 
 ### GLACIER
 GLACIER is the first ms/ms machine learning model that predict multi-breakpoint fragmentation process in single pass. You can reproduce the experiments in our paper with the following scripts.
+0. *Add spectral intensity to the magma heuristics prediction*: `run_scripts/GLACIER/add_inten.sh`
+2. *Train model*: `run_scripts/GLACIER/01_train_joint.sh`   
+3. *Predict spectral intensity*: `run_scripts/GLACIER/02_predict_inten.py`     
+4. *Retrieval*: `run_scripts/GLACIER/03_run_retrieval.py` 
 
-1. *Train model*: `run_scripts/GLACIER/01_train_joint.sh`   
-2. *Predict spectral intensity*: `run_scripts/GLACIER/02_predict_inten.py`     
-3. *Retrieval*: `run_scripts/GLACIER/03_run_retrieval.py`   
+We provide a [checkpoint](https://www.dropbox.com/scl/fo/ta99j0mp1w7qzek5zvy3w/AFCLQNO8W2EP7ZDMOj9nxWI?rlkey=563zxtyvvhwfu1uyz6n10n2ui&st=k8km33p3&dl=0) of GLACIER trained and finetuned on the MassSpecGym dataset. 
 
 > You need two GPUs with at least 24GB RAM to train GLACIER (we used NVIDIA A5000 for development). 
 
