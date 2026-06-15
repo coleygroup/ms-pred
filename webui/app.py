@@ -1339,14 +1339,15 @@ def _generate_initial_password(length: int = 14) -> str:
             return pw
 
 
-def _send_email(to: str, subject: str, body: str) -> bool:
+def _send_email(to: str, subject: str, body: str) -> Optional[str]:
     """
-    Send a plain-text email via SMTP relay.  Returns True on success.
-    If SMTP is not configured, logs a warning and returns False.
+    Send a plain-text email via SMTP relay.
+    Returns None if SMTP is not configured, empty string on success,
+    or an error message string if the send failed.
     """
     if not _SMTP_HOST:
         app.logger.warning("SMTP not configured; skipping email to %s", to)
-        return False
+        return None
     try:
         msg = EmailMessage()
         msg["From"] = _SMTP_FROM or _SMTP_USER
@@ -1360,10 +1361,10 @@ def _send_email(to: str, subject: str, body: str) -> bool:
             if _SMTP_USER and _SMTP_PASSWORD:
                 smtp.login(_SMTP_USER, _SMTP_PASSWORD)
             smtp.send_message(msg)
-        return True
+        return ""
     except Exception as exc:
         app.logger.error("Failed to send email to %s: %s", to, exc)
-        return False
+        return str(exc)
 
 
 def _build_credential_email(email: str, password: str, kind: str = "new") -> tuple[str, str]:
@@ -1629,10 +1630,12 @@ def admin_add_user():
     subject, body = _build_credential_email(email, password, kind="new")
     sent = _send_email(email, subject, body)
 
-    if sent:
+    if sent is None:
+        flash(f"User {email} created. SMTP not configured — temp password: {password}", "warning")
+    elif sent == "":
         flash(f"User {email} created and credentials emailed. Temp password: {password}", "success")
     else:
-        flash(f"User {email} created. SMTP not configured — temp password: {password}", "warning")
+        flash(f"User {email} created but email failed ({sent}) — temp password: {password}", "error")
 
     return redirect(url_for("admin_dashboard"))
 
@@ -1655,10 +1658,12 @@ def admin_reset_password():
     subject, body = _build_credential_email(email, password, kind="reset")
     sent = _send_email(email, subject, body)
 
-    if sent:
+    if sent is None:
+        flash(f"Password reset for {email}. SMTP not configured — temp password: {password}", "warning")
+    elif sent == "":
         flash(f"Password reset for {email} and emailed. Temp password: {password}", "success")
     else:
-        flash(f"Password reset for {email}. SMTP not configured — temp password: {password}", "warning")
+        flash(f"Password reset for {email} but email failed ({sent}) — temp password: {password}", "error")
 
     return redirect(url_for("admin_dashboard"))
 
