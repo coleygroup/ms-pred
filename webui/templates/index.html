@@ -3383,9 +3383,8 @@
                             }
                         }
                     }
-                    updateDetectedHint();
-                    // Trigger the lookup after a short microtask delay so the tab
-                    // panel is visible before we start showing loading state.
+                    // Trigger the lookup after a short delay so the tab panel is
+                    // visible and the click listener is attached before we fire.
                     if (lookupBtn) setTimeout(function() { lookupBtn.click(); }, 50);
                 }
             }
