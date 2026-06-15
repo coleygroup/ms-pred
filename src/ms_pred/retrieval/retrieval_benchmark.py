@@ -324,7 +324,11 @@ def process_spec_file(
 
     for colli_label in name_to_colli.get(spec_name, []):
         if spec_h5 is not None:
-            spec_files = [f"{spec_name}_collision {colli_label}.json"]
+            spec_files = [
+                f"{spec_name}_collision {colli_label}.json",
+                f"{spec_name}_collision {colli_label} eV.json",
+                f"{spec_name}_collision {colli_label} eV [imputed].json",
+            ]
 
             loaded_json = None
             for spec_file in spec_files:
