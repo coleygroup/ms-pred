@@ -55,7 +55,7 @@
             margin-bottom: 0.25rem;
             color: #374151;
         }
-        input[type="text"], select, textarea {
+        input[type="text"], input[type="number"], select, textarea {
             width: 100%;
             padding: 0.5rem 0.75rem;
             border-radius: 0.5rem;
@@ -123,6 +123,60 @@
         }
         .btn + .btn {
             margin-left: 0.5rem;
+        }
+        .bookmarklet-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.5rem 1.1rem;
+            border-radius: 999px;
+            border: 2px dashed #2563eb;
+            background: #eff6ff;
+            color: #1d4ed8;
+            font-size: 0.9rem;
+            font-weight: 600;
+            text-decoration: none;
+            cursor: grab;
+            user-select: none;
+            white-space: nowrap;
+        }
+        .bookmarklet-btn:hover {
+            background: #dbeafe;
+        }
+        .bookmarklet-btn:active {
+            cursor: grabbing;
+        }
+        .bm-steps {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            margin: 0.75rem 0;
+        }
+        .bm-step {
+            flex: 1 1 160px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            gap: 0.4rem;
+        }
+        .bm-step-num {
+            width: 1.6rem;
+            height: 1.6rem;
+            border-radius: 50%;
+            background: #2563eb;
+            color: #fff;
+            font-size: 0.8rem;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+        .bm-step-text {
+            font-size: 0.8rem;
+            color: #374151;
+            line-height: 1.4;
         }
         .spectrum-block {
             border-radius: 0.5rem;
@@ -3177,6 +3231,33 @@
             });
         }
 
+        // ---- Smart query-type detection ----
+        const detectedTypeEl = document.getElementById("smi-detected-type");
+        const TYPE_LABELS = { smiles: "SMILES", name: "Name", inchi: "InChI", inchikey: "InChIKey", cid: "PubChem CID" };
+
+        function detectQueryType(q) {
+            if (!q) return "smiles";
+            if (/^InChI=/i.test(q)) return "inchi";
+            if (/^[A-Z]{14}-[A-Z]{10}-[A-Z]$/.test(q)) return "inchikey";
+            if (/^\d+$/.test(q)) return "cid";
+            if (/[()[\]=#/\\@%]/.test(q)) return "smiles";
+            return "name";
+        }
+
+        function updateDetectedHint() {
+            if (!detectedTypeEl) return;
+            if (queryTypeSel && queryTypeSel.value === "smart") {
+                const q = (queryInput ? queryInput.value : "").trim();
+                const detected = q ? detectQueryType(q) : null;
+                detectedTypeEl.textContent = detected ? "Detected: " + TYPE_LABELS[detected] : "";
+            } else {
+                detectedTypeEl.textContent = "";
+            }
+        }
+
+        if (queryInput) queryInput.addEventListener("input", updateDetectedHint);
+        if (queryTypeSel) queryTypeSel.addEventListener("change", updateDetectedHint);
+
         // ---- Main button click handler ----
         btn.addEventListener("click", () => {
             clearError();
@@ -3190,7 +3271,8 @@
                 return;
             }
 
-            const queryType = queryTypeSel ? queryTypeSel.value : "smiles";
+            const rawType = queryTypeSel ? queryTypeSel.value : "smiles";
+            const queryType = rawType === "smart" ? detectQueryType(query) : rawType;
 
             if (queryType === "smiles") {
                 // Direct SMILES lookup — existing fast path
@@ -3301,6 +3383,7 @@
                             }
                         }
                     }
+                    updateDetectedHint();
                     // Trigger the lookup after a short microtask delay so the tab
                     // panel is visible before we start showing loading state.
                     if (lookupBtn) setTimeout(function() { lookupBtn.click(); }, 50);
@@ -3594,7 +3677,8 @@
             <div>
                 <label for="smi-query-type">Query type</label>
                 <select id="smi-query-type">
-                    <option value="smiles"   selected>SMILES</option>
+                    <option value="smart" selected>Smart (auto-detect)</option>
+                    <option value="smiles">SMILES</option>
                     <option value="name">Name</option>
                     <option value="inchi">InChI</option>
                     <option value="inchikey">InChIKey</option>
@@ -3614,7 +3698,7 @@
                 </select>
             </div>
             <div>
-                <label for="smi-nce">Collision energy (NCE %)</label>
+                <label for="smi-nce">NCE (%)</label>
                 <input type="number" id="smi-nce" value="50" min="0" max="200" step="1">
             </div>
             <div>
@@ -3624,6 +3708,7 @@
                 </select>
             </div>
         </div>
+        <div id="smi-detected-type" style="font-size:0.75rem;color:#6b7280;margin-top:0.3rem;min-height:1em;"></div>
         <div style="margin-top:0.75rem;">
             <button type="button" class="btn btn-primary" id="smi-lookup-btn">Search</button>
             <span id="smi-status" style="margin-left:0.75rem; font-size:0.85rem; color:#6b7280;"></span>
@@ -3660,38 +3745,124 @@
 
         <details style="margin-top:1.25rem; border-top:1px solid #e5e7eb; padding-top:0.9rem;">
             <summary style="cursor:pointer; font-size:0.82rem; color:#6b7280; user-select:none;">
-                Jump directly from a PubChem compound page (bookmarklet)
+                &#128278; Jump directly from a PubChem compound page (bookmarklet)
             </summary>
-            <div style="margin-top:0.75rem; font-size:0.82rem; color:#374151; line-height:1.6;">
-                <p style="margin:0 0 0.5rem;">
-                    A <strong>bookmarklet</strong> is a one-click browser bookmark that runs a small
-                    script — it reads the InChIKey from the PubChem page you're viewing and opens
-                    that compound's predicted spectrum here automatically.
+            <div style="margin-top:0.85rem;">
+
+                <!-- Visual 3-step guide -->
+                <div class="bm-steps">
+                    <!-- Step 1 -->
+                    <div class="bm-step">
+                        <div class="bm-step-num">1</div>
+                        <!-- Browser chrome showing bookmarks bar toggled on -->
+                        <svg width="120" height="66" viewBox="0 0 120 66" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                            <rect x="0.5" y="0.5" width="119" height="65" rx="5.5" fill="#f9fafb" stroke="#d1d5db"/>
+                            <!-- address bar -->
+                            <rect x="8" y="7" width="104" height="11" rx="3" fill="#e5e7eb"/>
+                            <!-- bookmarks bar (highlighted) -->
+                            <rect x="0.5" y="21.5" width="119" height="13" fill="#dbeafe" stroke="#93c5fd" stroke-width="0.5"/>
+                            <text x="6" y="31" font-family="sans-serif" font-size="7" fill="#1d4ed8" font-weight="600">Bookmarks bar</text>
+                            <!-- keyboard shortcut label -->
+                            <rect x="8" y="40" width="50" height="10" rx="2" fill="#e5e7eb"/>
+                            <text x="11" y="48" font-family="monospace" font-size="6" fill="#374151">Ctrl+Shift+B</text>
+                            <rect x="63" y="40" width="49" height="10" rx="2" fill="#e5e7eb"/>
+                            <text x="66" y="48" font-family="monospace" font-size="6" fill="#374151">⌘⇧B  (Mac)</text>
+                        </svg>
+                        <div class="bm-step-text">
+                            Show the bookmarks bar<br>
+                            <kbd>Ctrl+Shift+B</kbd> &nbsp;/&nbsp; <kbd>⌘⇧B</kbd>
+                        </div>
+                    </div>
+
+                    <!-- Step 2 -->
+                    <div class="bm-step">
+                        <div class="bm-step-num">2</div>
+                        <!-- Browser chrome + dashed arrow from button chip up to bookmarks bar -->
+                        <svg width="120" height="66" viewBox="0 0 120 66" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                            <rect x="0.5" y="0.5" width="119" height="65" rx="5.5" fill="#f9fafb" stroke="#d1d5db"/>
+                            <rect x="8" y="7" width="104" height="11" rx="3" fill="#e5e7eb"/>
+                            <!-- bookmarks bar -->
+                            <rect x="0.5" y="21.5" width="119" height="13" fill="#f3f4f6" stroke="#d1d5db" stroke-width="0.5"/>
+                            <!-- bookmarklet chip on the bar (destination) -->
+                            <rect x="6" y="24" width="60" height="8" rx="4" fill="#dbeafe" stroke="#93c5fd" stroke-width="1" stroke-dasharray="2 1"/>
+                            <text x="10" y="30.5" font-family="sans-serif" font-size="6" fill="#1d4ed8">View in ICEBERG</text>
+                            <!-- arrow going up -->
+                            <line x1="36" y1="54" x2="36" y2="36" stroke="#2563eb" stroke-width="1.5" stroke-dasharray="3 2" marker-end="url(#arr)"/>
+                            <defs>
+                                <marker id="arr" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto">
+                                    <path d="M0,0 L0,6 L6,3 z" fill="#2563eb"/>
+                                </marker>
+                            </defs>
+                            <!-- button chip at bottom -->
+                            <rect x="6" y="50" width="65" height="11" rx="5" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5" stroke-dasharray="3 2"/>
+                            <text x="10" y="58" font-family="sans-serif" font-size="6.5" fill="#1d4ed8" font-weight="600">View in ICEBERG</text>
+                        </svg>
+                        <div class="bm-step-text">
+                            <strong>Drag</strong> the button below<br>up to your bookmarks bar
+                        </div>
+                    </div>
+
+                    <!-- Step 3 -->
+                    <div class="bm-step">
+                        <div class="bm-step-num">3</div>
+                        <!-- PubChem page + click indicator -->
+                        <svg width="120" height="66" viewBox="0 0 120 66" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                            <rect x="0.5" y="0.5" width="119" height="65" rx="5.5" fill="#f9fafb" stroke="#d1d5db"/>
+                            <rect x="8" y="7" width="104" height="11" rx="3" fill="#e5e7eb"/>
+                            <text x="13" y="15.5" font-family="monospace" font-size="6" fill="#6b7280">pubchem.ncbi.nlm.nih.gov/compound/…</text>
+                            <!-- bookmarks bar with chip + click halo -->
+                            <rect x="0.5" y="21.5" width="119" height="13" fill="#f3f4f6" stroke="#d1d5db" stroke-width="0.5"/>
+                            <rect x="6" y="24" width="60" height="8" rx="4" fill="#dbeafe" stroke="#2563eb" stroke-width="1"/>
+                            <text x="10" y="30.5" font-family="sans-serif" font-size="6" fill="#1d4ed8">View in ICEBERG</text>
+                            <!-- click indicator: bullseye on chip -->
+                            <circle cx="36" cy="28" r="5.5" fill="none" stroke="#ef4444" stroke-width="1.2"/>
+                            <circle cx="36" cy="28" r="1.8" fill="#ef4444"/>
+                            <!-- result label -->
+                            <text x="60" y="55" font-family="sans-serif" font-size="6.5" fill="#374151" text-anchor="middle">Opens ICEBERG in new tab ✓</text>
+                        </svg>
+                        <div class="bm-step-text">
+                            On any PubChem compound page,<br><strong>click</strong> the bookmark
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Draggable button + caption -->
+                <div style="text-align:center; margin:0.5rem 0 0.25rem;">
+                    <a class="bookmarklet-btn"
+                       href="javascript:(function(){var m=location.pathname.match(/\/compound\/(\d+)/);if(m){window.open('https://iceberg-ms.mit.edu/#explore?query='+m[1]+'&query_type=cid');}else{alert('No PubChem CID found in this page URL.');}})();"
+                       onclick="return false;"
+                       draggable="true"
+                       title="Drag me to your bookmarks bar">
+                        &#128278; View in ICEBERG
+                    </a>
+                    <div style="font-size:0.75rem; color:#6b7280; margin-top:0.4rem;">
+                        &#8593; Drag this button to your bookmarks bar &mdash; don't click it here
+                    </div>
+                </div>
+
+                <!-- Manual fallback -->
+                <details style="margin-top:1rem;">
+                    <summary style="cursor:pointer; font-size:0.78rem; color:#6b7280; user-select:none;">
+                        Prefer to set it up manually?
+                    </summary>
+                    <div style="margin-top:0.6rem; font-size:0.8rem; color:#374151; line-height:1.6;">
+                        <ol style="margin:0 0 0.6rem; padding-left:1.4rem;">
+                            <li>Right-click the bookmarks bar → <em>Add page…</em> (Chrome) or
+                                <em>New Bookmark</em> (Firefox).</li>
+                            <li>Set the <strong>Name</strong> to <code>View in ICEBERG</code>.</li>
+                            <li>Paste the following as the <strong>URL / Location</strong>:</li>
+                        </ol>
+                        <pre style="background:#f3f4f6; border:1px solid #e5e7eb; border-radius:0.4rem;
+                                    padding:0.6rem 0.8rem; font-size:0.72rem; overflow-x:auto;
+                                    white-space:pre-wrap; word-break:break-all; margin:0;">javascript:(function(){var m=location.pathname.match(/\/compound\/(\d+)/);if(m){window.open('https://iceberg-ms.mit.edu/#explore?query='+m[1]+'&amp;query_type=cid');}else{alert('No PubChem CID found in this page URL.');}})();</pre>
+                    </div>
+                </details>
+
+                <p style="margin:0.75rem 0 0; font-size:0.8rem; color:#6b7280;">
+                    No bookmarklet? You can also paste any PubChem CID number directly into the
+                    search box above — the <strong>Smart</strong> query type will detect it automatically.
                 </p>
-                <p style="margin:0 0 0.6rem;"><strong>Setup (one time):</strong></p>
-                <ol style="margin:0 0 0.75rem; padding-left:1.4rem;">
-                    <li>Show your browser's bookmarks bar
-                        (<kbd>Ctrl+Shift+B</kbd> / <kbd>⌘⇧B</kbd> on Mac).</li>
-                    <li>Right-click the bookmarks bar → <em>Add page…</em> (Chrome) or
-                        <em>New Bookmark</em> (Firefox).</li>
-                    <li>Set the <strong>Name</strong> to anything, e.g. <code>View in ICEBERG</code>.</li>
-                    <li>Paste the following as the <strong>URL / Location</strong>:</li>
-                </ol>
-                <pre style="background:#f3f4f6; border:1px solid #e5e7eb; border-radius:0.4rem;
-                            padding:0.6rem 0.8rem; font-size:0.75rem; overflow-x:auto;
-                            white-space:pre-wrap; word-break:break-all; margin:0 0 0.75rem;">javascript:(function(){var m=location.pathname.match(/\/compound\/(\d+)/);if(m){window.open('https://iceberg-ms.mit.edu/#explore?query='+m[1]+'&amp;query_type=cid');}else{alert('No PubChem CID found in this page URL.');}})();</pre>
-                <p style="margin:0 0 0.4rem;"><strong>Usage:</strong></p>
-                <ol style="margin:0; padding-left:1.4rem;">
-                    <li>Navigate to any PubChem compound page, e.g.
-                        <a href="https://pubchem.ncbi.nlm.nih.gov/compound/13648279" target="_blank"
-                           rel="noopener" style="color:#2563eb;">pubchem.ncbi.nlm.nih.gov/compound/13648279</a>.</li>
-                    <li>Click the <code>View in ICEBERG</code> bookmark — a new tab opens here
-                        with the Explore tab pre-filled and the lookup running automatically.</li>
-                </ol>
-                <p style="margin:0.6rem 0 0; color:#6b7280;">
-                    You can also use the <strong>PubChem CID</strong> query type above to look up
-                    a compound by its numeric CID directly (e.g. <code>13648279</code>).
-                </p>
+
             </div>
         </details>
     </div>
@@ -3703,8 +3874,12 @@
         <p style="font-size:0.85rem; color:#6b7280;">
             Download ICEBERG-predicted spectra for a specific PubChem formula from the atlas.
             You can either download the raw MGF only, or download MGF and a converted MSP file.<br>
-            All NIST'23 structures are excluded to avoid license conflict. You can import the predicted
-            library into your NIST MS Search software.
+            {% if current_user.is_authenticated and current_user.can_access_nist %}
+            NIST'23 structures are included in the download.
+            {% else %}
+            All NIST'23 structures are excluded to avoid license conflict.
+            {% endif %}
+            You can import the predicted library into your NIST MS Search software.
         </p>
         <p style="font-size:0.85rem; color:#6b7280; margin-top:0.3rem;">
             The current ICEBERG PubChem atlas contains <strong>91,424,208</strong> unique structures from PubChem.
@@ -3738,8 +3913,10 @@
                 Ranked by entropy similarity (1.0 = identical). Only spectra with
                 matching collision energies (in eV) are shown. Hover over a row to
                 view the predicted chemical structure.
-                Click a row to pin/unpin the preview.<br>
-                All NIST'23 structures are excluded to avoid license conflict.
+                Click a row to pin/unpin the preview.
+                {% if not (current_user.is_authenticated and current_user.can_access_nist) %}
+                <br>All NIST'23 structures are excluded to avoid license conflict.
+                {% endif %}
             </p>
 
             <div class="results-layout">
