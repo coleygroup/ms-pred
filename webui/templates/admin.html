@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Admin — ICEBERG</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+    <!-- Chart.js + D3 (CDN) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/topojson-client@3/dist/topojson-client.min.js"></script>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; }
+        body {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            margin: 0; padding: 0;
+            background: #f5f5f7; color: #111827; min-height: 100vh;
+            display: flex; flex-direction: column;
+        }
+        header {
+            background: #111827; color: #f9fafb;
+            padding: 0.75rem 2rem;
+        }
+        .header-inner {
+            display: flex; align-items: center; justify-content: space-between;
+        }
+        .header-title { margin: 0; font-size: 1.3rem; font-weight: 600; }
+        .header-nav { display: flex; align-items: center; gap: 1rem; font-size: 0.85rem; }
+        main { flex: 1; padding: 2rem; max-width: 1200px; margin: 0 auto; width: 100%; }
+        h2 { font-size: 1.15rem; font-weight: 600; margin: 2rem 0 0.75rem; color: #1e293b; border-bottom: 1px solid #e2e8f0; padding-bottom: 0.4rem; }
+        h2:first-child { margin-top: 0; }
+
+        /* Flash messages */
+        .flash { border-radius: 0.4rem; padding: 0.6rem 0.9rem; margin-bottom: 1rem; font-size: 0.875rem; }
+        .flash.success { background: #f0fdf4; border: 1px solid #86efac; color: #15803d; }
+        .flash.warning { background: #fffbeb; border: 1px solid #fcd34d; color: #92400e; }
+        .flash.error   { background: #fef2f2; border: 1px solid #fca5a5; color: #b91c1c; }
+
+        /* Tables */
+        .table-wrap { overflow-x: auto; margin-bottom: 1.5rem; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.875rem; background: #fff;
+                border-radius: 0.5rem; overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,0.07); }
+        th { background: #f8fafc; color: #374151; font-weight: 600; padding: 0.6rem 0.75rem; text-align: left; border-bottom: 1px solid #e5e7eb; }
+        td { padding: 0.55rem 0.75rem; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
+        tr:last-child td { border-bottom: none; }
+        tr:hover td { background: #f8fafc; }
+
+        /* Role badges */
+        .badge { display: inline-block; font-size: 0.75rem; font-weight: 600; padding: 0.15rem 0.5rem;
+                 border-radius: 999px; }
+        .badge-admin         { background: #ede9fe; color: #6d28d9; }
+        .badge-authorized    { background: #d1fae5; color: #065f46; }
+        .badge-user          { background: #e5e7eb; color: #374151; }
+
+        /* Inline forms / buttons */
+        .btn { display: inline-block; padding: 0.3rem 0.65rem; border-radius: 0.35rem;
+               font-size: 0.8rem; font-weight: 500; cursor: pointer; border: 1px solid transparent;
+               text-decoration: none; }
+        .btn-danger  { background: #fee2e2; color: #b91c1c; border-color: #fca5a5; }
+        .btn-primary { background: #2563eb; color: #fff; }
+        .btn-secondary { background: #e5e7eb; color: #374151; border-color: #d1d5db; }
+        .btn:hover { opacity: 0.85; }
+        button.btn { font-family: inherit; }
+
+        select.role-select { font-size: 0.8rem; padding: 0.2rem 0.4rem; border: 1px solid #d1d5db;
+                             border-radius: 0.3rem; background: #f9fafb; }
+
+        /* Add-user card */
+        .add-card { background: #fff; border-radius: 0.5rem; padding: 1.25rem 1.5rem;
+                    box-shadow: 0 1px 4px rgba(0,0,0,0.07); margin-bottom: 1.5rem; }
+        .add-card .row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-end; }
+        .add-card .field label { display: block; font-size: 0.8rem; font-weight: 500; margin-bottom: 0.25rem; color: #374151; }
+        .add-card .field input, .add-card .field select {
+            padding: 0.45rem 0.65rem; border: 1px solid #d1d5db; border-radius: 0.4rem;
+            font-size: 0.875rem; background: #f9fafb; outline: none;
+        }
+        .add-card .field input:focus, .add-card .field select:focus { border-color: #2563eb; background: #fff; }
+        .add-card .field input[type="email"] { width: 280px; }
+
+        /* Charts + map */
+        .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 1.5rem; }
+        @media (max-width: 800px) { .charts-grid { grid-template-columns: 1fr; } }
+        .chart-card { background: #fff; border-radius: 0.5rem; padding: 1rem 1.25rem;
+                      box-shadow: 0 1px 4px rgba(0,0,0,0.07); }
+        .chart-card h3 { margin: 0 0 0.75rem; font-size: 0.95rem; font-weight: 600; color: #374151; }
+        #geo-map { width: 100%; height: 420px; border-radius: 0.5rem; background: #f0f4f8; display: block; }
+        #geo-map .land { fill: #d1d5db; stroke: #fff; stroke-width: 0.4; }
+        #geo-map .dot  { fill: rgba(37,99,235,0.7); stroke: rgba(37,99,235,0.9); stroke-width: 0.5; cursor: pointer; }
+        #geo-map .dot:hover { fill: rgba(220,38,38,0.8); }
+        .map-card { background: #fff; border-radius: 0.5rem; padding: 1rem 1.25rem;
+                    box-shadow: 0 1px 4px rgba(0,0,0,0.07); margin-bottom: 1.5rem; }
+        .map-card h3 { margin: 0 0 0.75rem; font-size: 0.95rem; font-weight: 600; color: #374151; }
+        .map-tooltip { position: fixed; background: #1e293b; color: #f1f5f9; font-size: 0.78rem;
+                       padding: 0.3rem 0.6rem; border-radius: 0.3rem; pointer-events: none;
+                       display: none; z-index: 100; }
+        .no-geo { font-size: 0.85rem; color: #6b7280; font-style: italic; }
+
+        .top-table { font-size: 0.82rem; }
+        .top-table td:last-child { text-align: right; font-family: monospace; }
+        .days-ctrl { font-size: 0.8rem; color: #6b7280; float: right; margin-top: -0.1rem; }
+        .days-ctrl select { font-size: 0.8rem; padding: 0.1rem 0.3rem; }
+    </style>
+</head>
+<body>
+<header>
+    <div class="header-inner">
+        <h1 class="header-title">ICEBERG — Admin Dashboard</h1>
+        <div class="header-nav">
+            <span style="color:#9ca3af;">{{ current_user.id }}</span>
+            <a href="{{ url_for('index') }}" style="color:#93c5fd;text-decoration:none;">← Atlas</a>
+            <a href="{{ url_for('change_password') }}" style="color:#9ca3af;text-decoration:none;font-size:0.8rem;">Change password</a>
+            <form method="post" action="{{ url_for('logout') }}" style="margin:0;">
+                <button type="submit" style="background:none;border:1px solid #4b5563;color:#d1d5db;
+                    padding:0.25rem 0.6rem;border-radius:0.35rem;cursor:pointer;font-size:0.8rem;">
+                    Log out
+                </button>
+            </form>
+        </div>
+    </div>
+</header>
+
+<main>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, msg in messages %}
+    <div class="flash {{ category }}">{{ msg }}</div>
+    {% endfor %}
+    {% endwith %}
+
+    <!-- ─── User management ─────────────────────────────────────── -->
+    <h2>Users</h2>
+
+    <div class="add-card">
+        <form method="post" action="{{ url_for('admin_add_user') }}">
+            <div class="row">
+                <div class="field">
+                    <label for="new-email">Email address</label>
+                    <input type="email" id="new-email" name="email" placeholder="user@example.com" required>
+                </div>
+                <div class="field">
+                    <label for="new-role">Role</label>
+                    <select id="new-role" name="role">
+                        <option value="user">user — public atlas only</option>
+                        <option value="authorized_user">authorized_user — NIST access</option>
+                        <option value="admin">admin — full control</option>
+                    </select>
+                </div>
+                <div class="field" style="padding-bottom:0.05rem;">
+                    <label>&nbsp;</label>
+                    <button type="submit" class="btn btn-primary">Add user &amp; send email</button>
+                </div>
+            </div>
+        </form>
+    </div>
+
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Email</th>
+                    <th>Role</th>
+                    <th>Created</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for u in users %}
+            <tr>
+                <td>{{ u.email }}</td>
+                <td>
+                    {% if u.role == 'admin' %}
+                    <span class="badge badge-admin">admin</span>
+                    {% elif u.role == 'authorized_user' %}
+                    <span class="badge badge-authorized">authorized_user</span>
+                    {% else %}
+                    <span class="badge badge-user">user</span>
+                    {% endif %}
+                </td>
+                <td style="color:#6b7280;font-size:0.8rem;">{{ u.created[:10] if u.created else '—' }}</td>
+                <td>
+                    <div style="display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center;">
+                        <!-- Reset password -->
+                        <form method="post" action="{{ url_for('admin_reset_password') }}"
+                              onsubmit="return confirm('Reset password for {{ u.email }}?');">
+                            <input type="hidden" name="email" value="{{ u.email }}">
+                            <button type="submit" class="btn btn-secondary">Reset pw</button>
+                        </form>
+                        <!-- Set role -->
+                        <form method="post" action="{{ url_for('admin_set_role') }}"
+                              style="display:flex;gap:0.3rem;align-items:center;">
+                            <input type="hidden" name="email" value="{{ u.email }}">
+                            <select name="role" class="role-select">
+                                {% for r in valid_roles | sort %}
+                                <option value="{{ r }}" {% if r == u.role %}selected{% endif %}>{{ r }}</option>
+                                {% endfor %}
+                            </select>
+                            <button type="submit" class="btn btn-secondary">Set</button>
+                        </form>
+                        <!-- Delete -->
+                        {% if u.email != current_user.id %}
+                        <form method="post" action="{{ url_for('admin_delete_user') }}"
+                              onsubmit="return confirm('Delete user {{ u.email }}? This cannot be undone.');">
+                            <input type="hidden" name="email" value="{{ u.email }}">
+                            <button type="submit" class="btn btn-danger">Delete</button>
+                        </form>
+                        {% endif %}
+                    </div>
+                </td>
+            </tr>
+            {% else %}
+            <tr><td colspan="4" style="color:#6b7280;font-style:italic;">No users found.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <!-- ─── Analytics ───────────────────────────────────────────── -->
+    <h2>
+        Traffic analytics
+        <span class="days-ctrl">
+            Last <select id="days-select" onchange="loadAnalytics(this.value)">
+                <option value="30">30 days</option>
+                <option value="90" selected>90 days</option>
+                <option value="365">1 year</option>
+            </select>
+        </span>
+    </h2>
+
+    <div class="charts-grid">
+        <div class="chart-card">
+            <h3>Daily requests</h3>
+            <canvas id="chart-requests" height="200"></canvas>
+        </div>
+        <div class="chart-card">
+            <h3>Top paths</h3>
+            <div class="table-wrap" style="margin-bottom:0;">
+                <table class="top-table" id="top-paths-table">
+                    <tbody><tr><td colspan="2" style="color:#9ca3af;">Loading…</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    {% if geoip_available %}
+    <div class="map-card">
+        <h3>Visitor map</h3>
+        <svg id="geo-map"></svg>
+    </div>
+    <div class="map-tooltip" id="map-tooltip"></div>
+    {% else %}
+    <div class="map-card">
+        <h3>Visitor map</h3>
+        <p class="no-geo">Geo-IP map not available — set the <code>GEOIP_DB</code> environment
+        variable to the path of a MaxMind GeoLite2-City.mmdb file to enable it.<br>
+        Download free at <a href="https://dev.maxmind.com/geoip/geolite2-free-geolocation-data"
+        target="_blank">dev.maxmind.com</a>.</p>
+    </div>
+    {% endif %}
+
+    <div class="charts-grid">
+        <div class="chart-card">
+            <h3>Top countries</h3>
+            <div class="table-wrap" style="margin-bottom:0;">
+                <table class="top-table" id="top-countries-table">
+                    <tbody><tr><td colspan="2" style="color:#9ca3af;">Loading…</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+        <div class="chart-card">
+            <h3>Unique visitors per day</h3>
+            <canvas id="chart-ips" height="200"></canvas>
+        </div>
+    </div>
+</main>
+
+<script>
+(function () {
+    // ── Chart.js instances ──────────────────────────────────────────
+    const ctxReq = document.getElementById('chart-requests').getContext('2d');
+    const ctxIps = document.getElementById('chart-ips').getContext('2d');
+
+    const chartOpts = (label, color) => ({
+        type: 'bar',
+        data: { labels: [], datasets: [{ label, data: [], backgroundColor: color, borderRadius: 3 }] },
+        options: {
+            responsive: true,
+            plugins: { legend: { display: false } },
+            scales: { y: { beginAtZero: true, ticks: { precision: 0 } } }
+        }
+    });
+
+    const chartReq = new Chart(ctxReq, chartOpts('Requests', 'rgba(37,99,235,0.7)'));
+    const chartIps = new Chart(ctxIps, chartOpts('Unique IPs', 'rgba(16,185,129,0.7)'));
+
+    // ── D3 + Natural Earth map (no tile server, geopolitically neutral) ──
+    {% if geoip_available %}
+    const svgEl  = document.getElementById('geo-map');
+    const tooltip = document.getElementById('map-tooltip');
+    let geoPoints = [];
+    let projection, pathFn, svgSel;
+
+    function buildMap(world) {
+        const W = svgEl.clientWidth || 800;
+        const H = svgEl.clientHeight || 420;
+        svgSel = d3.select(svgEl).attr('viewBox', `0 0 ${W} ${H}`);
+        svgSel.selectAll('*').remove();
+
+        projection = d3.geoNaturalEarth1()
+            .scale(W / 6.5)
+            .translate([W / 2, H / 2]);
+        pathFn = d3.geoPath().projection(projection);
+
+        const land = topojson.feature(world, world.objects.countries);
+        svgSel.append('g').selectAll('path')
+            .data(land.features)
+            .join('path')
+            .attr('class', 'land')
+            .attr('d', pathFn);
+
+        renderDots();
+    }
+
+    function renderDots() {
+        if (!svgSel || !projection) return;
+        svgSel.selectAll('.dot').remove();
+        if (!geoPoints.length) return;
+        const maxCount = d3.max(geoPoints, d => d.count) || 1;
+        const r = d3.scaleSqrt().domain([1, maxCount]).range([4, 20]);
+
+        svgSel.selectAll('.dot')
+            .data(geoPoints)
+            .join('circle')
+            .attr('class', 'dot')
+            .attr('cx', d => (projection([d.lon, d.lat]) || [0,0])[0])
+            .attr('cy', d => (projection([d.lon, d.lat]) || [0,0])[1])
+            .attr('r', d => r(d.count))
+            .on('mousemove', (event, d) => {
+                tooltip.style.display = 'block';
+                tooltip.style.left = (event.clientX + 12) + 'px';
+                tooltip.style.top  = (event.clientY - 28) + 'px';
+                tooltip.textContent = `${d.country || 'Unknown'}: ${d.count} request(s)`;
+            })
+            .on('mouseleave', () => { tooltip.style.display = 'none'; });
+    }
+
+    // Natural Earth 110m land polygons (small, ~100 kB, no political labels/tiles)
+    const WORLD_URL = 'https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json';
+    let worldData = null;
+    d3.json(WORLD_URL).then(w => { worldData = w; buildMap(w); });
+    window.addEventListener('resize', () => { if (worldData) buildMap(worldData); });
+    {% endif %}
+
+    // ── Utilities ───────────────────────────────────────────────────
+    function updateTable(tableId, rows, col1, col2) {
+        const tbody = document.querySelector('#' + tableId + ' tbody');
+        if (!rows || rows.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="2" style="color:#9ca3af;">No data yet.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map(r =>
+            `<tr><td>${escHtml(String(r[col1]))}</td><td>${r[col2]}</td></tr>`
+        ).join('');
+    }
+
+    function escHtml(s) {
+        return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    // ── Load analytics ──────────────────────────────────────────────
+    window.loadAnalytics = function(days) {
+        fetch('/admin/api/stats?days=' + days)
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) return;
+                chartReq.data.labels = data.daily.map(d => d.day);
+                chartReq.data.datasets[0].data = data.daily.map(d => d.requests);
+                chartReq.update();
+                chartIps.data.labels = data.daily.map(d => d.day);
+                chartIps.data.datasets[0].data = data.daily.map(d => d.unique_ips);
+                chartIps.update();
+                updateTable('top-paths-table', data.top_paths, 'path', 'count');
+                updateTable('top-countries-table', data.top_countries, 'country', 'count');
+            })
+            .catch(() => {});
+
+        {% if geoip_available %}
+        fetch('/admin/api/geo?days=' + days)
+            .then(r => r.json())
+            .then(data => {
+                geoPoints = data.points || [];
+                renderDots();
+            })
+            .catch(() => {});
+        {% endif %}
+    };
+
+    loadAnalytics(document.getElementById('days-select').value);
+})();
+</script>
+</body>
+</html>
