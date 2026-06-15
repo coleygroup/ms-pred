@@ -1,16 +1,32 @@
 #!/usr/bin/env python3
 from io import BytesIO
 from pathlib import Path
-from typing import List, Dict, Any, Sequence, Tuple
+from typing import List, Dict, Any, Sequence, Tuple, Optional
 import threading
 import time
+import tempfile
 import uuid
 import os
 import json
+import secrets
+import string
+import smtplib
+import sqlite3
+import ipaddress
+import functools
+from datetime import datetime, timezone
+from email.message import EmailMessage
 from dataclasses import dataclass, field
+from http.client import RemoteDisconnected
+from urllib.error import URLError
 
-from flask import Flask, render_template, request, send_file, flash, redirect, url_for, abort, jsonify
+from flask import Flask, render_template, request, send_file, flash, redirect, url_for, abort, jsonify, Response, stream_with_context, get_flashed_messages
+from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.security import generate_password_hash, check_password_hash
 import numpy as np
+import pubchempy as pcp
+import yaml
 
 from ms_pred import common
 from ms_pred.common import MassSpec, CompositeMassSpec
@@ -30,6 +46,51 @@ ADDUCT_TO_DIR = {
     '[M-H]-': BASE_MGF_DIR / 'h_minus_out_mgf',
 }
 
+# NIST'23 atlas (gated — only authenticated internal users see it)
+_NIST_DIR_ENV = os.environ.get("MSPRED_ATLAS_DIR_NIST", "")
+NIST_MGF_DIR: Path | None = Path(_NIST_DIR_ENV) if _NIST_DIR_ENV else None
+NIST_ADDUCT_TO_DIR = (
+    {
+        '[M+H]+': NIST_MGF_DIR / 'h_plus_out_mgf',
+        '[M-H]-': NIST_MGF_DIR / 'h_minus_out_mgf',
+    }
+    if NIST_MGF_DIR is not None
+    else {}
+)
+
+# Internal-user store (YAML file: email -> nested record with password hash + role)
+ICEBERG_USERS_FILE: Path | None = (
+    Path(os.environ["ICEBERG_USERS_FILE"])
+    if "ICEBERG_USERS_FILE" in os.environ
+    else None
+)
+
+# Comma-separated list of emails that always have admin privilege (safety net)
+_ADMIN_EMAILS_ENV: set = {
+    e.strip().lower()
+    for e in os.environ.get("ICEBERG_ADMIN_EMAILS", "").split(",")
+    if e.strip()
+}
+
+# SMTP config for sending registration emails (all optional — if unset, email is skipped)
+_SMTP_HOST: str = os.environ.get("SMTP_HOST", "")
+_SMTP_PORT: int = int(os.environ.get("SMTP_PORT", "587"))
+_SMTP_USER: str = os.environ.get("SMTP_USER", "")
+_SMTP_PASSWORD: str = os.environ.get("SMTP_PASSWORD", "")
+_SMTP_FROM: str = os.environ.get("SMTP_FROM", _SMTP_USER)
+_SMTP_USE_TLS: bool = os.environ.get("SMTP_USE_TLS", "true").lower() not in ("0", "false", "no")
+
+# SQLite analytics database
+_ANALYTICS_DB_PATH: Path | None = (
+    Path(os.environ["ICEBERG_ANALYTICS_DB"])
+    if "ICEBERG_ANALYTICS_DB" in os.environ
+    else (ICEBERG_USERS_FILE.parent / "analytics.db" if ICEBERG_USERS_FILE else None)
+)
+_analytics_db_lock = threading.Lock()
+
+# MaxMind GeoLite2 database for geo-IP resolution (optional)
+_GEOIP_DB_PATH: str = os.environ.get("GEOIP_DB", "")
+
 # Example spectrum
 EXAMPLE_MS_PATH = (
     Path(__file__).resolve().parent.parent / "data/exp_specs/clinical/lpc19-0_standard.ms"
@@ -43,9 +104,14 @@ EV_TOLERANCE = 1.0
 # -----------------------------------------------------------------------------
 
 
+def round_ev(ev: Any) -> int:
+    """Round a collision-energy value to the nearest integer eV."""
+    return int(round(float(ev)))
+
+
 def get_formula_subdir(formula: str, adduct='[M+H]+') -> Path:
     """
-    Wrapper around common.get_formula_subdir to return a Path.
+    Wrapper around common.get_formula_subdir to return a Path (public atlas).
     """
     subdir = common.get_formula_subdir(formula)
     return ADDUCT_TO_DIR[adduct] / subdir
@@ -53,11 +119,36 @@ def get_formula_subdir(formula: str, adduct='[M+H]+') -> Path:
 
 def get_mgf_path_for_formula(formula: str, adduct='[M+H]+') -> Path:
     """
-    Get the .mgf path for a given chemical formula.
+    Get the .mgf path for a given chemical formula (public atlas only).
     """
     subdir = get_formula_subdir(formula, adduct)
     mgf_path = subdir / f"{formula}.mgf"
     return mgf_path
+
+
+def mgf_paths_for_formula(
+    formula: str,
+    adduct: str = '[M+H]+',
+    include_nist: bool = False,
+) -> List[Path]:
+    """
+    Return ordered list of existing .mgf paths for a formula.
+    Public atlas is always first; NIST atlas is appended when include_nist=True
+    and MSPRED_ATLAS_DIR_NIST is configured.
+    """
+    paths: List[Path] = []
+
+    pub_path = get_mgf_path_for_formula(formula, adduct)
+    if pub_path.exists():
+        paths.append(pub_path)
+
+    if include_nist and NIST_MGF_DIR is not None and adduct in NIST_ADDUCT_TO_DIR:
+        nist_subdir = common.get_formula_subdir(formula)
+        nist_path = NIST_ADDUCT_TO_DIR[adduct] / nist_subdir / f"{formula}.mgf"
+        if nist_path.exists():
+            paths.append(nist_path)
+
+    return paths
 
 
 def parse_user_spectrum(text: str) -> np.ndarray:
@@ -113,8 +204,7 @@ def prepare_user_spectra(
         masses = peaks[:, 0]
         intens = peaks[:, 1]
 
-        ev_value = common.nce_to_ev(nce, precursor_mz)
-        ev_value = float(ev_value)
+        ev_value = round_ev(common.nce_to_ev(nce, precursor_mz))
 
         spec_obj = MassSpec(
             collision_energy=ev_value,
@@ -175,14 +265,71 @@ def _canonicalize_smiles_safe(smi: str) -> str:
     return Chem.MolToSmiles(mol)
 
 
+def _load_mgf_index(mgf_path: Path) -> Dict[str, List[List[int]]] | None:
+    """
+    Load the .idx sidecar for an MGF file, or return None if absent/unreadable.
+    The sidecar is produced by run_scripts/iceberg_atlas/04_build_index.py and
+    has the shape: { "<INCHIKEY>": [[byte_offset, block_length], ...], ... }.
+    """
+    idx_path = mgf_path.with_suffix(".mgf.idx")
+    if not idx_path.exists():
+        return None
+    try:
+        with open(idx_path, "r") as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
+def _parse_mgf_block_text(text: str) -> Tuple[Dict[str, str], np.ndarray] | Tuple[None, None]:
+    """
+    Parse a single BEGIN IONS … END IONS text chunk into (meta, peaks).
+    Shared by the full-scan and the indexed reader so the parsing logic
+    lives in exactly one place.
+    """
+    meta: Dict[str, str] = {}
+    peaks: List[Tuple[float, float]] = []
+    in_block = False
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line == "BEGIN IONS":
+            in_block = True
+            continue
+        if line == "END IONS":
+            break
+        if not in_block:
+            continue
+        if "=" in line and not line[0].isdigit():
+            k, _, v = line.partition("=")
+            meta[k] = v
+        else:
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    peaks.append((float(parts[0]), float(parts[1])))
+                except ValueError:
+                    pass
+
+    if not peaks:
+        return None, None
+    return meta, np.asarray(peaks, dtype=float)
+
+
 def inchikey_in_mgf(mgf_path: Path, inchikey: str) -> bool:
     """
-    Cheap existence check: scan an .mgf file line-by-line for
-    'INCHIKEY=<inchikey>'. Lets us answer "structure not in atlas"
-    without paying the full MGF parse.
+    Cheap existence check.  When an .idx sidecar is present, this is O(1)
+    (key lookup in the loaded JSON).  Falls back to a full line-scan otherwise.
     """
     if not inchikey:
         return False
+
+    idx = _load_mgf_index(mgf_path)
+    if idx is not None:
+        return inchikey in idx
+
     needle = f"INCHIKEY={inchikey}"
     try:
         with open(mgf_path, "r") as f:
@@ -198,13 +345,34 @@ def extract_mgf_blocks_by_inchikey(
     mgf_path: Path, inchikey: str
 ) -> List[Tuple[Dict[str, str], np.ndarray]]:
     """
-    Single-pass scan over an .mgf file. Only blocks whose
-    INCHIKEY header matches `inchikey` are materialized.
-    Returns list of (meta_dict, peaks_array) tuples — same shape as
-    common.parse_spectra_mgf but limited to the matching structure.
+    Retrieve all MGF blocks for `inchikey` from `mgf_path`.
+
+    Fast path: if a .idx sidecar exists, seeks directly to each block's byte
+    range (O(1) per block) instead of scanning the whole file.
+    Fallback: full single-pass line scan when no sidecar is available.
     """
+    # ---- indexed fast path --------------------------------------------------
+    idx = _load_mgf_index(mgf_path)
+    if idx is not None:
+        ranges = idx.get(inchikey)
+        if not ranges:
+            return []
+        blocks: List[Tuple[Dict[str, str], np.ndarray]] = []
+        try:
+            with open(mgf_path, "rb") as f:
+                for offset, length in ranges:
+                    f.seek(offset)
+                    chunk = f.read(length).decode("utf-8", errors="replace")
+                    meta, peaks = _parse_mgf_block_text(chunk)
+                    if meta is not None and peaks is not None:
+                        blocks.append((meta, peaks))
+        except OSError:
+            pass
+        return blocks
+
+    # ---- full-scan fallback -------------------------------------------------
     needle = f"INCHIKEY={inchikey}"
-    blocks: List[Tuple[Dict[str, str], np.ndarray]] = []
+    blocks_scan: List[Tuple[Dict[str, str], np.ndarray]] = []
 
     in_block = False
     meta: Dict[str, str] = {}
@@ -224,7 +392,7 @@ def extract_mgf_blocks_by_inchikey(
                 continue
             if line == "END IONS":
                 if matches and peaks:
-                    blocks.append((meta, np.asarray(peaks, dtype=float)))
+                    blocks_scan.append((meta, np.asarray(peaks, dtype=float)))
                 in_block = False
                 continue
             if not in_block:
@@ -244,7 +412,7 @@ def extract_mgf_blocks_by_inchikey(
                     except ValueError:
                         pass
 
-    return blocks
+    return blocks_scan
 
 
 def build_composite_from_blocks(
@@ -269,7 +437,7 @@ def build_composite_from_blocks(
         if ce_str is None:
             continue
         try:
-            ce_val = float(ce_str)
+            ce_val = round_ev(ce_str)
         except ValueError:
             continue
 
@@ -386,9 +554,9 @@ def load_library_spectra_grouped(
         if ce_str is None:
             continue
         try:
-            ce_val = float(ce_str)
+            ce_val = round_ev(ce_str)
             if interested_ces is not None:
-                if f'{ce_val:.0f}' not in interested_ces:
+                if str(ce_val) not in interested_ces:
                     continue
         except ValueError:
             continue
@@ -519,7 +687,7 @@ def serialize_pred_spectra_for_frontend(lib_specs: CompositeMassSpec) -> List[Di
 
         payload.append(
             {
-                "collision_energy_ev": ce_val,
+                "collision_energy_ev": round_ev(ce_val),
                 "peaks": peaks,
             }
         )
@@ -556,7 +724,7 @@ def serialize_user_specs_for_frontend(
                 return {}
 
         try:
-            ce_ev = float(getattr(ms, "collision_energy", 0.0))
+            ce_ev = round_ev(getattr(ms, "collision_energy", 0.0))
         except Exception:
             ce_ev = 0.0
 
@@ -609,9 +777,14 @@ def retrieve_candidates(
     stepped_mode: bool = False,
     stepped_ces: List[str] | None = None,
     progress_cb=None,
+    include_nist: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Perform spectrum retrieval for a given formula and user spectra.
+
+    When `include_nist=True` and MSPRED_ATLAS_DIR_NIST is configured, also
+    loads structures from the NIST'23 atlas tree and merges them with the
+    public candidates before ranking.
     """
     # Precursor m/z for ignoring precursor peak if requested
     precursor_mz = common.formula_mass(formula) + common.ion2mass[adduct]
@@ -638,8 +811,23 @@ def retrieve_candidates(
     if progress_cb:
         progress_cb("load_mgf", 2, "Loading predicted spectra (.mgf)")
 
+    # Load from public atlas
     mgf_path = get_mgf_path_for_formula(formula, adduct)
     lib_grouped = load_library_spectra_grouped(mgf_path, progress_cb, all_ces)
+
+    # Merge NIST atlas (authenticated users only)
+    if include_nist and NIST_MGF_DIR is not None and adduct in NIST_ADDUCT_TO_DIR:
+        nist_subdir = common.get_formula_subdir(formula)
+        nist_mgf_path = NIST_ADDUCT_TO_DIR[adduct] / nist_subdir / f"{formula}.mgf"
+        if nist_mgf_path.exists():
+            try:
+                nist_grouped = load_library_spectra_grouped(nist_mgf_path, None, all_ces)
+                # Merge: public keys take priority on collision; NIST adds new structures
+                for k, v in nist_grouped.items():
+                    if k not in lib_grouped:
+                        lib_grouped[k] = v
+            except Exception:
+                pass  # NIST merge failure is non-fatal
 
     if progress_cb:
         progress_cb("load_mgf", 100, f"Loaded {len(lib_grouped)} candidate structures")
@@ -951,10 +1139,619 @@ def _cleanup_old_jobs(ttl_seconds: int = 3600) -> None:
 
 
 # -----------------------------------------------------------------------------
-# Flask application
+# Flask application + Flask-Login
 # -----------------------------------------------------------------------------
 app = Flask(__name__)
 app.secret_key = os.environ["FLASK_SECRET_KEY"]
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)  # real IPs from NGINX
+
+login_manager = LoginManager(app)
+login_manager.login_view = "login"
+
+_VALID_ROLES = {"admin", "authorized_user", "user"}
+
+
+class _User(UserMixin):
+    """Flask-Login user backed by ICEBERG_USERS_FILE YAML with role support."""
+
+    def __init__(self, email: str, role: str = "user"):
+        self.id = email
+        self.role = role
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == "admin" or self.id in _ADMIN_EMAILS_ENV
+
+    @property
+    def can_access_nist(self) -> bool:
+        return self.role in ("admin", "authorized_user") or self.id in _ADMIN_EMAILS_ENV
+
+
+def _load_users() -> Dict[str, Any]:
+    """Load the users YAML, returning a dict. Returns {} if missing/unconfigured."""
+    if ICEBERG_USERS_FILE is None or not ICEBERG_USERS_FILE.exists():
+        return {}
+    try:
+        with open(ICEBERG_USERS_FILE, "r") as fh:
+            return yaml.safe_load(fh) or {}
+    except Exception:
+        return {}
+
+
+def _save_users(users: Dict[str, Any]) -> None:
+    """Atomically write the users dict to ICEBERG_USERS_FILE."""
+    if ICEBERG_USERS_FILE is None:
+        raise RuntimeError("ICEBERG_USERS_FILE is not configured.")
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        dir=ICEBERG_USERS_FILE.parent, suffix=".yaml.tmp"
+    )
+    try:
+        with os.fdopen(tmp_fd, "w") as fh:
+            yaml.dump(users, fh, default_flow_style=False)
+        os.replace(tmp_path, ICEBERG_USERS_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _get_record(users: Dict[str, Any], email: str) -> Optional[Dict[str, Any]]:
+    """
+    Return the user record for *email*, normalising legacy flat-string entries.
+    Legacy format: {email: "<hash>"} → treated as role "user".
+    New format:    {email: {password: "<hash>", role: "...", created: "..."}}
+    Returns None if the email is not present.
+    """
+    raw = users.get(email)
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return {"password": raw, "role": "user", "created": ""}
+    return raw
+
+
+@login_manager.user_loader
+def _load_user(user_id: str):
+    users = _load_users()
+    record = _get_record(users, user_id)
+    if record is not None:
+        role = record.get("role", "user")
+        if user_id in _ADMIN_EMAILS_ENV:
+            role = "admin"
+        return _User(user_id, role=role)
+    return None
+
+
+def _check_credentials(email: str, password: str) -> bool:
+    """Return True if email/password match an entry in the users file."""
+    users = _load_users()
+    record = _get_record(users, email)
+    if record is None:
+        return False
+    try:
+        return check_password_hash(record["password"], password)
+    except Exception:
+        return False
+
+
+def _update_password(email: str, new_password: str) -> None:
+    """Atomically write a new password hash for *email* into the users file."""
+    if ICEBERG_USERS_FILE is None:
+        raise RuntimeError("ICEBERG_USERS_FILE is not configured.")
+    users = _load_users()
+    record = _get_record(users, email) or {}
+    record["password"] = generate_password_hash(new_password)
+    if "role" not in record:
+        record["role"] = "user"
+    users[email] = record
+    _save_users(users)
+
+
+def admin_required(f):
+    """Decorator: login required AND the user must have admin role."""
+    @functools.wraps(f)
+    @login_required
+    def decorated(*args, **kwargs):
+        if not current_user.is_admin:
+            abort(403)
+        return f(*args, **kwargs)
+    return decorated
+
+
+# ---------------------------------------------------------------------------
+# Password-strength rules (used by both /change_password and admin add-user)
+# ---------------------------------------------------------------------------
+
+_PW_RULES = [
+    (lambda p: len(p) >= 8,                 "at least 8 characters"),
+    (lambda p: any(c.isupper() for c in p), "an uppercase letter"),
+    (lambda p: any(c.islower() for c in p), "a lowercase letter"),
+    (lambda p: any(c.isdigit() for c in p), "a digit"),
+    (lambda p: any(not c.isalnum() for c in p), "a special character"),
+]
+
+
+def _password_errors(password: str) -> List[str]:
+    """Return a list of unmet rule descriptions, empty if the password is strong."""
+    return [desc for check, desc in _PW_RULES if not check(password)]
+
+
+# ---------------------------------------------------------------------------
+# Email + random password helpers
+# ---------------------------------------------------------------------------
+
+def _generate_initial_password(length: int = 14) -> str:
+    """
+    Generate a random password that is guaranteed to satisfy _password_errors().
+    Ensures at least one upper, lower, digit, and special character; then fills
+    the remainder from the full printable ASCII alphabet and shuffles.
+    """
+    specials = "!@#$%^&*()-_=+[]{}|;:,.<>?"
+    alphabet = string.ascii_letters + string.digits + specials
+    while True:
+        # Build mandatory characters first
+        chars = [
+            secrets.choice(string.ascii_uppercase),
+            secrets.choice(string.ascii_lowercase),
+            secrets.choice(string.digits),
+            secrets.choice(specials),
+        ]
+        # Fill the rest
+        chars += [secrets.choice(alphabet) for _ in range(length - 4)]
+        secrets.SystemRandom().shuffle(chars)
+        pw = "".join(chars)
+        if not _password_errors(pw):  # double-check; defined below
+            return pw
+
+
+def _send_email(to: str, subject: str, body: str) -> bool:
+    """
+    Send a plain-text email via SMTP relay.  Returns True on success.
+    If SMTP is not configured, logs a warning and returns False.
+    """
+    if not _SMTP_HOST:
+        app.logger.warning("SMTP not configured; skipping email to %s", to)
+        return False
+    try:
+        msg = EmailMessage()
+        msg["From"] = _SMTP_FROM or _SMTP_USER
+        msg["To"] = to
+        msg["Subject"] = subject
+        msg.set_content(body)
+
+        with smtplib.SMTP(_SMTP_HOST, _SMTP_PORT, timeout=10) as smtp:
+            if _SMTP_USE_TLS:
+                smtp.starttls()
+            if _SMTP_USER and _SMTP_PASSWORD:
+                smtp.login(_SMTP_USER, _SMTP_PASSWORD)
+            smtp.send_message(msg)
+        return True
+    except Exception as exc:
+        app.logger.error("Failed to send email to %s: %s", to, exc)
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Analytics helpers (SQLite)
+# ---------------------------------------------------------------------------
+
+_ANALYTICS_INIT_DONE = False
+_SKIP_ANALYTICS_PREFIXES = ("/static/", "/admin/api/", "/favicon")
+
+
+def _analytics_conn() -> Optional[sqlite3.Connection]:
+    """Open a WAL-mode SQLite connection to the analytics DB, or None if unconfigured."""
+    if _ANALYTICS_DB_PATH is None:
+        return None
+    try:
+        conn = sqlite3.connect(str(_ANALYTICS_DB_PATH), timeout=5)
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+    except Exception:
+        return None
+
+
+def _ensure_analytics_schema() -> None:
+    """Lazily create tables on first use."""
+    global _ANALYTICS_INIT_DONE
+    if _ANALYTICS_INIT_DONE:
+        return
+    conn = _analytics_conn()
+    if conn is None:
+        return
+    try:
+        with conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS requests (
+                    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts      TEXT NOT NULL,
+                    ip      TEXT,
+                    path    TEXT,
+                    method  TEXT,
+                    user_id TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS ip_geo (
+                    ip           TEXT PRIMARY KEY,
+                    country      TEXT,
+                    lat          REAL,
+                    lon          REAL,
+                    resolved_ts  TEXT
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_ts  ON requests(ts)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_ip  ON requests(ip)")
+        _ANALYTICS_INIT_DONE = True
+    except Exception as exc:
+        app.logger.debug("Analytics schema init error: %s", exc)
+    finally:
+        conn.close()
+
+
+def _log_request(response):
+    """after_request hook: record each request in the analytics DB."""
+    try:
+        path = request.path
+        if any(path.startswith(p) for p in _SKIP_ANALYTICS_PREFIXES):
+            return response
+        _ensure_analytics_schema()
+        conn = _analytics_conn()
+        if conn is None:
+            return response
+        ts = datetime.now(timezone.utc).isoformat()
+        ip = request.remote_addr or ""
+        user_id = current_user.id if current_user.is_authenticated else ""
+        with conn:
+            conn.execute(
+                "INSERT INTO requests (ts, ip, path, method, user_id) VALUES (?,?,?,?,?)",
+                (ts, ip, path, request.method, user_id),
+            )
+        conn.close()
+    except Exception:
+        pass  # never break a response
+    return response
+
+
+def _is_private_ip(ip: str) -> bool:
+    """Return True for loopback/private/link-local IPs."""
+    try:
+        return ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return True
+
+
+def _resolve_geo_ips(ips: List[str]) -> None:
+    """Resolve a list of IPs into ip_geo using the MaxMind GeoLite2 DB."""
+    if not _GEOIP_DB_PATH:
+        return
+    try:
+        import geoip2.database  # type: ignore
+        with geoip2.database.Reader(_GEOIP_DB_PATH) as reader:
+            conn = _analytics_conn()
+            if conn is None:
+                return
+            ts = datetime.now(timezone.utc).isoformat()
+            for ip in ips:
+                if _is_private_ip(ip):
+                    continue
+                try:
+                    r = reader.city(ip)
+                    country = r.country.name or ""
+                    lat = r.location.latitude
+                    lon = r.location.longitude
+                    with conn:
+                        conn.execute(
+                            """INSERT OR REPLACE INTO ip_geo (ip, country, lat, lon, resolved_ts)
+                               VALUES (?,?,?,?,?)""",
+                            (ip, country, lat, lon, ts),
+                        )
+                except Exception:
+                    pass
+            conn.close()
+    except ImportError:
+        pass
+    except Exception as exc:
+        app.logger.debug("geo-IP resolution error: %s", exc)
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if current_user.is_authenticated:
+        return redirect(url_for("index"))
+    error = None
+    if request.method == "POST":
+        email = (request.form.get("email") or "").strip().lower()
+        password = request.form.get("password") or ""
+        if _check_credentials(email, password):
+            login_user(_User(email), remember=True)
+            return redirect(request.args.get("next") or url_for("index"))
+        error = "Invalid email or password."
+    return render_template("login.html", error=error)
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    logout_user()
+    return redirect(url_for("index"))
+
+
+@app.route("/change_password", methods=["GET", "POST"])
+@login_required
+def change_password():
+    errors: List[str] = []
+    success = False
+    if request.method == "POST":
+        current_pw = request.form.get("current_password") or ""
+        new_pw = request.form.get("new_password") or ""
+        confirm_pw = request.form.get("confirm_password") or ""
+
+        if not _check_credentials(current_user.id, current_pw):
+            errors.append("Current password is incorrect.")
+        else:
+            rule_errors = _password_errors(new_pw)
+            if rule_errors:
+                errors.append("New password must contain " + ", ".join(rule_errors) + ".")
+            elif new_pw != confirm_pw:
+                errors.append("New passwords do not match.")
+            elif new_pw == current_pw:
+                errors.append("New password must differ from the current password.")
+            else:
+                try:
+                    _update_password(current_user.id, new_pw)
+                    success = True
+                except Exception as e:
+                    errors.append(f"Failed to save password: {e}")
+
+    return render_template("change_password.html", errors=errors, success=success)
+
+
+# Register the analytics logging hook now that the app object exists
+app.after_request(_log_request)
+
+
+# ---------------------------------------------------------------------------
+# Admin dashboard routes
+# ---------------------------------------------------------------------------
+
+@app.route("/admin")
+@admin_required
+def admin_dashboard():
+    """Admin landing page: user table + analytics."""
+    users = _load_users()
+    user_list = []
+    for email, raw in sorted(users.items()):
+        record = _get_record(users, email)
+        user_list.append({
+            "email": email,
+            "role": record.get("role", "user") if record else "user",
+            "created": record.get("created", "") if record else "",
+        })
+    # Resolve any un-geocoded IPs on dashboard load
+    if _ANALYTICS_DB_PATH and _ANALYTICS_DB_PATH.exists():
+        try:
+            conn = _analytics_conn()
+            if conn:
+                cur = conn.execute(
+                    "SELECT DISTINCT ip FROM requests WHERE ip != '' "
+                    "AND ip NOT IN (SELECT ip FROM ip_geo)"
+                )
+                unresolved = [r[0] for r in cur.fetchall()]
+                conn.close()
+                if unresolved:
+                    _resolve_geo_ips(unresolved)
+        except Exception:
+            pass
+    return render_template("admin.html", users=user_list, valid_roles=sorted(_VALID_ROLES),
+                           geoip_available=bool(_GEOIP_DB_PATH))
+
+
+@app.route("/admin/users/add", methods=["POST"])
+@admin_required
+def admin_add_user():
+    email = (request.form.get("email") or "").strip().lower()
+    role = (request.form.get("role") or "user").strip()
+    if role not in _VALID_ROLES:
+        role = "user"
+
+    if not email or "@" not in email:
+        flash("Invalid email address.", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    users = _load_users()
+    if email in users:
+        flash(f"User {email} already exists.", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    password = _generate_initial_password()
+    users[email] = {
+        "password": generate_password_hash(password),
+        "role": role,
+        "created": datetime.now(timezone.utc).isoformat(),
+    }
+    _save_users(users)
+
+    subject = "Your ICEBERG atlas account"
+    body = (
+        f"Hello,\n\n"
+        f"An account has been created for you on the ICEBERG Spectrum Retrieval atlas.\n\n"
+        f"  URL:      https://iceberg-ms.mit.edu\n"
+        f"  Username: {email}\n"
+        f"  Password: {password}\n\n"
+        f"You can change your password after logging in via the 'Change password' link.\n\n"
+        f"— ICEBERG admin\n"
+    )
+    sent = _send_email(email, subject, body)
+
+    if sent:
+        flash(f"User {email} created and credentials emailed. Temp password: {password}", "success")
+    else:
+        flash(f"User {email} created. SMTP not configured — temp password: {password}", "warning")
+
+    return redirect(url_for("admin_dashboard"))
+
+
+@app.route("/admin/users/reset", methods=["POST"])
+@admin_required
+def admin_reset_password():
+    email = (request.form.get("email") or "").strip().lower()
+    users = _load_users()
+    if email not in users:
+        flash(f"User {email} not found.", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    password = _generate_initial_password()
+    record = _get_record(users, email) or {}
+    record["password"] = generate_password_hash(password)
+    users[email] = record
+    _save_users(users)
+
+    subject = "Your ICEBERG atlas password has been reset"
+    body = (
+        f"Hello,\n\n"
+        f"Your password on the ICEBERG Spectrum Retrieval atlas has been reset.\n\n"
+        f"  URL:      https://iceberg-ms.mit.edu\n"
+        f"  Username: {email}\n"
+        f"  Password: {password}\n\n"
+        f"— ICEBERG admin\n"
+    )
+    sent = _send_email(email, subject, body)
+
+    if sent:
+        flash(f"Password reset for {email} and emailed. Temp password: {password}", "success")
+    else:
+        flash(f"Password reset for {email}. SMTP not configured — temp password: {password}", "warning")
+
+    return redirect(url_for("admin_dashboard"))
+
+
+@app.route("/admin/users/delete", methods=["POST"])
+@admin_required
+def admin_delete_user():
+    email = (request.form.get("email") or "").strip().lower()
+    if email == current_user.id:
+        flash("You cannot delete your own account.", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    users = _load_users()
+    if email not in users:
+        flash(f"User {email} not found.", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    # Guard: don't delete the last admin
+    admins = [e for e, raw in users.items()
+              if (_get_record(users, e) or {}).get("role") == "admin" or e in _ADMIN_EMAILS_ENV]
+    if email in admins and len(admins) <= 1:
+        flash("Cannot delete the last admin account.", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    del users[email]
+    _save_users(users)
+    flash(f"User {email} deleted.", "success")
+    return redirect(url_for("admin_dashboard"))
+
+
+@app.route("/admin/users/set_role", methods=["POST"])
+@admin_required
+def admin_set_role():
+    email = (request.form.get("email") or "").strip().lower()
+    new_role = (request.form.get("role") or "user").strip()
+    if new_role not in _VALID_ROLES:
+        flash(f"Invalid role '{new_role}'.", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    users = _load_users()
+    if email not in users:
+        flash(f"User {email} not found.", "error")
+        return redirect(url_for("admin_dashboard"))
+
+    # Guard: don't demote the last admin
+    if new_role != "admin":
+        admins = [e for e, raw in users.items()
+                  if (_get_record(users, e) or {}).get("role") == "admin" or e in _ADMIN_EMAILS_ENV]
+        if email in admins and len(admins) <= 1:
+            flash("Cannot demote the last admin account.", "error")
+            return redirect(url_for("admin_dashboard"))
+
+    record = _get_record(users, email) or {}
+    record["role"] = new_role
+    users[email] = record
+    _save_users(users)
+    flash(f"Role for {email} set to '{new_role}'.", "success")
+    return redirect(url_for("admin_dashboard"))
+
+
+# ---------------------------------------------------------------------------
+# Admin analytics API
+# ---------------------------------------------------------------------------
+
+@app.route("/admin/api/stats")
+@admin_required
+def admin_api_stats():
+    """Return daily request counts + unique IPs, top paths, top countries (last 90 days)."""
+    _ensure_analytics_schema()
+    conn = _analytics_conn()
+    if conn is None:
+        return jsonify({"error": "Analytics DB not configured"}), 503
+    try:
+        days = int(request.args.get("days", 90))
+        # Daily counts
+        cur = conn.execute(
+            """SELECT date(ts) AS day, COUNT(*) AS reqs, COUNT(DISTINCT ip) AS ips
+               FROM requests
+               WHERE ts >= datetime('now', ? || ' days')
+               GROUP BY day ORDER BY day""",
+            (f"-{days}",),
+        )
+        daily = [{"day": r[0], "requests": r[1], "unique_ips": r[2]} for r in cur.fetchall()]
+        # Top paths
+        cur = conn.execute(
+            """SELECT path, COUNT(*) AS n FROM requests
+               WHERE ts >= datetime('now', ? || ' days')
+               GROUP BY path ORDER BY n DESC LIMIT 20""",
+            (f"-{days}",),
+        )
+        top_paths = [{"path": r[0], "count": r[1]} for r in cur.fetchall()]
+        # Top countries
+        cur = conn.execute(
+            """SELECT g.country, COUNT(*) AS n
+               FROM requests r JOIN ip_geo g ON r.ip = g.ip
+               WHERE r.ts >= datetime('now', ? || ' days') AND g.country != ''
+               GROUP BY g.country ORDER BY n DESC LIMIT 20""",
+            (f"-{days}",),
+        )
+        top_countries = [{"country": r[0], "count": r[1]} for r in cur.fetchall()]
+        return jsonify({"daily": daily, "top_paths": top_paths, "top_countries": top_countries})
+    finally:
+        conn.close()
+
+
+@app.route("/admin/api/geo")
+@admin_required
+def admin_api_geo():
+    """Return aggregated geo points [{lat, lon, country, count}] for the map."""
+    _ensure_analytics_schema()
+    conn = _analytics_conn()
+    if conn is None:
+        return jsonify({"error": "Analytics DB not configured"}), 503
+    try:
+        days = int(request.args.get("days", 90))
+        cur = conn.execute(
+            """SELECT g.lat, g.lon, g.country, COUNT(*) AS n
+               FROM requests r JOIN ip_geo g ON r.ip = g.ip
+               WHERE r.ts >= datetime('now', ? || ' days')
+                 AND g.lat IS NOT NULL AND g.lon IS NOT NULL
+               GROUP BY g.ip
+               ORDER BY n DESC""",
+            (f"-{days}",),
+        )
+        points = [{"lat": r[0], "lon": r[1], "country": r[2], "count": r[3]}
+                  for r in cur.fetchall()]
+        return jsonify({"points": points})
+    finally:
+        conn.close()
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -1026,7 +1823,7 @@ def _spectra_payload_from_ms_lines(raw_lines: List[str]) -> List[Dict[str, Any]]
 
         spectra_payload.append(
             {
-                "collision_energy": ce_val,   # eV
+                "collision_energy": round_ev(ce_val),   # eV
                 "spectrum_text": spec_text,   # "mz intensity" lines
                 "nce_guess": nce_guess,       # bucketed NCE (may be None)
                 "nce_cont": nce_cont,         # estimated NCE (may be None)
@@ -1081,6 +1878,10 @@ def api_retrieve_start():
     # Create job
     job_id = uuid.uuid4().hex
     _job_create(job_id, status="queued", message="Queued")
+
+    # Capture whether the user is authenticated (for NIST access).
+    # current_user is request-scoped; capture here before the thread starts.
+    include_nist: bool = current_user.is_authenticated and current_user.can_access_nist
 
     # Capture the request payload (we will re-use your existing parsing logic)
     # Use request.form and request.files similarly to your current index() POST handler
@@ -1234,6 +2035,7 @@ def api_retrieve_start():
                 stepped_mode=stepped_mode,
                 stepped_ces=stepped_ces,
                 progress_cb=pcb,
+                include_nist=include_nist,
             )
 
             # Build retrieval_data for mirror plots
@@ -1333,23 +2135,54 @@ def retrieval_result(job_id: str):
 def download_mgf():
     """
     Download the .mgf file for a given formula.
+    Authenticated internal users also get NIST'23 structures concatenated.
     Usage: /download_mgf?formula=CH9N3O9S4
     """
     formula = request.args.get("formula", "").strip()
+    adduct = request.args.get("adduct", "[M+H]+").strip()
+    if adduct not in ADDUCT_TO_DIR:
+        adduct = "[M+H]+"
+
     if not formula:
         flash("Chemical formula is required to download MGF.", "danger")
         return redirect(url_for("index"))
 
-    mgf_path = get_mgf_path_for_formula(formula)
-    if not mgf_path.exists():
+    include_nist: bool = current_user.is_authenticated and current_user.can_access_nist
+    paths = mgf_paths_for_formula(formula, adduct, include_nist=include_nist)
+
+    if not paths:
         flash(f"MGF file not found for formula {formula}.", "danger")
         return redirect(url_for("index"))
 
-    return send_file(
-        mgf_path,
+    # Single public file — stream directly (most common case, zero-copy)
+    if len(paths) == 1:
+        return send_file(
+            paths[0],
+            mimetype="text/plain",
+            as_attachment=True,
+            download_name=f"{formula}.mgf",
+        )
+
+    # Multiple files (public + NIST) — stream sequentially so the browser can
+    # start downloading before both files have been fully read.
+    def generate_mgf():
+        for p in paths:
+            with open(p, "rb") as fh:
+                while True:
+                    chunk = fh.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+            yield b"\n"
+
+    content_length = sum(p.stat().st_size for p in paths) + len(paths)
+    return Response(
+        stream_with_context(generate_mgf()),
         mimetype="text/plain",
-        as_attachment=True,
-        download_name=f"{formula}.mgf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{formula}.mgf"',
+            "Content-Length": str(content_length),
+        },
     )
 
 
@@ -1506,9 +2339,11 @@ def api_query_smiles():
     formula = keys["formula"]
     canonical_smiles = keys["canonical_smiles"]
     inchikey = keys["inchikey"]
+    include_nist: bool = current_user.is_authenticated and current_user.can_access_nist
 
-    mgf_path = get_mgf_path_for_formula(formula, adduct)
-    if not mgf_path.exists():
+    # Collect all atlas paths for this formula/adduct (public, then NIST if authed)
+    mgf_paths = mgf_paths_for_formula(formula, adduct, include_nist=include_nist)
+    if not mgf_paths:
         return jsonify({
             "error": f"No predicted spectra found for formula {formula}",
             "formula": formula,
@@ -1520,16 +2355,20 @@ def api_query_smiles():
     # NCE -> eV via precursor m/z (formula + adduct mass offset)
     try:
         precursor_mz = common.formula_mass(formula) + common.ion2mass[adduct]
-        ce_ev = float(common.nce_to_ev(nce, precursor_mz))
+        ce_ev = round_ev(common.nce_to_ev(nce, precursor_mz))
     except Exception as e:
         return jsonify({"error": f"Failed to convert NCE to eV: {e}"}), 500
 
-    # Single-pass MGF scan that materializes only blocks matching `inchikey`.
-    # Avoids paying the ~10s full-parse cost for 400k-line MGFs.
-    try:
-        blocks = extract_mgf_blocks_by_inchikey(mgf_path, inchikey)
-    except Exception as e:
-        return jsonify({"error": f"Failed to scan MGF: {e}"}), 500
+    # Search each atlas path; stop at first hit (public before NIST).
+    # Uses the indexed fast path when a .idx sidecar is present.
+    blocks = []
+    for mgf_path in mgf_paths:
+        try:
+            blocks = extract_mgf_blocks_by_inchikey(mgf_path, inchikey)
+        except Exception as e:
+            return jsonify({"error": f"Failed to scan MGF: {e}"}), 500
+        if blocks:
+            break
 
     if not blocks:
         return jsonify({
@@ -1545,15 +2384,15 @@ def api_query_smiles():
         return jsonify({"error": "Matched structure has no usable spectra"}), 404
 
     all_ms = list(lib_specs.values())
-    available_ces = sorted({float(getattr(ms, "collision_energy", 0.0)) for ms in all_ms})
-    best_ms = min(all_ms, key=lambda ms: abs(float(getattr(ms, "collision_energy", 0.0)) - ce_ev))
-    matched_ce = float(getattr(best_ms, "collision_energy", 0.0))
+    available_ces = sorted({round_ev(getattr(ms, "collision_energy", 0.0)) for ms in all_ms})
+    best_ms = min(all_ms, key=lambda ms: abs(round_ev(getattr(ms, "collision_energy", 0.0)) - ce_ev))
+    matched_ce = round_ev(getattr(best_ms, "collision_energy", 0.0))
 
     ce_warning = None
     if abs(matched_ce - ce_ev) > 5.0:
         ce_warning = (
-            f"No spectrum within ±5 eV of {ce_ev:.1f} (NCE {nce:g}%); "
-            f"showing closest available ({matched_ce:g} eV)."
+            f"No spectrum within ±5 eV of {ce_ev:d} (NCE {nce:g}%); "
+            f"showing closest available ({matched_ce:d} eV)."
         )
 
     single = CompositeMassSpec([best_ms])
@@ -1582,5 +2421,121 @@ def api_query_smiles():
     })
 
 
+@app.route("/api/resolve_query", methods=["GET"])
+def api_resolve_query():
+    """
+    Resolve a compound name / InChI / InChIKey to a list of canonical SMILES
+    via the PubChem REST API.
+
+    Query params:
+        query       (required) — the query string
+        query_type  (required) — one of: name | inchi | inchikey
+
+    Returns JSON:
+        {
+          "candidates": [
+            {
+              "canonical_smiles": str,
+              "formula": str,
+              "inchikey": str,
+              "name": str,   # IUPAC name if available
+              "cid": int,
+            },
+            ...
+          ],
+          "error": str | null
+        }
+
+    On PubChem failure returns HTTP 200 with an "error" key so the frontend
+    can surface a user-friendly message without treating it as a network error.
+    """
+    query = (request.args.get("query") or "").strip()
+    query_type = (request.args.get("query_type") or "name").strip().lower()
+
+    if not query:
+        return jsonify({"candidates": [], "error": "Missing 'query'"}), 400
+
+    SUPPORTED_NAMESPACES = {
+        "name": "name",
+        "inchi": "inchi",
+        "inchikey": "inchikey",
+        "cid": "cid",
+    }
+    if query_type not in SUPPORTED_NAMESPACES:
+        return jsonify({
+            "candidates": [],
+            "error": f"Unsupported query_type '{query_type}'. Use name, inchi, inchikey, or cid.",
+        }), 400
+
+    namespace = SUPPORTED_NAMESPACES[query_type]
+
+    # Retry wrapper mirroring candidates_from_pubchem in iceberg_elucidation.py
+    def _pcp_get(q: str, ns: str) -> List[Any]:
+        for attempt in range(3):
+            try:
+                return pcp.get_compounds(q, namespace=ns)
+            except pcp.BadRequestError:
+                return []
+            except (pcp.ServerError, RemoteDisconnected, URLError):
+                if attempt == 2:
+                    raise
+                time.sleep(2 * (attempt + 1))
+        return []
+
+    try:
+        compounds = _pcp_get(query, namespace)
+    except Exception as e:
+        return jsonify({
+            "candidates": [],
+            "error": f"PubChem lookup failed: {e}",
+        })
+
+    if not compounds:
+        return jsonify({
+            "candidates": [],
+            "error": f"No PubChem match for '{query}'",
+        })
+
+    candidates: List[Dict[str, Any]] = []
+    seen_inchikeys: set = set()
+
+    for cmpd in compounds:
+        smi = getattr(cmpd, "isomeric_smiles", None) or getattr(cmpd, "canonical_smiles", None)
+        if not smi:
+            continue
+
+        try:
+            keys = smiles_to_lookup_keys(smi)
+        except Exception:
+            continue
+
+        ikey = keys.get("inchikey", "")
+        if not ikey or ikey in seen_inchikeys:
+            continue
+        seen_inchikeys.add(ikey)
+
+        cid = getattr(cmpd, "cid", None)
+        name = getattr(cmpd, "iupac_name", None) or getattr(cmpd, "synonyms", [None])[0] or ""
+
+        candidates.append({
+            "canonical_smiles": keys["canonical_smiles"],
+            "formula": keys["formula"],
+            "inchikey": ikey,
+            "name": str(name) if name else "",
+            "cid": int(cid) if cid is not None else None,
+        })
+
+        if len(candidates) >= 25:
+            break
+
+    if not candidates:
+        return jsonify({
+            "candidates": [],
+            "error": f"No valid structures resolved for '{query}'",
+        })
+
+    return jsonify({"candidates": candidates, "error": None})
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    app.run(host="0.0.0.0", port=4285, debug=True)

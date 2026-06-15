@@ -38,39 +38,28 @@ def main():
     data = load_results(args.path)
     # print(data)
 
+    metric_key = "true_dist" if args.dist_fn == "entropy" else "cosine_dist"
     sim = []
-
     for entry in data['individuals']:
-        if "true_dist" in entry:
-            sim.append(1 - entry['true_dist'])
-        
-    if args.dist_fn == "entropy":
-        res = bootstrap(
-            (sim,),  # Must be a tuple
-            np.mean,  # Statistic function
-            confidence_level=0.999,
-            n_resamples=20000,
-        )
-        fmt = f"{{:.{args.precision}f}}"
-        print(f"Entropy distribution Estimated proportion: {fmt.format(np.mean(sim))}")
-        print(
-            "Entropy distribution 99.9% Confidence interval: ("
-            f"{fmt.format(res.confidence_interval.low)}, {fmt.format(res.confidence_interval.high)})"
-        )
+        if metric_key in entry:
+            sim.append(1 - entry[metric_key])
 
-    if args.dist_fn == "cosine":
-        res = bootstrap(
-            (sim,),  # Must be a tuple
-            np.mean,  # Statistic function
-            confidence_level=0.999,
-            n_resamples=20000,
-        )
-        fmt = f"{{:.{args.precision}f}}"
-        print(f"Cosine distribution Estimated proportion: {fmt.format(np.mean(sim))}")
-        print(
-            "Cosine distribution 99.9% Confidence interval: ("
-            f"{fmt.format(res.confidence_interval.low)}, {fmt.format(res.confidence_interval.high)})"
-        )
+    if not sim:
+        raise ValueError(f"No individual entries contain '{metric_key}' in {args.path}")
+
+    res = bootstrap(
+        (sim,),  # Must be a tuple
+        np.mean,  # Statistic function
+        confidence_level=0.999,
+        n_resamples=20000,
+    )
+    fmt = f"{{:.{args.precision}f}}"
+    dist_label = "Entropy" if args.dist_fn == "entropy" else "Cosine"
+    print(f"{dist_label} distribution Estimated proportion: {fmt.format(np.mean(sim))}")
+    print(
+        f"{dist_label} distribution 99.9% Confidence interval: ("
+        f"{fmt.format(res.confidence_interval.low)}, {fmt.format(res.confidence_interval.high)})"
+    )
 
     metrics = data['metrics']
     print(metrics)

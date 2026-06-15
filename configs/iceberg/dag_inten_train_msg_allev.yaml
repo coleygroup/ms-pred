@@ -1,0 +1,96 @@
+launcher_args: {experiment_name: dag_inten_msg,
+  script_name: "src/ms_pred/dag_pred/train_inten.py",
+  slurm_script: launcher_scripts/generic_slurm.sh, 
+  launch_method: local,
+  visible_devices: [0]
+}
+universal_args:
+  _slurm_args:
+  - {_num_gpu: 1, cpus-per-task: 7, job-name: forward_train, mem-per-cpu: 8G, 
+    nodelist: 'node[1236]', time: '1-18:00:00'}
+  debug: [false]
+  debug-overfit: [false]
+  gpu: [true]
+
+  seed: [1]
+  num-workers: [16]
+  batch-size: [32]
+  max-epochs: [200]
+
+  dataset-name: [msg]
+  split-name: [split.tsv]
+  dataset-labels: [labels_withev_validinst.tsv]
+
+  learning-rate: [0.000736]
+  lr-decay-rate: [0.825]
+
+  dropout: [0.1]
+  mpnn-type: [GGNN]
+  pe-embed-k: [0]
+  min-epochs: [50]
+  pool-op: [avg]
+  hidden-size: [256]
+  weight-decay: [1e-7]
+  set-layers: [0]
+  frag-set-layers: [3]
+  mlp-layers: [1]
+  gnn-layers: [4]
+  root-encode: [gnn]
+  inject-early: [false]
+
+  include-unshifted-mz: [true]
+  binned-targs: [true]
+  embed-adduct: [true]
+  embed-collision: [true]
+  embed-instrument: [true]
+  embed-elem-group: [true]
+  grad-accumulate: [1]
+  encode-forms: [true]
+  add-hs: [true]
+  sk-tau: [0.05]
+  ppm-tol: [20]
+
+
+iterative_args:
+  -  split-name: [split.tsv]
+     save-dir: [split_1_rnd1_cosine]
+     magma-dag-folder: [results/dag_msg_allev/split_rnd1/preds_train_100_inten.hdf5]
+     seed: [1]
+     loss-fn: [cosine]
+     track-cosine: [false]
+
+  -  split-name: [split.tsv]
+     save-dir: [split_1_rnd2_cosine]
+     magma-dag-folder: [results/dag_msg_allev/split_rnd2/preds_train_100_inten.hdf5]
+     seed: [2]
+     loss-fn: [cosine]
+     track-cosine: [false]
+
+  -  split-name: [split.tsv]
+     save-dir: [split_1_rnd3_cosine]
+     magma-dag-folder: [results/dag_msg_allev/split_rnd3/preds_train_100_inten.hdf5]
+     seed: [3]
+     loss-fn: [cosine]
+     track-cosine: [false]
+
+  -  split-name: [split.tsv]
+     save-dir: [split_1_rnd1_entropy]
+     magma-dag-folder: [results/dag_msg_allev/split_rnd1/preds_train_100_inten.hdf5]
+     seed: [1]
+     loss-fn: [entropy]
+     track-cosine: [true]
+
+  -  split-name: [split.tsv]
+     save-dir: [split_1_rnd2_entropy]
+     magma-dag-folder: [results/dag_msg_allev/split_rnd2/preds_train_100_inten.hdf5]
+     seed: [2]
+     loss-fn: [entropy]
+     track-cosine: [true]
+
+  -  split-name: [split.tsv]
+     save-dir: [split_1_rnd3_entropy]
+     magma-dag-folder: [results/dag_msg_allev/split_rnd3/preds_train_100_inten.hdf5]
+     seed: [3]
+     loss-fn: [entropy]
+     track-cosine: [true]
+

@@ -332,6 +332,84 @@
             line-height: 1.35;
             color: #6b7280;
         }
+
+        /* ---- Tab navigation ---- */
+        .tab-nav {
+            background: #1f2937;
+            padding: 0 2rem;
+            display: flex;
+            gap: 0.25rem;
+        }
+        .tab-nav-btn {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.65rem 1.2rem;
+            border: none;
+            background: transparent;
+            color: #9ca3af;
+            font-size: 0.9rem;
+            font-weight: 500;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: color 0.15s, border-color 0.15s;
+        }
+        .tab-nav-btn.active {
+            color: #f9fafb;
+            border-bottom-color: #2563eb;
+        }
+        .tab-nav-btn:hover:not(.active) {
+            color: #e5e7eb;
+        }
+        .tab-panel {
+            display: none;
+        }
+        .tab-panel.active {
+            display: block;
+        }
+
+        /* ---- Candidate picker (Explore tab) ---- */
+        .cand-picker {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+        }
+        .cand-card {
+            border: 2px solid #e5e7eb;
+            border-radius: 0.5rem;
+            padding: 0.5rem;
+            cursor: pointer;
+            background: #fff;
+            transition: border-color 0.15s, background 0.15s;
+            width: 148px;
+            text-align: center;
+            font-size: 0.75rem;
+            box-sizing: border-box;
+        }
+        .cand-card:hover {
+            border-color: #93c5fd;
+        }
+        .cand-card.selected {
+            border-color: #2563eb;
+            background: #eff6ff;
+        }
+        .cand-card img {
+            width: 120px;
+            height: 120px;
+            display: block;
+            margin: 0 auto 0.35rem;
+            border-radius: 0.25rem;
+        }
+        .cand-card .cand-name {
+            font-weight: 600;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: #111827;
+        }
+        .cand-card .cand-formula {
+            color: #6b7280;
+            margin-top: 0.1rem;
+        }
     </style>
 
     <script>
@@ -2637,7 +2715,8 @@
         const btn = document.getElementById("smi-lookup-btn");
         if (!btn) return;
 
-        const smilesInput = document.getElementById("smi-smiles");
+        const queryInput = document.getElementById("smi-query");
+        const queryTypeSel = document.getElementById("smi-query-type");
         const adductSel = document.getElementById("smi-adduct");
         const nceInput = document.getElementById("smi-nce");
         const instSel = document.getElementById("smi-instrument");
@@ -2652,6 +2731,8 @@
         const ceWarnEl = document.getElementById("smi-ce-warning");
         const plotContainer = document.getElementById("smi-plot-container");
         const plotWrapper = document.getElementById("smi-plot-wrapper");
+        const candidatesEl = document.getElementById("smi-candidates");
+        const candGridEl = document.getElementById("smi-cand-grid");
         const FRAG_WIDTH = 220;
         const FRAG_GAP_PX = 12;   // vertical gap between plot and fragment box
 
@@ -2681,8 +2762,15 @@
             return sub + charge;
         }
 
+        const NIST_NOTE = {% if current_user.is_authenticated and current_user.can_access_nist %}"" {% else %}' <span style="color:#6b7280;">(Note: the public atlas excludes all structures present in the NIST\'23 database to avoid license conflicts.)</span>'{% endif %};
+
         function showError(msg) {
             errorEl.textContent = msg;
+            errorEl.style.display = "block";
+            resultEl.style.display = "none";
+        }
+        function showErrorHtml(html) {
+            errorEl.innerHTML = html;
             errorEl.style.display = "block";
             resultEl.style.display = "none";
         }
@@ -2779,8 +2867,8 @@
             if (mzMin === mzMax) { mzMin -= 1; mzMax += 1; }
             if (intMax <= 0) intMax = 1;
 
-            const step = niceTickStep(mzMax - mzMin);
-            const xMin = Math.max(0, Math.floor(mzMin / step) * step);
+            const xMin = 0;
+            const step = niceTickStep(mzMax - xMin);
             const xMax = Math.ceil(mzMax / step) * step;
 
             function xOf(mz) { return padL + ((mz - xMin) / (xMax - xMin)) * plotW; }
@@ -2866,10 +2954,15 @@
                 pl.setAttribute("stroke-dasharray", "3,3");
                 svg.appendChild(pl);
                 const plbl = document.createElementNS(svgNS, "text");
-                plbl.setAttribute("x", px + 3); plbl.setAttribute("y", padT + 10);
+                const precursorLabel = "precursor " + precursorMz.toFixed(3);
+                const precursorLabelWidth = precursorLabel.length * 5.8;
+                const labelWouldClip = px + 3 + precursorLabelWidth > W - 4;
+                plbl.setAttribute("x", labelWouldClip ? px - 3 : px + 3);
+                plbl.setAttribute("y", padT + 10);
+                plbl.setAttribute("text-anchor", labelWouldClip ? "end" : "start");
                 plbl.setAttribute("font-size", "10");
                 plbl.setAttribute("fill", "#c2410c");
-                plbl.textContent = "precursor " + precursorMz.toFixed(3);
+                plbl.textContent = precursorLabel;
                 svg.appendChild(plbl);
             }
 
@@ -2954,50 +3047,64 @@
                 });
         }
 
-        btn.addEventListener("click", () => {
-            clearError();
-            const smiles = (smilesInput.value || "").trim();
-            if (!smiles) {
-                showError("Enter a SMILES.");
-                return;
-            }
-            const params = new URLSearchParams({
-                smiles,
-                adduct: adductSel.value,
-                nce: nceInput.value,
-                instrument: instSel.value,
-            });
-            statusEl.textContent = "Looking up…";
+        // ---- Render the spectrum result for a given canonical SMILES ----
+        function renderSpectrumForSmiles(canonicalSmiles, resolvedName) {
+            const adduct = adductSel.value;
+            const nce = nceInput.value;
+            const instrument = instSel.value;
+
+            statusEl.textContent = "Loading predicted spectrum…";
             btn.disabled = true;
+            resultEl.style.display = "none";
+            clearError();
+
+            const params = new URLSearchParams({
+                smiles: canonicalSmiles,
+                adduct,
+                nce,
+                instrument,
+            });
 
             fetch("/api/query_smiles?" + params.toString())
                 .then(async (r) => {
                     const data = await r.json().catch(() => ({}));
                     if (!r.ok) {
-                        showError(data.error || ("Error " + r.status));
+                        const msg = escapeHtml(data.error || ("Error " + r.status));
+                        showErrorHtml(r.status === 404 ? msg + NIST_NOTE : msg);
                         statusEl.textContent = "";
                         return;
                     }
                     statusEl.textContent = "";
                     resultEl.style.display = "block";
 
-                    molImg.src = "/mol_png?smiles=" + encodeURIComponent(data.canonical_smiles || smiles);
-                    molImg.alt = data.canonical_smiles || smiles;
+                    molImg.src = "/mol_png?smiles=" + encodeURIComponent(data.canonical_smiles || canonicalSmiles);
+                    molImg.alt = data.canonical_smiles || canonicalSmiles;
                     fragTitle.textContent = "Selected fragment";
                     fragPane.innerHTML = '<div style="font-size:0.75rem; color:#9ca3af; text-align:center; padding:0.5rem;">Click a peak to see its fragment.</div>';
                     hideFragAnchor();
 
                     const cesStr = (data.available_ces || []).map((c) => c.toFixed(0)).join(", ");
                     const precStr = data.precursor_mz != null ? data.precursor_mz.toFixed(4) : "—";
+
+                    let nameHtml = "";
+                    if (resolvedName) {
+                        nameHtml = "<div><b>Name:</b> " + escapeHtml(resolvedName) + "</div>";
+                    }
+                    const cidUrl = data.cid
+                        ? `<a href="https://pubchem.ncbi.nlm.nih.gov/compound/${data.cid}" target="_blank" rel="noopener noreferrer">${data.cid}</a>`
+                        : "";
+                    const cidHtml = cidUrl ? "  <b>PubChem CID:</b> " + cidUrl : "";
+
                     metaEl.innerHTML =
+                        nameHtml +
                         "<div><b>Formula:</b> " + prettyFormula(data.formula, "") +
-                        "  <b>Precursor m/z:</b> " + escapeHtml(precStr) + "</div>" +
+                        "  <b>Precursor m/z:</b> " + escapeHtml(precStr) + cidHtml + "</div>" +
                         "<div><b>InChIKey:</b> " + escapeHtml(data.inchikey) + "</div>" +
                         "<div><b>Adduct:</b> " + escapeHtml(data.adduct) +
                         "  <b>Instrument:</b> " + escapeHtml(data.instrument) + "</div>" +
-                        "<div><b>Matched CE:</b> " + (data.matched_ce_ev != null ? data.matched_ce_ev.toFixed(1) : "?") +
+                        "<div><b>Matched CE:</b> " + (data.matched_ce_ev != null ? data.matched_ce_ev.toFixed(0) : "?") +
                         " eV (requested NCE " + (data.requested_nce != null ? data.requested_nce.toFixed(0) : "?") + "% ≈ " +
-                        (data.requested_ce_ev != null ? data.requested_ce_ev.toFixed(1) : "?") +
+                        (data.requested_ce_ev != null ? data.requested_ce_ev.toFixed(0) : "?") +
                         " eV; available eV: " + escapeHtml(cesStr || "—") + ")</div>" +
                         '<div style="margin-top:0.25rem; font-family:monospace; font-size:0.8rem; color:#374151;">' +
                         escapeHtml(data.canonical_smiles || "") + "</div>";
@@ -3010,7 +3117,7 @@
                     }
 
                     const peaks = (data.pred_spectrum && data.pred_spectrum.peaks) || [];
-                    drawSpectrumSVG(peaks, data.canonical_smiles || smiles, data.adduct, data.precursor_mz);
+                    drawSpectrumSVG(peaks, data.canonical_smiles || canonicalSmiles, data.adduct, data.precursor_mz);
                 })
                 .catch((err) => {
                     showError(err.message || String(err));
@@ -3019,7 +3126,119 @@
                 .finally(() => {
                     btn.disabled = false;
                 });
+        }
+
+        // ---- Render candidate picker for multi-hit PubChem queries ----
+        function renderCandidatePicker(candidates) {
+            if (!candidatesEl || !candGridEl) return;
+
+            candGridEl.innerHTML = "";
+            candidatesEl.style.display = "block";
+
+            candidates.forEach((cand, idx) => {
+                const card = document.createElement("div");
+                card.className = "cand-card";
+
+                const img = document.createElement("img");
+                img.src = "/mol_png?smiles=" + encodeURIComponent(cand.canonical_smiles);
+                img.alt = cand.formula || "";
+                img.loading = "lazy";
+                card.appendChild(img);
+
+                const nameDiv = document.createElement("div");
+                nameDiv.className = "cand-name";
+                nameDiv.textContent = cand.name || "Structure " + (idx + 1);
+                nameDiv.title = cand.name || "";
+                card.appendChild(nameDiv);
+
+                const formulaDiv = document.createElement("div");
+                formulaDiv.className = "cand-formula";
+                formulaDiv.textContent = cand.formula || "";
+                card.appendChild(formulaDiv);
+
+                if (cand.inchikey) {
+                    const ikey2d = cand.inchikey.split("-")[0];
+                    const ikeyDiv = document.createElement("div");
+                    ikeyDiv.style.cssText = "font-size:0.7rem; color:#9ca3af; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;";
+                    ikeyDiv.textContent = ikey2d;
+                    ikeyDiv.title = cand.inchikey;
+                    card.appendChild(ikeyDiv);
+                }
+
+                card.addEventListener("click", () => {
+                    // Mark as selected
+                    candGridEl.querySelectorAll(".cand-card").forEach(c => c.classList.remove("selected"));
+                    card.classList.add("selected");
+                    // Load spectrum
+                    renderSpectrumForSmiles(cand.canonical_smiles, cand.name || "");
+                });
+
+                candGridEl.appendChild(card);
+            });
+        }
+
+        // ---- Main button click handler ----
+        btn.addEventListener("click", () => {
+            clearError();
+            resultEl.style.display = "none";
+            if (candidatesEl) candidatesEl.style.display = "none";
+            if (candGridEl) candGridEl.innerHTML = "";
+
+            const query = (queryInput.value || "").trim();
+            if (!query) {
+                showError("Enter a query (SMILES, compound name, InChI, or InChIKey).");
+                return;
+            }
+
+            const queryType = queryTypeSel ? queryTypeSel.value : "smiles";
+
+            if (queryType === "smiles") {
+                // Direct SMILES lookup — existing fast path
+                renderSpectrumForSmiles(query, "");
+            } else {
+                // Resolve via PubChem first, then show candidates or auto-select
+                statusEl.textContent = "Searching PubChem…";
+                btn.disabled = true;
+
+                const rParams = new URLSearchParams({ query, query_type: queryType });
+
+                fetch("/api/resolve_query?" + rParams.toString())
+                    .then(async (r) => {
+                        const data = await r.json().catch(() => ({}));
+                        if (data.error && (!data.candidates || !data.candidates.length)) {
+                            showError(data.error);
+                            statusEl.textContent = "";
+                            btn.disabled = false;
+                            return;
+                        }
+                        const candidates = data.candidates || [];
+                        statusEl.textContent = "";
+                        btn.disabled = false;
+
+                        if (candidates.length === 0) {
+                            showError("No structures found for this query.");
+                        } else if (candidates.length === 1) {
+                            // Single match — skip picker, load directly
+                            renderSpectrumForSmiles(candidates[0].canonical_smiles, candidates[0].name || "");
+                        } else {
+                            // Multiple matches — show picker
+                            renderCandidatePicker(candidates);
+                        }
+                    })
+                    .catch((err) => {
+                        showError(err.message || String(err));
+                        statusEl.textContent = "";
+                        btn.disabled = false;
+                    });
+            }
         });
+
+        // Allow Enter key to trigger search
+        if (queryInput) {
+            queryInput.addEventListener("keydown", (e) => {
+                if (e.key === "Enter") btn.click();
+            });
+        }
     });
     </script>
     {% if retrieval_data %}
@@ -3034,14 +3253,95 @@
         window.RETRIEVAL_DATA = null;
     </script>
     {% endif %}
+    <script>
+        // ---- Tab switching ----
+        function showTab(name) {
+            document.querySelectorAll(".tab-panel").forEach(function(p) {
+                p.classList.toggle("active", p.dataset.tab === name);
+            });
+            document.querySelectorAll(".tab-nav-btn").forEach(function(b) {
+                b.classList.toggle("active", b.dataset.tab === name);
+            });
+            try { history.replaceState(null, "", "#" + name); } catch(e) {}
+        }
+
+        document.addEventListener("DOMContentLoaded", function() {
+            // Parse hash: supports both "#explore" and "#explore?query=X&query_type=Y"
+            var fullHash = (location.hash || "").replace(/^#/, "");
+            var qmark = fullHash.indexOf("?");
+            var tabPart = qmark === -1 ? fullHash : fullHash.slice(0, qmark);
+            var paramPart = qmark === -1 ? "" : fullHash.slice(qmark + 1);
+
+            var tabs = ["query", "explore", "download"];
+            // If results are present, always start on the query tab
+            var hasResults = !!document.getElementById("results-body");
+            var startTab = hasResults ? "query" : (tabs.indexOf(tabPart) !== -1 ? tabPart : "query");
+            showTab(startTab);
+
+            // Deep-link into Explore: #explore?query=<val>&query_type=<type>
+            if (!hasResults && tabPart === "explore" && paramPart) {
+                var params = {};
+                paramPart.split("&").forEach(function(kv) {
+                    var eq = kv.indexOf("=");
+                    if (eq !== -1) {
+                        params[decodeURIComponent(kv.slice(0, eq))] = decodeURIComponent(kv.slice(eq + 1));
+                    }
+                });
+                if (params.query) {
+                    var queryEl = document.getElementById("smi-query");
+                    var queryTypeEl = document.getElementById("smi-query-type");
+                    var lookupBtn = document.getElementById("smi-lookup-btn");
+                    if (queryEl) queryEl.value = params.query;
+                    if (queryTypeEl && params.query_type) {
+                        // Set matching option, fall back gracefully if unknown
+                        for (var i = 0; i < queryTypeEl.options.length; i++) {
+                            if (queryTypeEl.options[i].value === params.query_type) {
+                                queryTypeEl.selectedIndex = i;
+                                break;
+                            }
+                        }
+                    }
+                    // Trigger the lookup after a short microtask delay so the tab
+                    // panel is visible before we start showing loading state.
+                    if (lookupBtn) setTimeout(function() { lookupBtn.click(); }, 50);
+                }
+            }
+        });
+    </script>
 </head>
 <body>
 <header>
     <div class="header-inner">
         <h1 class="header-title">ICEBERG Spectrum Retrieval (PubChem Atlas)</h1>
-        Please report any issues to runzhong@mit.edu
+        <div style="display:flex;align-items:center;gap:1rem;font-size:0.85rem;color:#9ca3af;">
+            <span>Please report any issues to runzhong@mit.edu</span>
+            {% if current_user.is_authenticated %}
+            {% if current_user.can_access_nist %}
+            <span style="color:#6ee7b7;">&#x2713; Internal (NIST'23 included) &mdash; {{ current_user.id }}</span>
+            {% else %}
+            <span style="color:#9ca3af;">{{ current_user.id }}</span>
+            {% endif %}
+            {% if current_user.is_admin %}
+            <a href="{{ url_for('admin_dashboard') }}" style="color:#f9a8d4;text-decoration:none;font-size:0.8rem;">Admin</a>
+            {% endif %}
+            <a href="{{ url_for('change_password') }}" style="color:#93c5fd;text-decoration:none;font-size:0.8rem;">Change password</a>
+            <form method="post" action="{{ url_for('logout') }}" style="margin:0;">
+                <button type="submit" style="background:none;border:1px solid #4b5563;color:#d1d5db;
+                    padding:0.25rem 0.6rem;border-radius:0.35rem;cursor:pointer;font-size:0.8rem;">
+                    Log out
+                </button>
+            </form>
+            {% else %}
+            <a href="{{ url_for('login') }}" style="color:#93c5fd;text-decoration:none;">Internal login</a>
+            {% endif %}
+        </div>
     </div>
 </header>
+<nav class="tab-nav" role="tablist" aria-label="Main navigation">
+    <button class="tab-nav-btn" data-tab="query"    onclick="showTab('query')"    type="button">Query spectra</button>
+    <button class="tab-nav-btn" data-tab="explore"  onclick="showTab('explore')"  type="button">Explore the atlas</button>
+    <button class="tab-nav-btn" data-tab="download" onclick="showTab('download')" type="button">Download predicted spectra</button>
+</nav>
 
 <main>
     {% with messages = get_flashed_messages(with_categories=true) %}
@@ -3054,6 +3354,7 @@
       {% endif %}
     {% endwith %}
 
+    <section class="tab-panel" data-tab="query">
     <div class="card">
         <h2>Query spectra</h2>
         <form id="query-form" method="post" action="{{ url_for('index') }}" enctype="multipart/form-data">
@@ -3279,16 +3580,31 @@
         </form>
     </div>
 
+    </section>
+
+    <section class="tab-panel" data-tab="explore">
     <div class="card" id="smi-lookup-card">
-        <h2>Look up predicted spectrum by SMILES</h2>
+        <h2>Explore the atlas</h2>
         <p style="margin-top:0; font-size:0.85rem; color:#6b7280;">
-            Type a SMILES, choose adduct and collision energy, and view the predicted spectrum
-            from the precomputed atlas. Click a peak to see the ICEBERG fragment that produced it.
+            Search by SMILES, compound name, InChI, InChIKey, or PubChem CID to view
+            ICEBERG-predicted spectra from the precomputed atlas.
+            Click a peak to see the predicted fragment.
         </p>
         <div class="row">
+            <div>
+                <label for="smi-query-type">Query type</label>
+                <select id="smi-query-type">
+                    <option value="smiles"   selected>SMILES</option>
+                    <option value="name">Name</option>
+                    <option value="inchi">InChI</option>
+                    <option value="inchikey">InChIKey</option>
+                    <option value="cid">PubChem CID</option>
+                </select>
+            </div>
             <div style="flex:2 1 0;">
-                <label for="smi-smiles">SMILES</label>
-                <input type="text" id="smi-smiles" placeholder="e.g. CC(=O)Oc1ccccc1C(=O)O">
+                <label for="smi-query">Query</label>
+                <input type="text" id="smi-query"
+                       placeholder="e.g. CC(=O)Oc1ccccc1C(=O)O  or  caffeine  or  InChIKey  or  2244 (CID)">
             </div>
             <div>
                 <label for="smi-adduct">Adduct</label>
@@ -3309,8 +3625,16 @@
             </div>
         </div>
         <div style="margin-top:0.75rem;">
-            <button type="button" class="btn btn-primary" id="smi-lookup-btn">Look up spectrum</button>
+            <button type="button" class="btn btn-primary" id="smi-lookup-btn">Search</button>
             <span id="smi-status" style="margin-left:0.75rem; font-size:0.85rem; color:#6b7280;"></span>
+        </div>
+
+        <!-- Candidate picker: shown when a name/InChI/InChIKey query returns >1 structure -->
+        <div id="smi-candidates" style="display:none; margin-top:1rem; border-top:1px solid #e5e7eb; padding-top:0.75rem;">
+            <div style="font-size:0.85rem; font-weight:500; margin-bottom:0.6rem; color:#374151;">
+                Multiple structures found — select one to view its predicted spectrum:
+            </div>
+            <div id="smi-cand-grid" class="cand-picker"></div>
         </div>
 
         <div id="smi-result" style="display:none; margin-top:1rem; border-top:1px solid #e5e7eb; padding-top:1rem;">
@@ -3333,14 +3657,53 @@
             </div>
         </div>
         <div id="smi-error" style="display:none; margin-top:0.75rem; color:#b91c1c; font-size:0.9rem;"></div>
-    </div>
 
+        <details style="margin-top:1.25rem; border-top:1px solid #e5e7eb; padding-top:0.9rem;">
+            <summary style="cursor:pointer; font-size:0.82rem; color:#6b7280; user-select:none;">
+                Jump directly from a PubChem compound page (bookmarklet)
+            </summary>
+            <div style="margin-top:0.75rem; font-size:0.82rem; color:#374151; line-height:1.6;">
+                <p style="margin:0 0 0.5rem;">
+                    A <strong>bookmarklet</strong> is a one-click browser bookmark that runs a small
+                    script — it reads the InChIKey from the PubChem page you're viewing and opens
+                    that compound's predicted spectrum here automatically.
+                </p>
+                <p style="margin:0 0 0.6rem;"><strong>Setup (one time):</strong></p>
+                <ol style="margin:0 0 0.75rem; padding-left:1.4rem;">
+                    <li>Show your browser's bookmarks bar
+                        (<kbd>Ctrl+Shift+B</kbd> / <kbd>⌘⇧B</kbd> on Mac).</li>
+                    <li>Right-click the bookmarks bar → <em>Add page…</em> (Chrome) or
+                        <em>New Bookmark</em> (Firefox).</li>
+                    <li>Set the <strong>Name</strong> to anything, e.g. <code>View in ICEBERG</code>.</li>
+                    <li>Paste the following as the <strong>URL / Location</strong>:</li>
+                </ol>
+                <pre style="background:#f3f4f6; border:1px solid #e5e7eb; border-radius:0.4rem;
+                            padding:0.6rem 0.8rem; font-size:0.75rem; overflow-x:auto;
+                            white-space:pre-wrap; word-break:break-all; margin:0 0 0.75rem;">javascript:(function(){var m=location.pathname.match(/\/compound\/(\d+)/);if(m){window.open('https://iceberg-ms.mit.edu/#explore?query='+m[1]+'&amp;query_type=cid');}else{alert('No PubChem CID found in this page URL.');}})();</pre>
+                <p style="margin:0 0 0.4rem;"><strong>Usage:</strong></p>
+                <ol style="margin:0; padding-left:1.4rem;">
+                    <li>Navigate to any PubChem compound page, e.g.
+                        <a href="https://pubchem.ncbi.nlm.nih.gov/compound/13648279" target="_blank"
+                           rel="noopener" style="color:#2563eb;">pubchem.ncbi.nlm.nih.gov/compound/13648279</a>.</li>
+                    <li>Click the <code>View in ICEBERG</code> bookmark — a new tab opens here
+                        with the Explore tab pre-filled and the lookup running automatically.</li>
+                </ol>
+                <p style="margin:0.6rem 0 0; color:#6b7280;">
+                    You can also use the <strong>PubChem CID</strong> query type above to look up
+                    a compound by its numeric CID directly (e.g. <code>13648279</code>).
+                </p>
+            </div>
+        </details>
+    </div>
+    </section>
+
+    <section class="tab-panel" data-tab="download">
     <div class="card">
         <h2>Download predicted spectra (.mgf / .msp)</h2>
         <p style="font-size:0.85rem; color:#6b7280;">
             Download ICEBERG-predicted spectra for a specific PubChem formula from the atlas.
             You can either download the raw MGF only, or download MGF and a converted MSP file.<br>
-            All NIST structures are excluded to avoid license conflict. You can import the predicted
+            All NIST'23 structures are excluded to avoid license conflict. You can import the predicted
             library into your NIST MS Search software.
         </p>
         <p style="font-size:0.85rem; color:#6b7280; margin-top:0.3rem;">
@@ -3360,13 +3723,15 @@
                 <button type="button"
                         class="btn btn-secondary"
                         onclick="downloadMgfAndMsp('{{ url_for('download_mgf') }}')">
-                    Download .mgf & .msp (local)
+                    Download .mgf & .msp
                 </button>
             </div>
         </form>
     </div>
+    </section>
 
     {% if results and results|length > 0 %}
+    <section class="tab-panel" data-tab="query">
         <div class="card">
             <h2>Retrieved candidates</h2>
             <p style="font-size:0.85rem; color:#6b7280;">
@@ -3374,7 +3739,7 @@
                 matching collision energies (in eV) are shown. Hover over a row to
                 view the predicted chemical structure.
                 Click a row to pin/unpin the preview.<br>
-                All NIST structures are excluded to avoid license conflict.
+                All NIST'23 structures are excluded to avoid license conflict.
             </p>
 
             <div class="results-layout">
@@ -3463,6 +3828,7 @@
                 </div>
             </div>
         </div>
+    </section>
     {% endif %}
 
     <div class="footer">

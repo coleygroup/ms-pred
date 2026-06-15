@@ -1,12 +1,18 @@
 #  Mass Spectrum Predictor
 
+[![ICEBERG-WebUI](iceberg_teaser.png)](http://iceberg-ms.mit.edu/)
+
+**Update 4/4/2026:** You can run ICEBERG structural elucidation easily at http://iceberg-ms.mit.edu/! By inputting the chemical formula and your experimental spectrum, the WebUI will rank it against all candidates from PubChem. No GPU is required.
+
+------------
+
 This repository contains implementations for the following spectrum simulator models predicting molecular tandem mass spectra from molecules: 
 - 🏔️ GLACIER 🏔️: GLACIER: Rethinking Mass Spectrum Prediction as an Object Detection Problem
 - 🧊 ICEBERG 🧊️: [Inferring CID by Estimating Breakage Events and Reconstructing their Graphs](http://arxiv.org/abs/2304.13136) and [Neural Spectral Prediction for Structure Elucidation with Tandem Mass Spectrometry](https://www.biorxiv.org/content/10.1101/2025.05.28.656653v1)
 - 🏃‍ MARASON 🏃‍: [Neural Graph Matching Improves Retrieval Augmented Generation in Molecular Machine Learning](https://arxiv.org/html/2502.17874)
 - 🧣 SCARF 🧣: [Subformula Classification for Autoregressively Reconstructing Fragmentations](https://arxiv.org/abs/2303.06470)
 
-GLACIER and ICEBERG predicts spectra at the level of molecular fragments, whereas SCARF predicts spectra at the level of chemical formula. In order to fairly compare various spectra models, we implement a number of baselines and alternative models using equivalent settings across models (i.e., same covariates, hyeprparmaeter sweeps for each, etc.):
+GLACIER and ICEBERG predict spectra at the level of molecular fragments, whereas SCARF predicts spectra at the level of chemical formula. In order to fairly compare various spectra models, we implement a number of baselines and alternative models using equivalent settings across models (i.e., same covariates, hyperparameter sweeps for each, etc.):
  
 1. *NEIMS* using both FFN and GNN encoders from [Rapid prediction of electron–ionization mass spectrometry using neural networks](https://pubs.acs.org/doi/full/10.1021/acscentsci.9b00085)    
 2. *MassFormer* from [MassFormer: Tandem Mass Spectrum Prediction for Small Molecules using Graph Transformers](https://arxiv.org/abs/2111.04824)  
@@ -53,7 +59,9 @@ Any newer/older CUDA versions should also work, please change the CUDA tags in `
 If you are not using GPU, please update ``envorinment.yml`` following the ``CPU-only`` comments in that file.
 
 ## Demo <a name="demo"></a>
-A demo of how to use mass spectrum predictors (ICEBERG as an example) for structural elucidation campaigns can be found at [``notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb``](notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb).
+To easily get started, you can run ICEBERG structural elucidation at the WebUI: http://iceberg-ms.mit.edu/
+
+If you want more flexibility by doing some coding, a demo of how to use mass spectrum predictors (ICEBERG as an example) for structural elucidation campaigns can be found at [``notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb``](notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb).
 
 Please go through the following prerequisites to run the demo:
 * Clone the repository ``git clone https://github.com/coleygroup/ms-pred.git``.
@@ -182,6 +190,11 @@ training, and predict calls can be  made using the following scripts respectivel
 3. `python src/ms_pred/dag_pred/predict_smis.py`
 
 An example of how to use ICEBERG for structural elucidation campaigns can be found at ``notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb``.
+
+Replicating the retrieval metrics and CIs for the MassSpecGym spectrum challenge hit rate evaluation can be carried out by:
+1. downloading the full and deduplicated candidate sets from [Dropbox](https://www.dropbox.com/scl/fo/d73o0o4u5ymr9ubtp3m7j/AL4r7e3p9ElV0ewBwDCScbM?rlkey=tr99zkzy208ol8aw0pfsdsf5v&st=2zg9n01y&dl=0) and placing them in `data/spec_datasets/msg`,
+2. changing the retrieval script in `run_scripts/iceberg/06_run_retrieval.py` to use `src/ms_pred/retrieval/retrieval_benchmark_torchmetrics.py` and uncommenting the retrieval challenge config,
+3. and upon completion of ranking, running `src/ms_pred/retrieval/bootstrap_metrics.py`.
 
 ### MARASON
 > Note that MARASON is not actively maintained and is not compatible with this repo at the moment. 
