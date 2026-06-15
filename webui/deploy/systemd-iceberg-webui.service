@@ -60,6 +60,19 @@ Environment="ICEBERG_ADMIN_EMAILS=admin@example.com"
 # Environment="SMTP_FROM=your-account@gmail.com"
 # Environment="SMTP_USE_TLS=true"
 # Environment="SMTP_PASSWORD=your-16-char-app-password"
+#
+# Contact address shown in outgoing emails and in the atlas header ("report any issues to …").
+# Defaults to SMTP_FROM if unset.
+# Environment="ICEBERG_CONTACT_EMAIL=you@example.com"
+#
+# Full body template for new-user invite emails. Placeholders: {email}, {password}, {contact}.
+# Use \n for newlines. Configure this so users do not receive MIT-branded emails.
+# Environment="ICEBERG_EMAIL_SUBJECT_NEW=Access to My Spectrum Tool"
+# Environment="ICEBERG_EMAIL_BODY_NEW=Hello,\n\nYou have been granted access...\n\nUsername: {email}\nPassword: {password}\n\nFor questions: {contact}\n"
+#
+# Same for password-reset / resend-invite emails.
+# Environment="ICEBERG_EMAIL_SUBJECT_RESET=My Spectrum Tool — password reset"
+# Environment="ICEBERG_EMAIL_BODY_RESET=Hello,\n\nYour password has been reset...\n\nUsername: {email}\nPassword: {password}\n\nFor questions: {contact}\n"
 
 # ── Server ────────────────────────────────────────────────────────────────────
 

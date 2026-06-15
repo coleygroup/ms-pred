@@ -159,6 +159,7 @@
                     <th>Email</th>
                     <th>Role</th>
                     <th>Created</th>
+                    <th>Last login</th>
                     <th>Actions</th>
                 </tr>
             </thead>
@@ -176,13 +177,14 @@
                     {% endif %}
                 </td>
                 <td style="color:#6b7280;font-size:0.8rem;">{{ u.created[:10] if u.created else '—' }}</td>
+                <td style="color:#6b7280;font-size:0.8rem;">{{ u.last_login[:10] if u.last_login else '—' }}</td>
                 <td>
                     <div style="display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center;">
-                        <!-- Reset password -->
+                        <!-- Reset password / resend invite -->
                         <form method="post" action="{{ url_for('admin_reset_password') }}"
-                              onsubmit="return confirm('Reset password for {{ u.email }}?');">
+                              onsubmit="return confirm('Reset password and resend invite for {{ u.email }}?');">
                             <input type="hidden" name="email" value="{{ u.email }}">
-                            <button type="submit" class="btn btn-secondary">Reset pw</button>
+                            <button type="submit" class="btn btn-secondary">Reset &amp; resend</button>
                         </form>
                         <!-- Set role -->
                         <form method="post" action="{{ url_for('admin_set_role') }}"

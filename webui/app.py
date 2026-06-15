@@ -79,6 +79,37 @@ _SMTP_USER: str = os.environ.get("SMTP_USER", "")
 _SMTP_PASSWORD: str = os.environ.get("SMTP_PASSWORD", "")
 _SMTP_FROM: str = os.environ.get("SMTP_FROM", _SMTP_USER)
 _SMTP_USE_TLS: bool = os.environ.get("SMTP_USE_TLS", "true").lower() not in ("0", "false", "no")
+# Contact address shown in outgoing emails and the atlas header — defaults to SMTP_FROM if unset
+_CONTACT_EMAIL: str = os.environ.get("ICEBERG_CONTACT_EMAIL", _SMTP_FROM)
+# Full email templates for credential emails.  Placeholders: {email}, {password}, {contact}.
+# Use \n for newlines when setting via an environment variable.
+# Defaults are intentionally generic — open-source adopters should override these.
+_EMAIL_SUBJECT_NEW: str = os.environ.get(
+    "ICEBERG_EMAIL_SUBJECT_NEW",
+    "Access to the ICEBERG Mass Spectrometry Atlas",
+)
+_EMAIL_BODY_NEW: str = os.environ.get("ICEBERG_EMAIL_BODY_NEW", "").replace("\\n", "\n") or (
+    "Hello,\n\n"
+    "You have been granted access to the ICEBERG Mass Spectrometry Atlas,\n"
+    "a tool for exploring predicted MS2 spectra.\n\n"
+    "Username:    {email}\n"
+    "Password:    {password}\n\n"
+    "Please log in and use the \"Change password\" link to set your own password.\n\n"
+    "For any questions, reach out to {contact}.\n"
+)
+_EMAIL_SUBJECT_RESET: str = os.environ.get(
+    "ICEBERG_EMAIL_SUBJECT_RESET",
+    "ICEBERG Mass Spectrometry Atlas — password reset",
+)
+_EMAIL_BODY_RESET: str = os.environ.get("ICEBERG_EMAIL_BODY_RESET", "").replace("\\n", "\n") or (
+    "Hello,\n\n"
+    "Your password for the ICEBERG Mass Spectrometry Atlas has been reset by an\n"
+    "administrator. Your new temporary login credentials are below.\n\n"
+    "Username:    {email}\n"
+    "Password:    {password}\n\n"
+    "Please log in and use the \"Change password\" link to set your own password.\n\n"
+    "For any questions, reach out to {contact}.\n"
+)
 
 # SQLite analytics database
 _ANALYTICS_DB_PATH: Path | None = (
@@ -1148,6 +1179,8 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)  # real IPs from NGINX
 login_manager = LoginManager(app)
 login_manager.login_view = "login"
 
+app.jinja_env.globals["CONTACT_EMAIL"] = _CONTACT_EMAIL
+
 _VALID_ROLES = {"admin", "authorized_user", "user"}
 
 
@@ -1333,6 +1366,16 @@ def _send_email(to: str, subject: str, body: str) -> bool:
         return False
 
 
+def _build_credential_email(email: str, password: str, kind: str = "new") -> tuple[str, str]:
+    """Return (subject, body) for a credential email using the configured templates."""
+    if kind == "new":
+        subject, body_tpl = _EMAIL_SUBJECT_NEW, _EMAIL_BODY_NEW
+    else:
+        subject, body_tpl = _EMAIL_SUBJECT_RESET, _EMAIL_BODY_RESET
+    body = body_tpl.format(email=email, password=password, contact=_CONTACT_EMAIL)
+    return subject, body
+
+
 # ---------------------------------------------------------------------------
 # Analytics helpers (SQLite)
 # ---------------------------------------------------------------------------
@@ -1467,6 +1510,15 @@ def login():
         password = request.form.get("password") or ""
         if _check_credentials(email, password):
             login_user(_User(email), remember=True)
+            try:
+                users = _load_users()
+                record = _get_record(users, email)
+                if record is not None:
+                    record["last_login"] = datetime.now(timezone.utc).isoformat()
+                    users[email] = record
+                    _save_users(users)
+            except Exception:
+                pass
             return redirect(request.args.get("next") or url_for("index"))
         error = "Invalid email or password."
     return render_template("login.html", error=error)
@@ -1528,6 +1580,7 @@ def admin_dashboard():
             "email": email,
             "role": record.get("role", "user") if record else "user",
             "created": record.get("created", "") if record else "",
+            "last_login": record.get("last_login", "") if record else "",
         })
     # Resolve any un-geocoded IPs on dashboard load
     if _ANALYTICS_DB_PATH and _ANALYTICS_DB_PATH.exists():
@@ -1573,16 +1626,7 @@ def admin_add_user():
     }
     _save_users(users)
 
-    subject = "Your ICEBERG atlas account"
-    body = (
-        f"Hello,\n\n"
-        f"An account has been created for you on the ICEBERG Spectrum Retrieval atlas.\n\n"
-        f"  URL:      https://iceberg-ms.mit.edu\n"
-        f"  Username: {email}\n"
-        f"  Password: {password}\n\n"
-        f"You can change your password after logging in via the 'Change password' link.\n\n"
-        f"— ICEBERG admin\n"
-    )
+    subject, body = _build_credential_email(email, password, kind="new")
     sent = _send_email(email, subject, body)
 
     if sent:
@@ -1608,15 +1652,7 @@ def admin_reset_password():
     users[email] = record
     _save_users(users)
 
-    subject = "Your ICEBERG atlas password has been reset"
-    body = (
-        f"Hello,\n\n"
-        f"Your password on the ICEBERG Spectrum Retrieval atlas has been reset.\n\n"
-        f"  URL:      https://iceberg-ms.mit.edu\n"
-        f"  Username: {email}\n"
-        f"  Password: {password}\n\n"
-        f"— ICEBERG admin\n"
-    )
+    subject, body = _build_credential_email(email, password, kind="reset")
     sent = _send_email(email, subject, body)
 
     if sent:

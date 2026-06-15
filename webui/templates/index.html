@@ -3314,7 +3314,7 @@
     <div class="header-inner">
         <h1 class="header-title">ICEBERG Spectrum Retrieval (PubChem Atlas)</h1>
         <div style="display:flex;align-items:center;gap:1rem;font-size:0.85rem;color:#9ca3af;">
-            <span>Please report any issues to runzhong@mit.edu</span>
+            <span>Please report any issues to {{ CONTACT_EMAIL }}</span>
             {% if current_user.is_authenticated %}
             {% if current_user.can_access_nist %}
             <span style="color:#6ee7b7;">&#x2713; Internal (NIST'23 included) &mdash; {{ current_user.id }}</span>
