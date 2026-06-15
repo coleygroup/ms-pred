@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 
 import ms_pred.common as common
-from ms_pred.GLACIER import dataset, joint_model
+from ms_pred.glacier import dataset, joint_model
 
 
 def get_args():

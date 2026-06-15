@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional, Tuple
 import json
 
+from ms_pred.glacier import joint_model
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -25,9 +26,11 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 
 import ms_pred.common as common
-from ms_pred.GLACIER.dataset import IntenDataset, TreeProcessor
-from ms_pred.GLACIER.joint_model import JointModel
+from ms_pred.glacier.dataset import IntenContrDataset, TreeProcessor
+from ms_pred.glacier.joint_model import JointModel
 from pytorch_lightning.strategies import DDPStrategy
+from rdkit import Chem
+
 
 
 
@@ -56,6 +59,7 @@ def add_joint_train_args(parser):
     parser.add_argument("--lr-decay-rate", default=0.7214, type=float)
     parser.add_argument("--weight-decay", default=0.0, type=float)
     parser.add_argument("--test-checkpoint", default="", action="store", type=str)
+    parser.add_argument("--train-checkpoint", default="", action="store", type=str)
 
     # Model params
     parser.add_argument("--hidden-size", default=512, type=int)
@@ -65,10 +69,10 @@ def add_joint_train_args(parser):
     parser.add_argument("--inten-dropout", default=0.2, type=float)
     parser.add_argument("--frag-dropout", default=0.2, type=float)
     parser.add_argument("--embed-elem-group", default=True, action="store_true")
-    parser.add_argument("--embed-instrument", default=False, action="store_true")
     parser.add_argument("--add-hs", default=True, action="store_true")
     parser.add_argument("--embed-adduct", default=True, action="store_true")
     parser.add_argument("--embed-collision", default=True, action="store_true")
+    parser.add_argument("--embed-instrument", default=False, action="store_true")
     parser.add_argument("--encode-forms", default=True, action="store_true")
     parser.add_argument("--inten-decoder-layers", default=6, type=int)
     parser.add_argument("--inten-encoder-layers", default=6, type=int)
@@ -78,7 +82,6 @@ def add_joint_train_args(parser):
     parser.add_argument("--max-breakpoints", default=50, type=int)
     parser.add_argument("--multi-hop-max-dist", default=5, type=int)
     parser.add_argument("--num-edge-dis", default=10, type=int)
-    parser.add_argument("--num-bins", default=15000, type=int)
     parser.add_argument("--enable-aux-loss", default=False, action="store_true")
     parser.add_argument("--enable-decoder-norm", default=False, action="store_true")
 
@@ -93,12 +96,39 @@ def add_joint_train_args(parser):
     parser.add_argument("--magma-decay-steps", default=5000, type=int)
 
     parser.add_argument("--warmup", default=1000, action="store", type=int)
+    parser.add_argument("--binned-targs", default=False, action="store_true")
+    parser.add_argument("--num-bins", default=15000, type=int)
+    parser.add_argument("--upper-limit", default=1500, type=int)
     parser.add_argument(
         "--inten-loss-fn",
         default="cosine",
         action="store",
         choices=["cosine", "entropy"],
     )
+    parser.add_argument(
+        "--contr-loss-fn",
+        default="cosine",
+        action="store",
+        choices=["cosine", "entropy"],
+    )
+    parser.add_argument(
+        "--contr-weight", default=1, type=float
+    )
+    parser.add_argument(
+        "--contr-threshold", default=0.5, type=float
+    )
+    parser.add_argument("--pubchem-map-path", default='data/pubchem/pubchem_formulae_inchikey.hdf5')
+    parser.add_argument("--num-decoys", default=3, type=int)
+    parser.add_argument("--num-fixed-decoys", default=7, action="store", type=int) 
+    parser.add_argument("--all-decoy-nums", default=10, type=int)
+    parser.add_argument("--filter-decoys-by-retrieval-inchikey", default=False, action="store_true")
+    parser.add_argument(
+        "--retrieval-inchikey-tsv",
+        default="data/spec_datasets/nist20/retrieval/cands_df_split_1_50.tsv",
+        type=str,
+    )
+    parser.add_argument("--grad-accumulate", default=1, type=int, action="store")
+
     return parser
 
 
@@ -113,7 +143,7 @@ def train_model():
     kwargs = args.__dict__
 
     save_dir = kwargs["save_dir"]
-    common.setup_logger(save_dir, log_name="joint_train.log", debug=kwargs["debug"])
+    common.setup_logger(save_dir, log_name="joint_contr_finetune.log", debug=kwargs["debug"])
     pl.seed_everything(kwargs.get("seed"))
 
     # Dump args
@@ -127,7 +157,6 @@ def train_model():
     data_dir = common.get_data_dir(dataset_name)
     labels = data_dir / kwargs["dataset_labels"]
     split_file = data_dir / "splits" / kwargs["split_name"]
-    add_hs = kwargs["add_hs"]
 
     # Get train, val, test inds
     df = pd.read_csv(labels, sep="\t")
@@ -141,6 +170,7 @@ def train_model():
     val_df = df.iloc[val_inds]
     test_df = df.iloc[test_inds]
 
+
     magma_folder = kwargs["magma_folder"]
     num_workers = kwargs.get("num_workers", 0)
     magma_h5_path = data_dir / f"{magma_folder}/magma_tree_with_inten.hdf5"
@@ -150,7 +180,14 @@ def train_model():
     # Dataset parameters
     pe_embed_k = kwargs["pe_embed_k"]
     embed_elem_group = kwargs["embed_elem_group"]
+    binned_targs = kwargs["binned_targs"]
     multi_hop_max_dist = kwargs["multi_hop_max_dist"]
+    num_decoys = kwargs["num_decoys"]
+    num_fixed_decoys = kwargs["num_fixed_decoys"]
+    pubchem_path = kwargs["pubchem_map_path"]
+    all_decoy_nums = kwargs["all_decoy_nums"]
+    filter_decoys_by_retrieval_inchikey = kwargs["filter_decoys_by_retrieval_inchikey"]
+    retrieval_inchikey_tsv = kwargs["retrieval_inchikey_tsv"]
 
     # Processor and datasets
     tree_processor = TreeProcessor(
@@ -160,7 +197,7 @@ def train_model():
         multi_hop_max_dist=kwargs["multi_hop_max_dist"],
     )
 
-    train_dataset = IntenDataset(
+    train_dataset = IntenContrDataset(
         train_df,
         magma_h5=magma_h5_path,
         magma_map=name_to_json,
@@ -168,9 +205,14 @@ def train_model():
         root_encode="graphormer",
         embed_elem_group=embed_elem_group,
         tree_processor=tree_processor,
-        datatype="HDF5"
+        datatype="HDF5",
+        num_decoys=num_decoys,
+        pubchem_path=pubchem_path,
+        all_decoy_nums=all_decoy_nums,
+        filter_decoys_by_retrieval_inchikey=filter_decoys_by_retrieval_inchikey,
+        retrieval_inchikey_tsv=retrieval_inchikey_tsv,
     )
-    val_dataset = IntenDataset(
+    val_dataset = IntenContrDataset(
         val_df,
         magma_h5=magma_h5_path,
         magma_map=name_to_json,
@@ -178,9 +220,15 @@ def train_model():
         root_encode="graphormer",
         embed_elem_group=embed_elem_group,
         tree_processor=tree_processor,
-        datatype="HDF5"
+        datatype="HDF5",
+        num_decoys=num_fixed_decoys,
+        pubchem_path=pubchem_path,
+        all_decoy_nums=all_decoy_nums,
+        fix_decoys=True,  # Ensure val decoys are the same across epochs for consistent validation performance
+        filter_decoys_by_retrieval_inchikey=filter_decoys_by_retrieval_inchikey,
+        retrieval_inchikey_tsv=retrieval_inchikey_tsv,
     )
-    test_dataset = IntenDataset(
+    test_dataset = IntenContrDataset(
         test_df,
         magma_h5=magma_h5_path,
         magma_map=name_to_json,
@@ -188,7 +236,13 @@ def train_model():
         root_encode="graphormer",
         embed_elem_group=embed_elem_group,
         tree_processor=tree_processor,
-        datatype="HDF5"
+        datatype="HDF5",
+        num_decoys=num_fixed_decoys,
+        pubchem_path=pubchem_path,
+        all_decoy_nums=all_decoy_nums,
+        fix_decoys=True,  # Ensure test decoys are the same across epochs for consistent test performance
+        filter_decoys_by_retrieval_inchikey=filter_decoys_by_retrieval_inchikey,
+        retrieval_inchikey_tsv=retrieval_inchikey_tsv,
     )
 
     # Define dataloaders
@@ -251,8 +305,12 @@ def train_model():
         inten_encoder_layers=kwargs["inten_encoder_layers"],
         inten_dropout=kwargs["inten_dropout"],
         inten_loss_fn=kwargs["inten_loss_fn"],
+        binned_targs=binned_targs,
         sk_tau=kwargs["sk_tau"],
         ppm_tol=kwargs["ppm_tol"],
+        contr_weight=kwargs["contr_weight"],
+        contr_threshold=kwargs["contr_threshold"],
+        contr_loss_fn=kwargs["contr_loss_fn"],
         inten_weight=kwargs["inten_weight"],
         frag_weight = kwargs["frag_weight"],
         magma_warmup_steps=kwargs["magma_warmup_steps"],
@@ -263,6 +321,7 @@ def train_model():
         weight_decay=kwargs["weight_decay"],
         warmup=kwargs["warmup"],
         num_bins=kwargs["num_bins"],
+        upper_limit=kwargs["upper_limit"],
     )
 
     # Create trainer
@@ -285,7 +344,7 @@ def train_model():
         filename="best",
         save_weights_only=False,
     )
-    earlystop_callback = EarlyStopping(monitor=monitor, patience=5)
+    earlystop_callback = EarlyStopping(monitor=monitor, patience=3)
     callbacks = [earlystop_callback, checkpoint_callback]
 
     trainer = pl.Trainer(
@@ -298,8 +357,27 @@ def train_model():
         min_epochs=kwargs["min_epochs"],
         max_epochs=kwargs["max_epochs"],
         gradient_clip_algorithm="value",
+        accumulate_grad_batches=kwargs["grad_accumulate"],
         num_sanity_val_steps=2 if kwargs["debug"] else 0,
     )
+
+    if kwargs["train_checkpoint"]:
+        train_checkpoint = kwargs["train_checkpoint"]
+        model = joint_model.JointModel.load_from_checkpoint(train_checkpoint)
+        logging.info(
+            f"Loaded model with from {train_checkpoint}"
+        )
+        # Force contrastive learning and magma params
+        model.sk_tau = kwargs["sk_tau"]
+        model.contr_weight = kwargs["contr_weight"]
+        model.inten_weight = kwargs["inten_weight"]
+        model.frag_weight = kwargs["frag_weight"]
+        model.contr_threshold = kwargs["contr_threshold"]
+        model.magma_warmup_steps = kwargs["magma_warmup_steps"]
+        model.magma_decay_rate = kwargs["magma_decay_rate"]
+        model.magma_decay_steps = kwargs["magma_decay_steps"]
+        model.num_bins = kwargs["num_bins"]
+        model.upper_limit = kwargs["upper_limit"]
 
     if not kwargs["test_checkpoint"]:
         if kwargs["debug_overfit"]:

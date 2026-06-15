@@ -61,7 +61,7 @@ glacier_dataset = None
 def _lazy_imports():
     global joint_model, glacier_dataset
     if joint_model is None:
-        from ms_pred.GLACIER import joint_model as _jm, dataset as _gd
+        from ms_pred.glacier import joint_model as _jm, dataset as _gd
         joint_model = _jm
         glacier_dataset = _gd
 

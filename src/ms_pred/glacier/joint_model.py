@@ -21,7 +21,7 @@ import ms_pred.common as common
 from LinSATNet import linsat_layer, init_constraints
 import math
 import numpy as np
-from ms_pred.GLACIER.dataset import TreeProcessor
+from ms_pred.glacier.dataset import TreeProcessor
 import dgl
 from rdkit import Chem  # type: ignore
 import functools
@@ -116,6 +116,7 @@ class JointModel(pl.LightningModule):
             multi_hop_max_dist=multi_hop_max_dist,
         )
 
+        adduct_shift = 0
         if self.embed_adduct:
             adduct_types = len(set(common.ion2onehot_pos.values()))
             onehot_types = torch.eye(adduct_types)
@@ -169,6 +170,7 @@ class JointModel(pl.LightningModule):
             activation_dropout=self.graphormer_dropout,
             apply_graphormer_init=True,
         )
+        self.formula_in_dim = 0
         if self.encode_forms:
             self.embedder = nn_utils.get_embedder("abs-sines")
             self.formula_dim = common.NORM_VEC.shape[0]
