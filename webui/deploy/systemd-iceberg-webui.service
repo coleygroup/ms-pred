@@ -8,10 +8,60 @@ User=USER
 Group=USER
 WorkingDirectory=/path/to/ms-pred/webui
 
-# All environment variables (paths, secrets, SMTP) live in this file,
-# which is owned by USER and never committed to git.
-# Copy deploy/iceberg-webui-env.example to ~/.iceberg-webui-env and fill it in.
-EnvironmentFile=/home/USER/.iceberg-webui-env
+# ── Required ──────────────────────────────────────────────────────────────────
+
+# Flask session signing key — generate with: python -c "import secrets; print(secrets.token_hex(32))"
+Environment="FLASK_SECRET_KEY=REPLACE_ME"
+
+# Path to the public ICEBERG atlas (contains h_plus_out_mgf/ and h_minus_out_mgf/)
+Environment="MSPRED_ATLAS_DIR=/path/to/atlas"
+
+# Directory for temporary prediction job files
+Environment="MSPRED_JOB_DIR=/path/to/ms_pred_jobs"
+
+# ── User authentication ────────────────────────────────────────────────────────
+
+# YAML file mapping email → {password, role, created}.
+# Roles: admin | authorized_user (NIST access) | user (public atlas only)
+# Manage users via the /admin dashboard once the service is running.
+Environment="ICEBERG_USERS_FILE=/path/to/iceberg_users.yaml"
+
+# Comma-separated emails that always have admin access, even if not in the YAML
+# (safety net in case the file is lost or misconfigured)
+Environment="ICEBERG_ADMIN_EMAILS=admin@example.com"
+
+# ── NIST'23 atlas (optional) ──────────────────────────────────────────────────
+
+# Path to the NIST'23 atlas tree (same layout as MSPRED_ATLAS_DIR).
+# Only visible to users with role admin or authorized_user.
+# Build with: run_scripts/iceberg_atlas/01_generate_nist_task_tsv.py → 02 → 03 → 04
+# Environment="MSPRED_ATLAS_DIR_NIST=/path/to/atlas_nist"
+
+# ── Analytics (optional) ──────────────────────────────────────────────────────
+
+# SQLite database for request logging and the admin traffic dashboard.
+# Defaults to analytics.db in the same directory as ICEBERG_USERS_FILE if unset.
+# Environment="ICEBERG_ANALYTICS_DB=/path/to/analytics.db"
+
+# MaxMind GeoLite2-City database for the geo-IP visitor map on the admin dashboard.
+# Download free (requires free account) at:
+#   https://dev.maxmind.com/geoip/geolite2-free-geolocation-data
+# Environment="GEOIP_DB=/path/to/GeoLite2-City.mmdb"
+
+# ── SMTP email (optional) ─────────────────────────────────────────────────────
+
+# Used to email new users their login credentials when added via the admin dashboard.
+# If unconfigured, the dashboard displays the generated password on-screen instead.
+#
+# Gmail example (use an App Password — https://myaccount.google.com/apppasswords):
+# Environment="SMTP_HOST=smtp.gmail.com"
+# Environment="SMTP_PORT=587"
+# Environment="SMTP_USER=your-account@gmail.com"
+# Environment="SMTP_FROM=your-account@gmail.com"
+# Environment="SMTP_USE_TLS=true"
+# Environment="SMTP_PASSWORD=your-16-char-app-password"
+
+# ── Server ────────────────────────────────────────────────────────────────────
 
 ExecStart=/path/to/miniforge3/envs/ms-gen/bin/gunicorn \
   -w 2 -k gthread --threads 8 \
