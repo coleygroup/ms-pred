@@ -353,19 +353,23 @@ def inchikey_in_mgf(mgf_path: Path, inchikey: str) -> bool:
     """
     Cheap existence check.  When an .idx sidecar is present, this is O(1)
     (key lookup in the loaded JSON).  Falls back to a full line-scan otherwise.
+
+    Matches on the 2D connectivity layer only (first 14 chars of the InChIKey)
+    so that stereo-unspecified queries find stereo-specific atlas entries.
     """
     if not inchikey:
         return False
 
+    prefix = inchikey[:14]
     idx = _load_mgf_index(mgf_path)
     if idx is not None:
-        return inchikey in idx
+        return any(k.startswith(prefix) for k in idx)
 
-    needle = f"INCHIKEY={inchikey}"
+    needle_prefix = f"INCHIKEY={prefix}"
     try:
         with open(mgf_path, "r") as f:
             for line in f:
-                if needle in line:
+                if line.rstrip().startswith(needle_prefix):
                     return True
     except OSError:
         return False
@@ -381,17 +385,25 @@ def extract_mgf_blocks_by_inchikey(
     Fast path: if a .idx sidecar exists, seeks directly to each block's byte
     range (O(1) per block) instead of scanning the whole file.
     Fallback: full single-pass line scan when no sidecar is available.
+
+    Matches on the 2D connectivity layer only (first 14 chars of the InChIKey)
+    so that stereo-unspecified queries find stereo-specific atlas entries.
     """
+    prefix = inchikey[:14]
+
     # ---- indexed fast path --------------------------------------------------
     idx = _load_mgf_index(mgf_path)
     if idx is not None:
-        ranges = idx.get(inchikey)
-        if not ranges:
+        all_ranges = []
+        for k, v in idx.items():
+            if k.startswith(prefix):
+                all_ranges.extend(v)
+        if not all_ranges:
             return []
         blocks: List[Tuple[Dict[str, str], np.ndarray]] = []
         try:
             with open(mgf_path, "rb") as f:
-                for offset, length in ranges:
+                for offset, length in all_ranges:
                     f.seek(offset)
                     chunk = f.read(length).decode("utf-8", errors="replace")
                     meta, peaks = _parse_mgf_block_text(chunk)
@@ -402,7 +414,7 @@ def extract_mgf_blocks_by_inchikey(
         return blocks
 
     # ---- full-scan fallback -------------------------------------------------
-    needle = f"INCHIKEY={inchikey}"
+    needle_prefix = f"INCHIKEY={prefix}"
     blocks_scan: List[Tuple[Dict[str, str], np.ndarray]] = []
 
     in_block = False
@@ -431,7 +443,7 @@ def extract_mgf_blocks_by_inchikey(
             if "=" in line and not line[0].isdigit():
                 k, _, v = line.partition("=")
                 meta[k] = v
-                if line == needle:
+                if line.startswith(needle_prefix):
                     matches = True
                 continue
             # peak row
