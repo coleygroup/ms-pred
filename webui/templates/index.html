@@ -464,6 +464,79 @@
             color: #6b7280;
             margin-top: 0.1rem;
         }
+
+        /* ---- Explore tab: collision-energy controls ---- */
+        #smi-ce-controls {
+            margin-top: 0.75rem;
+            display: none;   /* shown via JS after a successful query */
+            gap: 0.75rem;
+            align-items: center;
+            flex-wrap: wrap;
+            font-size: 0.85rem;
+            color: #374151;
+        }
+        #smi-ce-controls label {
+            display: inline;
+            font-weight: 500;
+            margin-bottom: 0;
+            color: #374151;
+        }
+        #smi-ce-select {
+            width: auto;
+            padding: 0.3rem 0.5rem;
+            font-size: 0.85rem;
+        }
+        #smi-topk {
+            width: 80px;
+        }
+        #smi-topk-val {
+            font-weight: 600;
+            min-width: 1.5rem;
+        }
+
+        /* ---- Explore tab: substructure fragment overlays ---- */
+        #smi-overlay-container {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+        .smi-fragment-overlay {
+            position: absolute;
+            width: 80px;
+            background: transparent;
+            border-radius: 0.6rem;
+            border: 1px solid transparent;
+            padding: 0;
+            pointer-events: auto;
+            cursor: pointer;
+            z-index: 2;
+            transition: transform 0.15s ease, border-color 0.15s ease,
+                        background-color 0.15s ease;
+        }
+        .smi-fragment-overlay:hover {
+            border-color: #d1d5db;
+        }
+        .smi-fragment-overlay.active {
+            transform: scale(1.1);
+            border-color: #2563eb;
+            background: rgba(255, 255, 255, 0.85);
+            z-index: 3;
+        }
+        .smi-fragment-overlay-label {
+            font-size: 0.7rem;
+            font-weight: 600;
+            text-align: center;
+            margin-bottom: 0.15rem;
+            color: #111827;
+        }
+        .smi-fragment-overlay svg {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
     </style>
 
     <script>
@@ -2793,12 +2866,26 @@
         // Palette aligned with the mirror plot used elsewhere on this page.
         const PEAK_COLOR = "#58595B";          // neutral dark gray
         const PEAK_COLOR_CLICKABLE = "#58595B"; // same; clickability shown via cursor + tooltip
-        const PEAK_COLOR_SELECTED = "#059669"; // emerald-600, high contrast vs #58595B
+        const PEAK_COLOR_SELECTED = "#2563eb"; // blue, matches overlay hover highlight
         const AXIS_COLOR = "#374151";
         const TEXT_COLOR = "#374151";
 
         let selectedPeakIdx = -1;
         const peakNodeRefs = []; // populated per render: array of { line, fragId, mz }
+
+        // ---- CE-browsing + overlay state ----
+        const ceControlsEl = document.getElementById("smi-ce-controls");
+        const ceSelectEl   = document.getElementById("smi-ce-select");
+        const topKInput    = document.getElementById("smi-topk");
+        const topKValEl    = document.getElementById("smi-topk-val");
+        const overlayContainerEl = document.getElementById("smi-overlay-container");
+
+        let exploreSmiles       = "";
+        let exploreFormula      = "";
+        let exploreInchikey     = "";
+        let explorePredSpectra  = [];   // [{collision_energy_ev, peaks:[…]}, …]
+        let exploreFragCache    = new Map();
+        let currentPrecursorMz  = null;
 
         function escapeHtml(s) {
             return String(s == null ? "" : s)
@@ -2889,11 +2976,241 @@
             plotWrapper.style.minHeight = "";
         }
 
+        // ---- CE-browsing + overlay helpers ----------------------------------------
+
+        // Return the top-K intensity-ranked peaks with unique frag_ids.
+        // peaks: [[mz, inten, fragId], …] (raw array format from backend)
+        function computeExploreTopK(peaks, k) {
+            const enriched = [];
+            for (const p of peaks) {
+                const mz = Number(p[0]), inten = Number(p[1]), fragId = p[2];
+                if (fragId == null || !Number.isFinite(mz) || !Number.isFinite(inten) || inten <= 0) continue;
+                enriched.push({ mz, inten, frag_id: fragId });
+            }
+            enriched.sort((a, b) => b.inten - a.inten);
+            const result = [], seen = new Set();
+            for (const p of enriched) {
+                const key = String(p.frag_id);
+                if (seen.has(key)) continue;
+                seen.add(key);
+                result.push(p);
+                if (result.length >= k) break;
+            }
+            return result;
+        }
+
+        // Fetch + cache a fragment SVG thumbnail (strips RDKit highlight artefacts).
+        async function fetchExploreFragSvg(fragId) {
+            const key = String(fragId);
+            if (exploreFragCache.has(key)) return exploreFragCache.get(key);
+            const resp = await fetch("/fragment_svg", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ smiles: exploreSmiles, frag_id: parseInt(key, 10) }),
+            });
+            if (!resp.ok) {
+                const errJson = await resp.json().catch(() => null);
+                throw new Error(errJson && errJson.error ? errJson.error : `HTTP ${resp.status}`);
+            }
+            const data = await resp.json();
+            if (!data.svg) throw new Error("No SVG returned.");
+            let svg = String(data.svg);
+            svg = svg.replace(/<rect[^>]*\/?>/gi, "");
+            svg = svg.replace(
+                /<path([^>]*?)style="([^"]*?)fill:\s*#ff7f7f([^"]*?)"([^>]*)>[\s\S]*?<\/path>/gi, "");
+            svg = svg.replace(
+                /<ellipse([^>]*?)style="([^"]*?)fill:\s*#ff7f7f([^"]*?)"[^>]*\/>/gi, "");
+            svg = svg.replace(/stroke:\s*#ff7f7f/gi, "stroke:none");
+            exploreFragCache.set(key, svg);
+            return svg;
+        }
+
+        // Highlight/unhighlight a peak + its overlay by frag_id.
+        function highlightExplorePeak(fragIdStr, active) {
+            const svgEl = plotContainer.querySelector("svg");
+            if (svgEl) {
+                svgEl.querySelectorAll(`line[data-frag-id="${fragIdStr}"]`).forEach(l => {
+                    l.setAttribute("stroke", active ? "#2563eb" : PEAK_COLOR_CLICKABLE);
+                    l.setAttribute("stroke-width", active ? "2.5" : "1.5");
+                });
+            }
+            if (overlayContainerEl) {
+                overlayContainerEl.querySelectorAll(".smi-fragment-overlay").forEach(ov => {
+                    const isMatch = ov.getAttribute("data-frag-id") === fragIdStr;
+                    if (isMatch) {
+                        if (active) ov.classList.add("active");
+                        else ov.classList.remove("active");
+                    } else if (active) {
+                        ov.classList.remove("active");
+                    }
+                });
+            }
+        }
+
+        // Position a single overlay div just above the tip of its matching peak line.
+        function positionExploreOverlay(overlay) {
+            if (!overlayContainerEl) return;
+            const svgEl = plotContainer.querySelector("svg");
+            if (!svgEl) return;
+            const fragIdStr = overlay.getAttribute("data-frag-id");
+            const mzStr = overlay.getAttribute("data-mz");
+            const targetMz = mzStr ? parseFloat(mzStr) : NaN;
+
+            const lines = svgEl.querySelectorAll(`line[data-frag-id="${fragIdStr}"]`);
+            if (!lines.length) return;
+
+            let targetLine = lines[0];
+            let bestDelta = Infinity;
+            lines.forEach(line => {
+                const v = parseFloat(line.getAttribute("data-mz") || "NaN");
+                const d = Math.abs(v - targetMz);
+                if (Number.isFinite(d) && d < bestDelta) { bestDelta = d; targetLine = line; }
+            });
+
+            const containerRect = overlayContainerEl.getBoundingClientRect();
+            const lineRect = targetLine.getBoundingClientRect();
+            const overlayRect = overlay.getBoundingClientRect();
+            const margin = 4;
+
+            let left = (lineRect.left - containerRect.left) - overlayRect.width / 2;
+            if (left < 0) left = 0;
+            // lineRect.top is the peak tip (SVG y2, the top of the bar)
+            let top = (lineRect.top - containerRect.top) - overlayRect.height - margin;
+            if (top < margin) top = margin;
+
+            overlay.style.left = left + "px";
+            overlay.style.top  = top  + "px";
+        }
+
+        // Build all overlay thumbnails for the current CE entry.
+        async function buildExploreOverlays(peaks) {
+            if (!overlayContainerEl) return;
+            overlayContainerEl.innerHTML = "";
+            const k = topKInput ? (parseInt(topKInput.value, 10) || 0) : 0;
+            if (k === 0 || !exploreSmiles) return;
+
+            const annots = computeExploreTopK(peaks, k);
+            if (!annots.length) return;
+
+            for (const a of annots) {
+                const fragIdStr = String(a.frag_id);
+                const mzStr = a.mz.toFixed(4);
+                let svg = null;
+                try { svg = await fetchExploreFragSvg(a.frag_id); }
+                catch (err) { console.error("Fragment SVG fetch error:", err); }
+
+                const ov = document.createElement("div");
+                ov.className = "smi-fragment-overlay";
+                ov.setAttribute("data-frag-id", fragIdStr);
+                ov.setAttribute("data-mz", mzStr);
+
+                const lbl = document.createElement("div");
+                lbl.className = "smi-fragment-overlay-label";
+                lbl.textContent = mzStr;
+                ov.appendChild(lbl);
+
+                if (svg) {
+                    const wrap = document.createElement("div");
+                    wrap.innerHTML = svg;
+                    ov.appendChild(wrap);
+                }
+
+                overlayContainerEl.appendChild(ov);
+                positionExploreOverlay(ov);  // element must be in DOM first
+
+                ov.addEventListener("mouseenter", () => highlightExplorePeak(fragIdStr, true));
+                ov.addEventListener("mouseleave", () => highlightExplorePeak(fragIdStr, false));
+                ov.addEventListener("click", () => {
+                    fetchFragment(exploreSmiles, a.frag_id, a.mz, adductSel.value, fragPane, fragTitle);
+                    highlightExplorePeak(fragIdStr, true);
+                    // Also show & position the fragment detail panel under the peak bar.
+                    const svgEl = plotContainer.querySelector("svg");
+                    if (svgEl) {
+                        const matchLine = svgEl.querySelector(`line[data-frag-id="${fragIdStr}"]`);
+                        if (matchLine) positionFragNearPeak(matchLine);
+                    }
+                });
+            }
+        }
+
+        // Draw the spectrum for the currently-selected collision energy and rebuild overlays.
+        function renderExploreCE() {
+            if (!explorePredSpectra.length) return;
+            const ceEv = ceSelectEl ? parseFloat(ceSelectEl.value) : NaN;
+            const entry = Number.isFinite(ceEv)
+                ? (explorePredSpectra.find(s => s.collision_energy_ev === ceEv) || explorePredSpectra[0])
+                : explorePredSpectra[0];
+            if (!entry) return;
+            drawSpectrumSVG(entry.peaks, exploreSmiles, adductSel.value, currentPrecursorMz);
+            buildExploreOverlays(entry.peaks);
+        }
+
+        // Bind CE dropdown, top-K slider, and download button (once, survive re-queries).
+        if (ceSelectEl)  ceSelectEl.addEventListener("change", renderExploreCE);
+        const downloadBtn = document.getElementById("smi-download-btn");
+        if (downloadBtn) downloadBtn.addEventListener("click", downloadSpectraMs);
+        if (topKInput && topKValEl) {
+            topKInput.addEventListener("input", () => {
+                topKValEl.textContent = topKInput.value;
+                // Rebuild overlays for the current CE without redrawing the spectrum.
+                if (explorePredSpectra.length && ceSelectEl) {
+                    const ceEv = parseFloat(ceSelectEl.value);
+                    const entry = explorePredSpectra.find(s => s.collision_energy_ev === ceEv)
+                                  || explorePredSpectra[0];
+                    if (entry) buildExploreOverlays(entry.peaks);
+                }
+            });
+        }
+
         window.addEventListener("resize", () => {
             if (selectedPeakIdx >= 0 && peakNodeRefs[selectedPeakIdx]) {
                 positionFragNearPeak(peakNodeRefs[selectedPeakIdx].line);
             }
+            // Reposition fragment overlays after layout reflow.
+            if (overlayContainerEl) {
+                overlayContainerEl.querySelectorAll(".smi-fragment-overlay").forEach(ov => {
+                    positionExploreOverlay(ov);
+                });
+            }
         });
+
+        // ---- .ms export ----
+        function downloadSpectraMs() {
+            if (!explorePredSpectra.length) return;
+            const adduct = adductSel.value;
+            const lines = [];
+            lines.push(">compound " + (exploreInchikey || exploreSmiles || "predicted"));
+            if (exploreFormula)     lines.push(">formula "     + exploreFormula);
+            if (exploreSmiles)      lines.push(">smiles "      + exploreSmiles);
+            if (currentPrecursorMz != null)
+                lines.push(">parentmass " + currentPrecursorMz.toFixed(4));
+            lines.push(">ionization " + adduct);
+
+            for (const entry of explorePredSpectra) {
+                if (!entry.peaks || !entry.peaks.length) continue;
+                // Normalize intensities to 0–999 per CE block.
+                const maxI = Math.max(...entry.peaks.map(p => Number(p[1]) || 0)) || 1;
+                lines.push("");
+                lines.push(">collision energy " + entry.collision_energy_ev.toFixed(0));
+                lines.push(">ms2peaks");
+                for (const p of entry.peaks) {
+                    const mz    = Number(p[0]);
+                    const inten = Number(p[1]) / maxI * 999;
+                    if (!Number.isFinite(mz) || inten <= 0) continue;
+                    lines.push(mz.toFixed(4) + " " + inten.toFixed(2));
+                }
+            }
+
+            const blob = new Blob([lines.join("\n") + "\n"], { type: "text/plain" });
+            const url  = URL.createObjectURL(blob);
+            const a    = document.createElement("a");
+            a.href     = url;
+            // Sanitize adduct for use in filename: strip brackets and special chars.
+            const adductTag = adduct.replace(/[\[\]]/g, "").replace(/[^A-Za-z0-9+\-]/g, "");
+            a.download = (exploreInchikey || "predicted_spectrum") + "_" + adductTag + ".ms";
+            a.click();
+            URL.revokeObjectURL(url);
+        }
 
         function drawSpectrumSVG(peaks, smiles, adduct, precursorMz) {
             plotContainer.innerHTML = "";
@@ -2906,7 +3223,7 @@
                 return;
             }
 
-            const W = 720, H = 280, padL = 50, padR = 14, padT = 14, padB = 36;
+            const W = 960, H = 300, padL = 50, padR = 14, padT = 14, padB = 36;
             const plotW = W - padL - padR;
             const plotH = H - padT - padB;
 
@@ -2932,7 +3249,7 @@
             const svg = document.createElementNS(svgNS, "svg");
             svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
             svg.setAttribute("width", "100%");
-            svg.style.maxWidth = W + "px";
+            svg.style.maxWidth = "100%";
             svg.style.border = "1px solid #e5e7eb";
             svg.style.background = "#ffffff";
 
@@ -3035,6 +3352,10 @@
                 line.setAttribute("y1", baseY); line.setAttribute("y2", y);
                 line.setAttribute("stroke", fragId != null ? PEAK_COLOR_CLICKABLE : PEAK_COLOR);
                 line.setAttribute("stroke-width", "1.5");
+                if (fragId != null) {
+                    line.setAttribute("data-frag-id", String(fragId));
+                    line.setAttribute("data-mz", mz.toFixed(4));
+                }
                 g.appendChild(line);
 
                 // wider invisible hit target for clicks
@@ -3134,7 +3455,7 @@
                     molImg.src = "/mol_png?smiles=" + encodeURIComponent(data.canonical_smiles || canonicalSmiles);
                     molImg.alt = data.canonical_smiles || canonicalSmiles;
                     fragTitle.textContent = "Selected fragment";
-                    fragPane.innerHTML = '<div style="font-size:0.75rem; color:#9ca3af; text-align:center; padding:0.5rem;">Click a peak to see its fragment.</div>';
+                    fragPane.innerHTML = '<div style="font-size:0.75rem; color:#9ca3af; text-align:center; padding:0.5rem;">Click a peak or a substructure thumbnail to see its fragment.</div>';
                     hideFragAnchor();
 
                     const cesStr = (data.available_ces || []).map((c) => c.toFixed(0)).join(", ");
@@ -3170,8 +3491,34 @@
                         ceWarnEl.style.display = "none";
                     }
 
-                    const peaks = (data.pred_spectrum && data.pred_spectrum.peaks) || [];
-                    drawSpectrumSVG(peaks, data.canonical_smiles || canonicalSmiles, data.adduct, data.precursor_mz);
+                    // Store state for CE-browsing + overlay features.
+                    exploreSmiles      = data.canonical_smiles || canonicalSmiles;
+                    exploreFormula     = data.formula || "";
+                    exploreInchikey    = data.inchikey || "";
+                    currentPrecursorMz = data.precursor_mz != null ? data.precursor_mz : null;
+                    explorePredSpectra = (data.pred_spectra || []).slice().sort(
+                        (a, b) => a.collision_energy_ev - b.collision_energy_ev);
+                    // Fall back to the single-CE payload for older server builds.
+                    if (!explorePredSpectra.length && data.pred_spectrum) {
+                        explorePredSpectra = [data.pred_spectrum];
+                    }
+                    exploreFragCache = new Map();  // reset cache per-compound
+
+                    // Populate CE dropdown.
+                    if (ceSelectEl && ceControlsEl) {
+                        ceSelectEl.innerHTML = "";
+                        const matchedCe = data.matched_ce_ev;
+                        explorePredSpectra.forEach(s => {
+                            const opt = document.createElement("option");
+                            opt.value = s.collision_energy_ev;
+                            opt.textContent = s.collision_energy_ev.toFixed(0) + " eV";
+                            if (s.collision_energy_ev === matchedCe) opt.selected = true;
+                            ceSelectEl.appendChild(opt);
+                        });
+                        ceControlsEl.style.display = explorePredSpectra.length ? "flex" : "none";
+                    }
+
+                    renderExploreCE();
                 })
                 .catch((err) => {
                     showError(err.message || String(err));
@@ -3670,7 +4017,8 @@
         <p style="margin-top:0; font-size:0.85rem; color:#6b7280;">
             Search by SMILES, compound name, InChI, InChIKey, or PubChem CID to view
             ICEBERG-predicted spectra from the precomputed atlas.
-            Click a peak to see the predicted fragment.
+            Browse collision energies, hover substructure thumbnails to highlight peaks,
+            and click a peak or thumbnail to see the predicted fragment.
         </p>
         <div class="row">
             <div>
@@ -3732,7 +4080,21 @@
                     <div id="smi-ce-warning" style="display:none; margin-top:0.5rem; padding:0.5rem; background:#fef3c7; color:#92400e; font-size:0.85rem; border-radius:4px;"></div>
                 </div>
             </div>
+            <!-- CE selector + top-K overlay controls (hidden until a query succeeds) -->
+            <div id="smi-ce-controls">
+                <label for="smi-ce-select">Collision energy:</label>
+                <select id="smi-ce-select"></select>
+                <label for="smi-topk">Fragments:</label>
+                <input type="range" id="smi-topk" min="0" max="10" value="5">
+                <span id="smi-topk-val">5</span>
+                <button type="button" class="btn btn-secondary btn-sm" id="smi-download-btn"
+                        style="margin-left:auto;" title="Download all collision energies as .ms">
+                    &#8595; Download .ms
+                </button>
+            </div>
+
             <div id="smi-plot-wrapper" style="position:relative; margin-top:0.75rem;">
+                <div id="smi-overlay-container"></div>
                 <div id="smi-plot-container"></div>
                 <div id="smi-frag-anchor" style="position:absolute; width:220px; display:none;">
                     <div id="smi-frag-title" style="font-size:0.8rem; color:#6b7280; margin-bottom:0.25rem;">Selected fragment</div>

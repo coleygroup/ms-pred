@@ -2436,6 +2436,7 @@ def api_query_smiles():
             f"showing closest available ({matched_ce:d} eV)."
         )
 
+    pred_spectra = serialize_pred_spectra_for_frontend(lib_specs)   # all CEs
     single = CompositeMassSpec([best_ms])
     payload_list = serialize_pred_spectra_for_frontend(single)
     pred_spectrum = payload_list[0] if payload_list else None
@@ -2452,6 +2453,7 @@ def api_query_smiles():
         "matched_ce_ev": matched_ce,
         "available_ces": available_ces,
         "ce_warning": ce_warning,
+        "pred_spectra": pred_spectra,
         "pred_spectrum": pred_spectrum,
         "library_meta": {
             "SMILES": rep_meta.get("SMILES", "") if rep_meta else "",
