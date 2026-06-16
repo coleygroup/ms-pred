@@ -3210,6 +3210,7 @@
             a.download = (exploreInchikey || "predicted_spectrum") + "_" + adductTag + ".ms";
             a.click();
             URL.revokeObjectURL(url);
+            try { navigator.sendBeacon("/api/event/download_ms"); } catch (e) {}
         }
 
         function drawSpectrumSVG(peaks, smiles, adduct, precursorMz) {
@@ -3730,6 +3731,10 @@
                             }
                         }
                     }
+                    // Record PubChem bookmarklet arrivals (the bookmarklet appends &src=pubchem).
+                    if (params.src === "pubchem") {
+                        try { navigator.sendBeacon("/api/event/bookmarklet"); } catch (e) {}
+                    }
                     // Trigger the lookup after a short delay so the tab panel is
                     // visible and the click listener is attached before we fire.
                     if (lookupBtn) setTimeout(function() { lookupBtn.click(); }, 50);
@@ -4190,7 +4195,7 @@
                 <!-- Draggable button + caption -->
                 <div style="text-align:center; margin:0.5rem 0 0.25rem;">
                     <a class="bookmarklet-btn"
-                       href="javascript:(function(){var m=location.pathname.match(/\/compound\/(\d+)/);if(m){window.open('https://iceberg-ms.mit.edu/#explore?query='+m[1]+'&query_type=cid');}else{alert('No PubChem CID found in this page URL.');}})();"
+                       href="javascript:(function(){var m=location.pathname.match(/\/compound\/(\d+)/);if(m){window.open('https://iceberg-ms.mit.edu/#explore?query='+m[1]+'&query_type=cid&src=pubchem');}else{var n=location.pathname.match(/\/compound\/([^\/\?#]+)/);if(n){window.open('https://iceberg-ms.mit.edu/#explore?query='+encodeURIComponent(n[1])+'&query_type=name&src=pubchem');}else{alert('No PubChem compound found in this page URL.');}}})();"
                        onclick="return false;"
                        draggable="true"
                        title="Drag me to your bookmarks bar">
@@ -4215,7 +4220,7 @@
                         </ol>
                         <pre style="background:#f3f4f6; border:1px solid #e5e7eb; border-radius:0.4rem;
                                     padding:0.6rem 0.8rem; font-size:0.72rem; overflow-x:auto;
-                                    white-space:pre-wrap; word-break:break-all; margin:0;">javascript:(function(){var m=location.pathname.match(/\/compound\/(\d+)/);if(m){window.open('https://iceberg-ms.mit.edu/#explore?query='+m[1]+'&amp;query_type=cid');}else{alert('No PubChem CID found in this page URL.');}})();</pre>
+                                    white-space:pre-wrap; word-break:break-all; margin:0;">javascript:(function(){var m=location.pathname.match(/\/compound\/(\d+)/);if(m){window.open('https://iceberg-ms.mit.edu/#explore?query='+m[1]+'&amp;query_type=cid&amp;src=pubchem');}else{var n=location.pathname.match(/\/compound\/([^\/\?#]+)/);if(n){window.open('https://iceberg-ms.mit.edu/#explore?query='+encodeURIComponent(n[1])+'&amp;query_type=name&amp;src=pubchem');}else{alert('No PubChem compound found in this page URL.');}}})();</pre>
                     </div>
                 </details>
 

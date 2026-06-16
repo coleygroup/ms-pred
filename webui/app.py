@@ -1459,6 +1459,22 @@ def _log_request(response):
     return response
 
 
+def _classify_action(path: str, method: str) -> Optional[str]:
+    """Map a logged request to a human-readable user action, or None to exclude as noise."""
+    if path == "/api/query_smiles":         return "Explore atlas (structure → spectrum)"
+    if path == "/api/resolve_query":        return "Compound lookup (name / InChI / CID)"
+    if path == "/api/retrieve_start":       return "Spectrum → structure retrieval"
+    if path == "/download_mgf":             return "Download predicted spectra (.mgf)"
+    if path == "/api/event/download_ms":    return "Download spectra (.ms)"
+    if path == "/upload_ms":                return "Upload experimental spectrum"
+    if path == "/load_example_ms":          return "Load example spectrum"
+    if path == "/fragment_svg":             return "View fragment substructure"
+    if path.startswith("/result/"):         return "View retrieval results"
+    if path == "/api/event/bookmarklet":    return "PubChem bookmarklet arrival"
+    if path == "/" and method == "GET":     return "Home page visit"
+    return None  # noise: /mol_png, /api/retrieve_progress/*, /login, /admin/*, etc.
+
+
 def _is_private_ip(ip: str) -> bool:
     """Return True for loopback/private/link-local IPs."""
     try:
@@ -1725,6 +1741,23 @@ def admin_set_role():
 
 
 # ---------------------------------------------------------------------------
+# Client-side event beacons
+# ---------------------------------------------------------------------------
+
+@app.route("/api/event/<event>", methods=["POST"])
+def api_log_event(event: str):
+    """Lightweight no-op endpoint so the after_request hook can log client-side events.
+
+    Client code fires navigator.sendBeacon('/api/event/<event>') for actions that never
+    produce a server request on their own (e.g. the Explore .ms download, bookmarklet
+    arrivals). The path /api/event/<event> is recorded in the analytics DB by _log_request.
+    """
+    if event not in {"download_ms", "bookmarklet"}:
+        return ("", 400)
+    return ("", 204)
+
+
+# ---------------------------------------------------------------------------
 # Admin analytics API
 # ---------------------------------------------------------------------------
 
@@ -1747,14 +1780,28 @@ def admin_api_stats():
             (f"-{days}",),
         )
         daily = [{"day": r[0], "requests": r[1], "unique_ips": r[2]} for r in cur.fetchall()]
-        # Top paths
+        # Top actions (grouped by path+method+ip so unique visitors are exact per action)
         cur = conn.execute(
-            """SELECT path, COUNT(*) AS n FROM requests
+            """SELECT path, method, ip, COUNT(*) AS n
+               FROM requests
                WHERE ts >= datetime('now', ? || ' days')
-               GROUP BY path ORDER BY n DESC LIMIT 20""",
+               GROUP BY path, method, ip""",
             (f"-{days}",),
         )
-        top_paths = [{"path": r[0], "count": r[1]} for r in cur.fetchall()]
+        buckets: Dict[str, Any] = {}
+        for path, method, ip, n in cur.fetchall():
+            label = _classify_action(path, method)
+            if label is None:
+                continue
+            b = buckets.setdefault(label, {"count": 0, "ips": set()})
+            b["count"] += n
+            if ip:
+                b["ips"].add(ip)
+        top_actions = sorted(
+            ({"action": k, "count": v["count"], "visitors": len(v["ips"])}
+             for k, v in buckets.items()),
+            key=lambda d: d["count"], reverse=True,
+        )
         # Top countries
         cur = conn.execute(
             """SELECT g.country, COUNT(*) AS n
@@ -1764,7 +1811,7 @@ def admin_api_stats():
             (f"-{days}",),
         )
         top_countries = [{"country": r[0], "count": r[1]} for r in cur.fetchall()]
-        return jsonify({"daily": daily, "top_paths": top_paths, "top_countries": top_countries})
+        return jsonify({"daily": daily, "top_actions": top_actions, "top_countries": top_countries})
     finally:
         conn.close()
 

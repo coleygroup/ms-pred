@@ -233,10 +233,17 @@
             <canvas id="chart-requests" height="200"></canvas>
         </div>
         <div class="chart-card">
-            <h3>Top paths</h3>
+            <h3>User actions</h3>
             <div class="table-wrap" style="margin-bottom:0;">
-                <table class="top-table" id="top-paths-table">
-                    <tbody><tr><td colspan="2" style="color:#9ca3af;">Loading…</td></tr></tbody>
+                <table class="top-table" id="actions-table">
+                    <thead>
+                        <tr>
+                            <th style="text-align:left; font-weight:600; color:#374151; padding-bottom:0.25rem;">Action</th>
+                            <th style="text-align:right; font-weight:600; color:#374151; padding-bottom:0.25rem;">Requests</th>
+                            <th style="text-align:right; font-weight:600; color:#374151; padding-bottom:0.25rem;">Visitors</th>
+                        </tr>
+                    </thead>
+                    <tbody><tr><td colspan="3" style="color:#9ca3af;">Loading…</td></tr></tbody>
                 </table>
             </div>
         </div>
@@ -363,6 +370,21 @@
         ).join('');
     }
 
+    function updateActionsTable(rows) {
+        const tbody = document.querySelector('#actions-table tbody');
+        if (!rows || rows.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="3" style="color:#9ca3af;">No data yet.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map(r =>
+            `<tr>` +
+            `<td>${escHtml(String(r.action))}</td>` +
+            `<td style="text-align:right;">${r.count}</td>` +
+            `<td style="text-align:right;">${r.visitors}</td>` +
+            `</tr>`
+        ).join('');
+    }
+
     function escHtml(s) {
         return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     }
@@ -379,7 +401,7 @@
                 chartIps.data.labels = data.daily.map(d => d.day);
                 chartIps.data.datasets[0].data = data.daily.map(d => d.unique_ips);
                 chartIps.update();
-                updateTable('top-paths-table', data.top_paths, 'path', 'count');
+                updateActionsTable(data.top_actions);
                 updateTable('top-countries-table', data.top_countries, 'country', 'count');
             })
             .catch(() => {});
