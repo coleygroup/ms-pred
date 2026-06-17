@@ -1,5 +1,5 @@
 launcher_args: {experiment_name: joint_train_nist20,
-  script_name: "src/ms_pred/GLACIER/train_contr_joint.py",
+  script_name: "src/ms_pred/glacier/train_contr_joint.py",
   slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,
   visible_devices: [0, 1]

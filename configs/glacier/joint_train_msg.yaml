@@ -1,14 +1,14 @@
 launcher_args: {experiment_name: joint_train_msg,
-  script_name: "src/ms_pred/GLACIER/train_joint.py",
+  script_name: "src/ms_pred/glacier/train_joint.py",
   slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,
-  visible_devices: [2]
+  visible_devices: [0]
 }
 universal_args:
   _slurm_args:
   - {_num_gpu: 1, cpus-per-task: 7, job-name: joint_train, mem-per-cpu: 8G,
     time: '1-12:00:00'}
-  debug: [False]
+  debug: [false]
   gpu: [true]
 
   seed: [1]

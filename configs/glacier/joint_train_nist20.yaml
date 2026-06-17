@@ -1,5 +1,5 @@
-launcher_args: {experiment_name: joint_train_msg,
-  script_name: "src/ms_pred/GLACIER/train_contr_joint.py",
+launcher_args: {experiment_name: joint_train_nist20,
+  script_name: "src/ms_pred/glacier/train_joint.py",
   slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,
   visible_devices: [0, 1]
@@ -8,7 +8,7 @@ universal_args:
   _slurm_args:
   - {_num_gpu: 1, cpus-per-task: 7, job-name: joint_train, mem-per-cpu: 8G,
     time: '1-12:00:00'}
-  debug: [False]
+  debug: [false]
   gpu: [true]
 
   seed: [1]
@@ -17,24 +17,20 @@ universal_args:
   max-epochs: [200]
   min-epochs: [20]
 
-  dataset-name: [msg]
-  split-name: [split.tsv]
+  dataset-name: [nist20]
   dataset-labels: [labels.tsv]
   magma-folder: [magma_outputs]
+  split-name: [split_1.tsv]
 
-  learning-rate: [0.00027]
+  learning-rate: [0.0004]
   lr-decay-rate: [0.9]
   weight-decay: [0]
-  grad-accumulate: [1]
 
   inten-dropout: [0.1]
   frag-dropout: [0.1]
   hidden-size: [256]
   graphormer-layers: [5]
   graphormer-dropout: [0.1]
-  num-decoys: [5]
-  num-fixed-decoys: [5]
-  all-decoy-nums: [20]
   embed-elem-group: [True]
   add-hs: [True]
   embed-adduct: [True]
@@ -49,6 +45,7 @@ universal_args:
   max-breakpoints: [200]
   multi-hop-max-dist: [10]
   num-edge-dis: [10]
+  num-bins: [15000]
   enable-aux-loss: [True]
   enable-decoder-norm: [False]
   sk-tau: [0.05]
@@ -59,16 +56,30 @@ universal_args:
   magma-warmup-steps: [2500]
   magma-decay-rate: [0.9]
   magma-decay-steps: [2500]
-  binned-targs: [True]
   inten-loss-fn: [cosine]
-  contr-loss-fn: [entropy]
-  contr-weight: [1]
-  contr-threshold: [0.4]
-  num-bins: [150000]
-  pubchem-map-path: ['data/retrieval/pubchem/pubchem_formulae_inchikey.hdf5']
 
 iterative_args:
-  -  split-name: [split.tsv]
-     save-dir: [split_rnd1]
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd1]
      seed: [1]
-     train-checkpoint: [results/joint_train_msg/split_rnd1/version_0/best.ckpt]
+     
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd2]
+     seed: [2]
+
+  -  split-name: [split_1.tsv]
+     save-dir: [split_1_rnd3]
+     seed: [3]
+
+  -  split-name: [scaffold_1.tsv]
+     save-dir: [scaffold_1_rnd1]
+     seed: [1]
+
+  -  split-name: [scaffold_1.tsv]
+     save-dir: [scaffold_1_rnd2]
+     seed: [2]
+
+  -  split-name: [scaffold_1.tsv]
+     save-dir: [scaffold_1_rnd3]
+     seed: [3]
+
