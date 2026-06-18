@@ -1479,6 +1479,7 @@ def _classify_action(path: str, method: str) -> Optional[str]:
     if path == "/download_mgf":             return "Download predicted spectra (.mgf)"
     if path == "/api/event/download_ms":    return "Download spectra (.ms)"
     if path == "/upload_ms":                return "Upload experimental spectrum"
+    if path == "/upload_mgf":               return "Upload experimental spectrum (.mgf)"
     if path == "/load_example_ms":          return "Load example spectrum"
     if path == "/fragment_svg":             return "View fragment substructure"
     if path.startswith("/result/"):         return "View retrieval results"
@@ -1947,6 +1948,80 @@ def upload_ms():
     spectra_payload = _spectra_payload_from_ms_lines(raw_lines)
 
     return jsonify({"spectra": spectra_payload})
+
+
+def _mgf_features_payload(parsed: List[Tuple[dict, Any]]) -> List[Dict[str, Any]]:
+    """
+    Convert the output of common.parse_spectra_mgf into a list of feature dicts
+    for the frontend MGF feature-selector.
+
+    Each dict:
+      feature_id  – FEATURE_ID metadata tag, or "feature_N" if missing
+      pepmass     – PEPMASS string (may be None)
+      adduct      – ADDUCT string (may be None)
+      num_peaks   – number of peaks in this feature
+      spectrum    – dict compatible with populateSpectraFromUpload:
+                    {collision_energy, spectrum_text, nce_guess, nce_cont}
+    """
+    features: List[Dict[str, Any]] = []
+    for idx, (meta, peaks) in enumerate(parsed):
+        if peaks is None or len(peaks) == 0:
+            continue
+
+        feature_id = meta.get("FEATURE_ID") or f"feature_{idx + 1}"
+        spectrum_text = "\n".join(
+            f"{mz:.4f} {inten:.4f}" for mz, inten in peaks
+        )
+
+        features.append({
+            "feature_id": feature_id,
+            "pepmass":    meta.get("PEPMASS"),
+            "adduct":     meta.get("ADDUCT"),
+            "num_peaks":  int(len(peaks)),
+            "spectrum": {
+                "collision_energy": 0,
+                "spectrum_text":    spectrum_text,
+                "nce_guess":        None,
+                "nce_cont":         None,
+            },
+        })
+
+    return features
+
+
+@app.route("/upload_mgf", methods=["POST"])
+def upload_mgf():
+    """
+    Parse an uploaded MGF file and return a list of features (one per BEGIN IONS
+    block) as JSON so the frontend can populate a feature-selector dropdown.
+    """
+    file = request.files.get("mgf_file")
+    if not file or file.filename == "":
+        return jsonify({"error": "No file uploaded"}), 400
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mgf", delete=False) as tmp:
+            tmp_path = tmp.name
+            tmp.write(file.read())
+
+        parsed = common.parse_spectra_mgf(tmp_path)
+        features = _mgf_features_payload(parsed)
+
+        if not features:
+            return jsonify({"error": "No spectra found in the MGF file."}), 400
+
+        return jsonify({"features": features})
+
+    except Exception as e:
+        return jsonify({"error": f"Failed to parse MGF file: {e}"}), 500
+
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
 
 @app.route("/load_example_ms", methods=["GET"])

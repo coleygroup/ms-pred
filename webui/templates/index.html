@@ -862,7 +862,8 @@
                 });
         }
 
-        function populateSpectraFromUpload(spectra) {
+        function populateSpectraFromUpload(spectra, sourceLabel) {
+            if (sourceLabel === undefined) sourceLabel = ".ms";
             const container = document.getElementById("spectra-container");
 
             // Clear any existing blocks (including the initial template block)
@@ -880,13 +881,13 @@
                 const evLine =
                     Number.isFinite(ev) && Number.isFinite(nceCont)
                         ? `<div style="font-size:0.75rem; color:#6b7280; margin-top:0.25rem;">
-                               Detected CE ≈ ${ev.toFixed(0)} eV | NCE ≈ ${nceCont.toFixed(0)} % (from .ms)
+                               Detected CE ≈ ${ev.toFixed(0)} eV | NCE ≈ ${nceCont.toFixed(0)} % (from ${sourceLabel})
                            </div>`
                         : "";
 
                 block.innerHTML = `
                     <div class="spectrum-header">
-                        <span>Spectrum ${idx + 1} (from .ms)</span>
+                        <span>Spectrum ${idx + 1} (from ${sourceLabel})</span>
                         <button type="button" class="btn btn-secondary" onclick="removeSpectrumBlock(this)">Remove</button>
                     </div>
 
@@ -2652,6 +2653,98 @@
             });
         }
 
+        // ---- .mgf upload → call /upload_mgf ----
+        // Stores all parsed features in window.MGF_FEATURES so the feature-selector
+        // can apply any feature on demand without a second round-trip.
+        window.MGF_FEATURES = [];
+
+        function applyMgfFeature(idx) {
+            idx = parseInt(idx, 10);
+            const feature = window.MGF_FEATURES[idx];
+            if (!feature) return;
+
+            // Populate a single spectrum block via the existing helper.
+            populateSpectraFromUpload([feature.spectrum], ".mgf");
+
+            // Auto-fill adduct if the value is present in the dropdown.
+            if (feature.adduct) {
+                const adductSel = document.getElementById("adduct");
+                if (adductSel) {
+                    const opts = Array.from(adductSel.options);
+                    const match = opts.find(o => o.value === feature.adduct);
+                    if (match) adductSel.value = feature.adduct;
+                }
+            }
+
+            // Update the hint line with PEPMASS + reminder to enter formula.
+            const hint = document.getElementById("mgf-feature-hint");
+            if (hint) {
+                let msg = `Feature: ${feature.feature_id} · ${feature.num_peaks} peaks`;
+                if (feature.pepmass) msg += ` · PEPMASS ${feature.pepmass}`;
+                if (feature.adduct)  msg += ` · ${feature.adduct}`;
+                msg += " — please enter the chemical formula above.";
+                hint.textContent = msg;
+            }
+        }
+
+        const mgfInput = document.getElementById("mgf-file-input");
+        if (mgfInput) {
+            mgfInput.addEventListener("change", function () {
+                const file = mgfInput.files[0];
+                if (!file) return;
+
+                const formData = new FormData();
+                formData.append("mgf_file", file);
+
+                fetch("/upload_mgf", {
+                    method: "POST",
+                    body: formData,
+                })
+                    .then(resp => resp.json())
+                    .then(data => {
+                        if (data.error) {
+                            alert("Error: " + data.error);
+                            return;
+                        }
+                        if (!data.features || !data.features.length) {
+                            alert("No spectra found in the MGF file.");
+                            return;
+                        }
+
+                        window.MGF_FEATURES = data.features;
+
+                        // Populate the feature dropdown.
+                        const sel = document.getElementById("mgf-feature-select");
+                        sel.innerHTML = "";
+                        data.features.forEach(function (f, i) {
+                            const opt = document.createElement("option");
+                            opt.value = i;
+                            let label = f.feature_id;
+                            if (f.pepmass) label += " — m/z " + f.pepmass;
+                            if (f.adduct)  label += " — " + f.adduct;
+                            label += " (" + f.num_peaks + " peaks)";
+                            opt.textContent = label;
+                            sel.appendChild(opt);
+                        });
+
+                        // Show the feature row and load the first feature.
+                        document.getElementById("mgf-feature-row").style.display = "";
+                        applyMgfFeature(0);
+                    })
+                    .catch(err => {
+                        console.error(err);
+                        alert("Failed to parse .mgf file: " + err.message);
+                    });
+            });
+
+            const mgfSel = document.getElementById("mgf-feature-select");
+            if (mgfSel) {
+                mgfSel.addEventListener("change", function () {
+                    applyMgfFeature(mgfSel.value);
+                });
+            }
+        }
+
         // ---- Load example spectrum → call /load_example_ms ----
         const exampleBtn = document.getElementById("load-example-btn");
         if (exampleBtn) {
@@ -3751,7 +3844,7 @@
             <span>Please report any issues to {{ CONTACT_EMAIL }}</span>
             {% if current_user.is_authenticated %}
             {% if current_user.can_access_nist %}
-            <span style="color:#6ee7b7;">&#x2713; Internal (NIST'23 included) &mdash; {{ current_user.id }}</span>
+            <span style="color:#6ee7b7;">&#x2713; Authorized (NIST structures included) &mdash; {{ current_user.id }}</span>
             {% else %}
             <span style="color:#9ca3af;">{{ current_user.id }}</span>
             {% endif %}
@@ -3818,7 +3911,7 @@
 
             <div class="row" style="margin-top:0.75rem;">
                 <div>
-                    <label for="ms-file-input">Upload SIRIUS .ms file</label>
+                    <label for="ms-file-input">Upload .ms file</label>
                     <input type="file" id="ms-file-input" accept=".ms">
                     <p style="font-size:0.8rem; color:#6b7280; margin-top:0.25rem;">
                         If provided, spectra in the .ms file (one block per collision energy) will be parsed
@@ -3838,6 +3931,25 @@
                 <p style="font-size:0.8rem; color:#6b7280; margin-top:0.25rem;">
                     Use spectra of a phospholipid standard (C27H56NO7P).
                 </p>
+                </div>
+            </div>
+
+            <!-- MGF upload -->
+            <div class="row" style="margin-top:0.75rem;">
+                <div>
+                    <label for="mgf-file-input">Upload .mgf file</label>
+                    <input type="file" id="mgf-file-input" accept=".mgf">
+                    <p style="font-size:0.8rem; color:#6b7280; margin-top:0.25rem;">
+                        Uploads an MGF file (multiple features); select which feature to use
+                        as the query spectrum below.
+                    </p>
+                </div>
+            </div>
+            <div id="mgf-feature-row" style="display:none; margin-top:0.5rem;">
+                <div>
+                    <label for="mgf-feature-select">MGF feature</label>
+                    <select id="mgf-feature-select" style="max-width:30rem;"></select>
+                    <p id="mgf-feature-hint" style="font-size:0.8rem; color:#6b7280; margin-top:0.25rem;"></p>
                 </div>
             </div>
 
