@@ -1950,22 +1950,74 @@ def upload_ms():
     return jsonify({"spectra": spectra_payload})
 
 
+def _parse_mgf_collision_energy(
+    ce_str: Optional[str],
+) -> Tuple[Optional[str], Optional[float], Optional[int], Optional[List[float]]]:
+    """
+    Parse a MGF COLLISION_ENERGY tag.
+
+    Returns (mode, nce_cont, nce_guess, stepped_nces):
+      mode        – "single" | "stepped" | None
+      nce_cont    – continuous NCE value for single mode (may differ from bucket)
+      nce_guess   – nearest 5 % bucket for single mode
+      stepped_nces – list of floats for stepped mode
+    """
+    if not ce_str:
+        return None, None, None, None
+
+    ce_str = ce_str.strip()
+
+    # List syntax: [60.0]  or  [10, 20, 30]
+    if ce_str.startswith("[") and ce_str.endswith("]"):
+        tokens = [t.strip() for t in ce_str[1:-1].split(",") if t.strip()]
+        values: List[float] = []
+        for t in tokens:
+            try:
+                values.append(float(t))
+            except ValueError:
+                pass
+        if not values:
+            return None, None, None, None
+        if len(values) == 1:
+            nce = values[0]
+            bucket = max(5, min(100, int(round(nce / 5.0) * 5)))
+            return "single", nce, bucket, None
+        return "stepped", None, None, values
+
+    # Plain scalar: 60.0
+    try:
+        nce = float(ce_str)
+        bucket = max(5, min(100, int(round(nce / 5.0) * 5)))
+        return "single", nce, bucket, None
+    except ValueError:
+        return None, None, None, None
+
+
 def _mgf_features_payload(parsed: List[Tuple[dict, Any]]) -> List[Dict[str, Any]]:
     """
     Convert the output of common.parse_spectra_mgf into a list of feature dicts
     for the frontend MGF feature-selector.
 
+    Entries where MSLEVEL / MS_LEVEL is present and not "2" are skipped (MS1 etc.).
+
     Each dict:
-      feature_id  – FEATURE_ID metadata tag, or "feature_N" if missing
-      pepmass     – PEPMASS string (may be None)
-      adduct      – ADDUCT string (may be None)
-      num_peaks   – number of peaks in this feature
-      spectrum    – dict compatible with populateSpectraFromUpload:
-                    {collision_energy, spectrum_text, nce_guess, nce_cont}
+      feature_id   – FEATURE_ID tag, or "feature_N"
+      pepmass      – PEPMASS string (may be None)
+      adduct       – ADDUCT string (may be None)
+      formula      – FORMULA string (may be None)
+      num_peaks    – number of peaks
+      spectrum     – dict compatible with populateSpectraFromUpload:
+                     {collision_energy, spectrum_text, nce_mode,
+                      nce_cont, nce_guess, stepped_nces}
     """
     features: List[Dict[str, Any]] = []
     for idx, (meta, peaks) in enumerate(parsed):
         if peaks is None or len(peaks) == 0:
+            continue
+
+        # Skip non-MS2 entries when the level tag is explicitly present.
+        ms_level = meta.get("MSLEVEL") or meta.get("MS_LEVEL")
+        if ms_level is not None and str(ms_level).strip() != "2":
             continue
 
         feature_id = meta.get("FEATURE_ID") or f"feature_{idx + 1}"
@@ -1973,16 +2025,23 @@ def _mgf_features_payload(parsed: List[Tuple[dict, Any]]) -> List[Dict[str, Any]
             f"{mz:.4f} {inten:.4f}" for mz, inten in peaks
         )
 
+        nce_mode, nce_cont, nce_guess, stepped_nces = _parse_mgf_collision_energy(
+            meta.get("COLLISION_ENERGY")
+        )
+
         features.append({
-            "feature_id": feature_id,
-            "pepmass":    meta.get("PEPMASS"),
-            "adduct":     meta.get("ADDUCT"),
-            "num_peaks":  int(len(peaks)),
+            "feature_id":   feature_id,
+            "pepmass":      meta.get("PEPMASS"),
+            "adduct":       meta.get("ADDUCT"),
+            "formula":      meta.get("FORMULA"),
+            "num_peaks":    int(len(peaks)),
             "spectrum": {
                 "collision_energy": 0,
                 "spectrum_text":    spectrum_text,
-                "nce_guess":        None,
-                "nce_cont":         None,
+                "nce_mode":         nce_mode,
+                "nce_cont":         nce_cont,
+                "nce_guess":        nce_guess,
+                "stepped_nces":     stepped_nces,
             },
         })
 

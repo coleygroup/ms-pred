@@ -873,15 +873,18 @@
                 const block = document.createElement("div");
                 block.className = "spectrum-block";
 
+                const isStepped = spec.nce_mode === "stepped";
+                const steppedNces = spec.stepped_nces || [];
+
                 const ev = Number(spec.collision_energy);
                 const nceCont = Number(spec.nce_cont);
                 let nceGuess = spec.nce_guess != null ? Number(spec.nce_guess) : 30;
                 nceGuess = clampToNceBucket(nceGuess);
 
                 const evLine =
-                    Number.isFinite(ev) && Number.isFinite(nceCont)
+                    !isStepped && Number.isFinite(nceCont)
                         ? `<div style="font-size:0.75rem; color:#6b7280; margin-top:0.25rem;">
-                               Detected CE ≈ ${ev.toFixed(0)} eV | NCE ≈ ${nceCont.toFixed(0)} % (from ${sourceLabel})
+                               NCE ≈ ${nceCont.toFixed(0)} % (from ${sourceLabel})
                            </div>`
                         : "";
 
@@ -897,13 +900,13 @@
                             <select name="spectrum_mode"
                                     class="acq-mode-select"
                                     onchange="onAcquisitionModeChange(this)">
-                                <option value="single" selected>Single NCE</option>
-                                <option value="stepped">Stepped NCE</option>
+                                <option value="single" ${!isStepped ? "selected" : ""}>Single NCE</option>
+                                <option value="stepped" ${isStepped ? "selected" : ""}>Stepped NCE</option>
                             </select>
                         </div>
                     </div>
 
-                    <div class="single-nce-row">
+                    <div class="single-nce-row" ${isStepped ? 'style="display:none;"' : ''}>
                         <div class="row">
                             <div>
                                 <label>Collision energy (NCE, %)</label>
@@ -915,11 +918,11 @@
                         </div>
                     </div>
 
-                    <div class="stepped-nce-row" style="display:none; margin-top:0.5rem;">
+                    <div class="stepped-nce-row" style="${isStepped ? "" : "display:none; "}margin-top:0.5rem;">
                         <label>Stepped collision energies (NCE, %)</label>
                         <div class="stepped-nce-options"
                              style="font-size:0.8rem; color:#4b5563; display:flex; gap:0.5rem; flex-wrap:wrap;">
-                            ${renderSteppedCheckboxes([])}
+                            ${renderSteppedCheckboxes(steppedNces)}
                         </div>
                         <input type="hidden" name="spectrum_stepped_nces" value="">
                         <div style="font-size:0.75rem; color:#6b7280; margin-top:0.25rem;">
@@ -2666,6 +2669,12 @@
             // Populate a single spectrum block via the existing helper.
             populateSpectraFromUpload([feature.spectrum], ".mgf");
 
+            // Auto-fill formula if present in the MGF metadata.
+            if (feature.formula) {
+                const formulaEl = document.getElementById("formula");
+                if (formulaEl) formulaEl.value = feature.formula;
+            }
+
             // Auto-fill adduct if the value is present in the dropdown.
             if (feature.adduct) {
                 const adductSel = document.getElementById("adduct");
@@ -2676,13 +2685,13 @@
                 }
             }
 
-            // Update the hint line with PEPMASS + reminder to enter formula.
+            // Update the hint line.
             const hint = document.getElementById("mgf-feature-hint");
             if (hint) {
                 let msg = `Feature: ${feature.feature_id} · ${feature.num_peaks} peaks`;
                 if (feature.pepmass) msg += ` · PEPMASS ${feature.pepmass}`;
                 if (feature.adduct)  msg += ` · ${feature.adduct}`;
-                msg += " — please enter the chemical formula above.";
+                if (!feature.formula) msg += " — please enter the chemical formula above.";
                 hint.textContent = msg;
             }
         }
