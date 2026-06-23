@@ -2,7 +2,7 @@ from pathlib import Path
 import subprocess
 import argparse
 
-python_file = "src/ms_pred/dag_pred/predict_inten.py"
+python_file = "src/ms_pred/iceberg/predict_inten.py"
 node_num = 100
 num_workers = 64
 test_entries = [

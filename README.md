@@ -185,9 +185,9 @@ The internal pipeline used to conduct experiments can be followed below:
 Instead of running in batched pipeline model, individual gen training, inten
 training, and predict calls can be  made using the following scripts respectively:
 
-1. `python src/ms_pred/dag_pred/train_gen.py`
-2. `python src/ms_pred/dag_pred/train_inten.py`
-3. `python src/ms_pred/dag_pred/predict_smis.py`
+1. `python src/ms_pred/iceberg/train_gen.py`
+2. `python src/ms_pred/iceberg/train_inten.py`
+3. `python src/ms_pred/iceberg/predict_smis.py`
 
 An example of how to use ICEBERG for structural elucidation campaigns can be found at ``notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb``.
 

@@ -1,4 +1,4 @@
-"""Synthetic CPU forward through dag_pred FragGNN (Tier B, gen side).
+"""Synthetic CPU forward through iceberg FragGNN (Tier B, gen side).
 
 See tests/_dag_helpers.py for the tree synthesis utilities. Catches
 shape / API regressions in the gen inference path without a checkpoint
@@ -9,8 +9,8 @@ import pytest
 torch = pytest.importorskip("torch")
 dgl = pytest.importorskip("dgl")
 
-from ms_pred.dag_pred.dag_data import GenDataset, TreeProcessor
-from ms_pred.dag_pred.gen_model import FragGNN
+from ms_pred.iceberg.dag_data import GenDataset, TreeProcessor
+from ms_pred.iceberg.gen_model import FragGNN
 
 from tests._dag_helpers import TEST_MOLECULES, build_sample_gen, build_tree
 

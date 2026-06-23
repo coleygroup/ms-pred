@@ -20,7 +20,7 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 
 import ms_pred.common as common
-from ms_pred.dag_pred import dag_data, inten_model
+from ms_pred.iceberg import dag_data, inten_model
 
 import torch
 torch.multiprocessing.set_sharing_strategy('file_system')
@@ -34,7 +34,7 @@ def add_frag_train_args(parser):
     parser.add_argument("--num-workers", default=0, action="store", type=int)
     date = datetime.now().strftime("%Y_%m_%d")
     parser.add_argument("--save-dir", default=f"results/{date}_tree_pred/")
-    parser.add_argument("--version", default="inten", action="store", type=str)
+    parser.add_argument("--version", default="inten_contr", action="store", type=str)
 
     parser.add_argument("--dataset-name", default="gnps2015_debug")
     parser.add_argument("--dataset-labels", default="labels.tsv")
@@ -53,6 +53,12 @@ def add_frag_train_args(parser):
     parser.add_argument("--weight-decay", default=0, action="store", type=float)
     parser.add_argument("--test-checkpoint", default="", action="store", type=str)
 
+    # Contrastive learning parameters
+    parser.add_argument("--train-checkpoint", default="", action="store", type=str)
+    parser.add_argument("--num-decoys", default=7, action="store", type=int)
+    parser.add_argument("--decoy-path", default="", action="store", type=str)
+    parser.add_argument("--num-decoy-h5s", default=10, action="store", type=int)
+
     # Fix model params
     parser.add_argument("--gnn-layers", default=3, action="store", type=int)
     parser.add_argument("--mlp-layers", default=2, action="store", type=int)
@@ -65,6 +71,7 @@ def add_frag_train_args(parser):
     parser.add_argument("--grad-accumulate", default=1, type=int, action="store")
     parser.add_argument("--sk-tau", default=0.01, action="store", type=float)
     parser.add_argument("--ppm-tol", default=20, action="store", type=float)
+    parser.add_argument("--contr-weight", default=0.1, action="store", type=float)
     parser.add_argument(
         "--mpnn-type", default="GGNN", action="store", choices=["GGNN", "GINE", "PNA"]
     )
@@ -72,9 +79,8 @@ def add_frag_train_args(parser):
         "--loss-fn",
         default="cosine",
         action="store",
-        choices=["cosine", "entropy", "weighted_entropy"],
+        choices=["entropy", "cosine"],
     )
-    parser.add_argument("--track-cosine", default=False, action="store_true") # Generally, use if not using cosine as main loss. 
     parser.add_argument(
         "--root-encode",
         default="gnn",
@@ -152,40 +158,50 @@ def train_model():
     pe_embed_k = kwargs["pe_embed_k"]
     root_encode = kwargs["root_encode"]
     binned_targs = kwargs["binned_targs"]
+    num_decoys = kwargs["num_decoys"]
+    decoy_path = kwargs["decoy_path"]
+    decoy_h5_nums = kwargs["num_decoy_h5s"]
     embed_elem_group = kwargs["embed_elem_group"]
     tree_processor = dag_data.TreeProcessor(
         pe_embed_k=pe_embed_k,
         root_encode=root_encode,
         binned_targs=binned_targs,
         add_hs=add_hs,
-        embed_elem_group = embed_elem_group,
+        embed_elem_group=embed_elem_group,
     )
 
     # Build out frag datasets
-    train_dataset = dag_data.IntenDataset(
+    train_dataset = dag_data.IntenContrDataset(
         train_df,
+        tree_processor=tree_processor,
         magma_h5=magma_dag_folder,
         magma_map=name_to_keys,
         num_workers=num_workers,
-        tree_processor=tree_processor,
+        num_decoys=num_decoys,
+        decoy_path=decoy_path,
+        decoy_h5_nums=decoy_h5_nums,
     )
-    val_dataset = dag_data.IntenDataset(
+    val_dataset = dag_data.IntenContrDataset(
         val_df,
+        tree_processor=tree_processor,
         magma_h5=magma_dag_folder,
         magma_map=name_to_keys,
         num_workers=num_workers,
-        tree_processor=tree_processor,
+        num_decoys=num_decoys,
+        decoy_path=decoy_path,
+        decoy_h5_nums=decoy_h5_nums,
     )
-
-    test_dataset = dag_data.IntenDataset(
+    test_dataset = dag_data.IntenContrDataset(
         test_df,
+        tree_processor=tree_processor,
         magma_h5=magma_dag_folder,
         magma_map=name_to_keys,
         num_workers=num_workers,
-        tree_processor=tree_processor,
+        num_decoys=num_decoys,
+        decoy_path=decoy_path,
+        decoy_h5_nums=decoy_h5_nums,
     )
 
-    # kwargs['num_workers'] = 0
     persistent_workers = kwargs["num_workers"] > 0
     mp_contex = 'spawn' if num_workers > 0 else None
     # persistent_workers = False
@@ -239,7 +255,6 @@ def train_model():
         pe_embed_k=kwargs["pe_embed_k"],
         pool_op=kwargs["pool_op"],
         loss_fn=kwargs["loss_fn"],
-        track_cosine=kwargs["track_cosine"],
         root_encode=kwargs["root_encode"],
         inject_early=kwargs["inject_early"],
         embed_adduct=kwargs["embed_adduct"],
@@ -252,6 +267,7 @@ def train_model():
         add_hs=add_hs,
         sk_tau=kwargs["sk_tau"],
         ppm_tol=kwargs["ppm_tol"],
+        contr_weight=kwargs["contr_weight"],
     )
 
     # test_batch = next(iter(train_loader))
@@ -261,7 +277,7 @@ def train_model():
     if kwargs["debug"]:
         kwargs["max_epochs"] = 2
 
-    if kwargs["debug_overfit"]: # this debugs _by_ overfitting, not debugging overfitting itself
+    if kwargs["debug_overfit"]:
         kwargs["min_epochs"] = 1000
         kwargs["max_epochs"] = kwargs["min_epochs"]
         kwargs["no_monitor"] = True
@@ -288,7 +304,7 @@ def train_model():
     checkpoint_callback = ModelCheckpoint(
         monitor=monitor,
         dirpath=tb_path,
-        filename="best",  # "{epoch}-{val_loss:.2f}",
+        filename="best",
         save_weights_only=False,
         save_last=True,
     )
@@ -299,7 +315,8 @@ def train_model():
     trainer = pl.Trainer(
         logger=[tb_logger, console_logger],
         accelerator="gpu" if kwargs["gpu"] else "cpu",
-        devices=1 if kwargs["gpu"] else 0,
+        strategy='ddp',
+        devices=torch.cuda.device_count() if kwargs["gpu"] else 0,
         callbacks=callbacks,
         gradient_clip_val=5,
         min_epochs=kwargs["min_epochs"],
@@ -308,6 +325,16 @@ def train_model():
         accumulate_grad_batches=kwargs["grad_accumulate"],
         num_sanity_val_steps=2 if kwargs["debug"] else 0,
     )
+
+    if kwargs["train_checkpoint"]:
+        train_checkpoint = kwargs["train_checkpoint"]
+        model = inten_model.IntenGNN.load_from_checkpoint(train_checkpoint)
+        logging.info(
+            f"Loaded model with from {train_checkpoint}"
+        )
+        # Force contrastive learning params
+        model.sk_tau = kwargs["sk_tau"]
+        model.contr_weight = kwargs["contr_weight"]
 
     ckpt_path = str(last_checkpoint) if last_checkpoint.exists() else None
     if ckpt_path:
@@ -328,6 +355,10 @@ def train_model():
 
     # Load from checkpoint
     model = inten_model.IntenGNN.load_from_checkpoint(test_checkpoint)
+    # Force contrastive learning params
+    model.sk_tau = kwargs["sk_tau"]
+    model.contr_weight = kwargs["contr_weight"]
+
     logging.info(
         f"Loaded model with from {test_checkpoint} with val loss of {test_checkpoint_score}"
     )

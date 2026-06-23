@@ -1,6 +1,6 @@
-"""inten_hyperopt.py
+"""Hyperopt 
 
-Hyperopt parameters for frag tree generation model
+Hyperopt parameters for frag DAG generation model
 
 """
 import os
@@ -21,9 +21,9 @@ from ray import tune
 
 import ms_pred.common as common
 import ms_pred.nn_utils as nn_utils
-import ms_pred.dag_pred.dag_data as dag_data
-import ms_pred.dag_pred.inten_model as inten_model
-import ms_pred.dag_pred.train_inten as inten_train
+import ms_pred.iceberg.dag_data as dag_data
+import ms_pred.iceberg.gen_model as gen_model
+import ms_pred.iceberg.train_gen as gen_train
 
 
 def score_function(config, base_args, orig_dir=""):
@@ -59,81 +59,71 @@ def score_function(config, base_args, orig_dir=""):
         # train_inds = train_inds[:6]
     else:
         train_inds, val_inds, test_inds = common.get_splits(spec_names, split_file)
+
     train_df = df.iloc[train_inds]
     val_df = df.iloc[val_inds]
 
+    magma_folder = kwargs["magma_folder"]
     num_workers = kwargs.get("num_workers", 0)
-    magma_dag_folder = Path(kwargs["magma_dag_folder"])
-    all_json_pths = [Path(i) for i in magma_dag_folder.glob("*.json")]
-    name_to_json = {i.stem.replace("pred_", ""): i for i in all_json_pths}
+    magma_tree_path = data_dir / f"{magma_folder}/magma_tree.hdf5"
+    name_to_json = gen_train.build_gen_magma_map(magma_tree_path)
 
     pe_embed_k = kwargs["pe_embed_k"]
     root_encode = kwargs["root_encode"]
-    binned_targs = kwargs["binned_targs"]
     tree_processor = dag_data.TreeProcessor(
-        pe_embed_k=pe_embed_k, root_encode=root_encode, binned_targs=binned_targs
+        pe_embed_k=pe_embed_k, root_encode=root_encode
     )
-
     # Build out frag datasets
-    train_dataset = dag_data.IntenDataset(
+    train_dataset = dag_data.GenDataset(
         train_df,
-        data_dir=data_dir,
+        magma_h5=magma_tree_path,
+        tree_processor=tree_processor,
         magma_map=name_to_json,
         num_workers=num_workers,
-        tree_processor=tree_processor,
         use_ray=True,
     )
-    val_dataset = dag_data.IntenDataset(
+    val_dataset = dag_data.GenDataset(
         val_df,
-        data_dir=data_dir,
+        magma_h5=magma_tree_path,
         magma_map=name_to_json,
         num_workers=num_workers,
         tree_processor=tree_processor,
         use_ray=True,
     )
-
-    persistent_workers = kwargs["num_workers"] > 0
 
     # Define dataloaders
     collate_fn = train_dataset.get_collate_fn()
     train_loader = DataLoader(
         train_dataset,
-        num_workers=min(kwargs["num_workers"], kwargs["batch_size"]),
+        num_workers=kwargs["num_workers"],
         collate_fn=collate_fn,
         shuffle=True,
         batch_size=kwargs["batch_size"],
-        persistent_workers=persistent_workers,
     )
     val_loader = DataLoader(
         val_dataset,
-        num_workers=min(kwargs["num_workers"], kwargs["batch_size"]),
+        num_workers=kwargs["num_workers"],
         collate_fn=collate_fn,
         shuffle=False,
         batch_size=kwargs["batch_size"],
-        persistent_workers=persistent_workers,
     )
 
     # Define model
-    model = inten_model.IntenGNN(
+    model = gen_model.FragGNN(
         hidden_size=kwargs["hidden_size"],
-        mlp_layers=kwargs["mlp_layers"],
-        gnn_layers=kwargs["gnn_layers"],
-        set_layers=kwargs["set_layers"],
-        frag_set_layers=kwargs["frag_set_layers"],
+        layers=kwargs["layers"],
         dropout=kwargs["dropout"],
         mpnn_type=kwargs["mpnn_type"],
+        set_layers=kwargs["set_layers"],
         learning_rate=kwargs["learning_rate"],
         lr_decay_rate=kwargs["lr_decay_rate"],
         weight_decay=kwargs["weight_decay"],
         node_feats=train_dataset.get_node_feats(),
         pe_embed_k=kwargs["pe_embed_k"],
         pool_op=kwargs["pool_op"],
-        loss_fn=kwargs["loss_fn"],
         root_encode=kwargs["root_encode"],
         inject_early=kwargs["inject_early"],
         embed_adduct=kwargs["embed_adduct"],
-        binned_targs=binned_targs,
-        encode_forms=kwargs["encode_forms"],
     )
 
     # outputs = model(test_batch['fps'])
@@ -168,7 +158,7 @@ def score_function(config, base_args, orig_dir=""):
 
 def get_args():
     parser = argparse.ArgumentParser()
-    inten_train.add_frag_train_args(parser)
+    gen_train.add_frag_train_args(parser)
     nn_utils.add_hyperopt_args(parser)
     return parser.parse_args()
 
@@ -179,25 +169,25 @@ def get_param_space(trial):
     Use optuna to define this dynamically
 
     """
+
     trial.suggest_float("learning_rate", 1e-4, 1e-3, log=True)
     trial.suggest_float("lr_decay_rate", 0.7, 1.0, log=True)
     trial.suggest_categorical("weight_decay", [1e-6, 1e-7, 0])
-    trial.suggest_int("gnn_layers", 1, 6)
-    trial.suggest_int("mlp_layers", 0, 3)
-    trial.suggest_int("set_layers", 0, 0)
-    trial.suggest_int("frag_set_layers", 0, 3)
-
-    trial.suggest_int("pe_embed_k", 0, 0)
+    trial.suggest_int("layers", 1, 6)
+    trial.suggest_int("set_layers", 0, 0)  # Set to 0
+    trial.suggest_int("pe_embed_k", 0, 20)
     trial.suggest_float("dropout", 0, 0.3, step=0.1)
 
     trial.suggest_categorical("hidden_size", [128, 256, 512])
-    trial.suggest_categorical("batch_size", [8, 16, 32])
+    trial.suggest_categorical("batch_size", [8, 16, 32, 64])
 
     # trial.suggest_categorical("mpnn_type", ["GINE"])
     trial.suggest_categorical("mpnn_type", ["GGNN"])
     trial.suggest_categorical("pool_op", ["avg", "attn"])
+    trial.suggest_categorical("root_encode", ["gnn"])
+
     trial.suggest_categorical("embed_adduct", [True])
-    trial.suggest_categorical("binned_target", [True])
+    trial.suggest_categorical("inject_early", [False, True])
 
 
 def get_initial_points() -> List[Dict]:
@@ -207,21 +197,20 @@ def get_initial_points() -> List[Dict]:
 
     """
     init_base = {
-        "learning_rate": 0.0002,
-        "lr_decay_rate": 0.85,
-        "weight_decay": 1.0e-7,
+        "learning_rate": 0.00049,
+        "lr_decay_rate": 0.797,
+        "weight_decay": 1.0e-6,
         "dropout": 0.1,
-        "gnn_layers": 5,
+        "layers": 2,
         "set_layers": 0,
-        "frag_set_layers": 2,
-        "mlp_layers": 2,
-        "batch_size": 32,
-        "pe_embed_k": 0,
-        "hidden_size": 512,
+        "batch_size": 16,
+        "pe_embed_k": 20,
+        "hidden_size": 128,
         "mpnn_type": "GGNN",
-        "pool_op": "attn",
+        "pool_op": "avg",
+        "root_encode": "gnn",
+        "inject_early": True,
         "embed_adduct": True,
-        "binned_target": True,
     }
     return [init_base]
 

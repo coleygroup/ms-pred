@@ -160,7 +160,7 @@ run_one() {
   mkdir -p "$out_dir"
 
   echo "[pubchem_${number_id}] running prediction"
-  if python src/ms_pred/dag_pred/predict_smis.py \
+  if python src/ms_pred/iceberg/predict_smis.py \
       --batch-size "$BATCH_SIZE" \
       --sparse-out \
       --sparse-k 100 \

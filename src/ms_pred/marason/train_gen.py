@@ -22,7 +22,7 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 
 import ms_pred.common as common
-from ms_pred.dag_pred import dag_data, gen_model
+from ms_pred.iceberg import dag_data, gen_model
 
 
 def build_gen_magma_map(magma_tree_path: Path):

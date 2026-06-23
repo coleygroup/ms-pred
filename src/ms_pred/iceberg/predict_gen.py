@@ -27,7 +27,7 @@ import torch
 import pytorch_lightning as pl
 
 import ms_pred.common as common
-import ms_pred.dag_pred.gen_model as gen_model
+import ms_pred.iceberg.gen_model as gen_model
 
 
 def get_args():
@@ -154,7 +154,7 @@ def predict():
             tup_to_process = []
             num_decoys = kwargs["num_decoys"]
             if num_decoys > 0:  # decoys only
-                from ms_pred.dag_pred.graph_mutate import mutate
+                from ms_pred.iceberg.graph_mutate import mutate
 
                 # generate 50% mutation decoys + 50% pubchem isomer decoys
                 pubchem_rate = 0.5

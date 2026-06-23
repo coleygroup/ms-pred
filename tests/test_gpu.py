@@ -62,7 +62,7 @@ def test_fourier_featurizer_gpu_matches_cpu(cuda_device):
 
 
 # ---------------------------------------------------------------------------
-# dag_pred GPU forward tests. Mirror tests/test_dag_forward.py and
+# iceberg GPU forward tests. Mirror tests/test_dag_forward.py and
 # tests/test_inten_model.py but move the model + batch to CUDA. Catch GPU-
 # specific dgl / torch-scatter regressions and any CPU<->GPU divergence
 # in the joint pipeline.
@@ -85,7 +85,7 @@ def _to_device(obj, device):
 
 
 def _frag_batch_for(smi: str, max_depth: int):
-    from ms_pred.dag_pred.dag_data import GenDataset, TreeProcessor
+    from ms_pred.iceberg.dag_data import GenDataset, TreeProcessor
 
     from tests._dag_helpers import build_sample_gen, build_tree
 
@@ -96,7 +96,7 @@ def _frag_batch_for(smi: str, max_depth: int):
 
 
 def _inten_batch_for(smi: str, max_depth: int):
-    from ms_pred.dag_pred.dag_data import IntenDataset, TreeProcessor
+    from ms_pred.iceberg.dag_data import IntenDataset, TreeProcessor
 
     from tests._dag_helpers import build_sample_inten, build_tree
 
@@ -160,7 +160,7 @@ def _flatten_tensors(out):
     ],
 )
 def test_frag_gnn_gpu_forward(cuda_device, smi, max_depth):
-    from ms_pred.dag_pred.gen_model import FragGNN
+    from ms_pred.iceberg.gen_model import FragGNN
 
     torch.manual_seed(0)
     model = FragGNN(hidden_size=8, layers=1, set_layers=1, pe_embed_k=0)
@@ -182,7 +182,7 @@ def test_frag_gnn_gpu_forward(cuda_device, smi, max_depth):
     ],
 )
 def test_inten_gnn_gpu_forward(cuda_device, smi, max_depth):
-    from ms_pred.dag_pred.inten_model import IntenGNN
+    from ms_pred.iceberg.inten_model import IntenGNN
 
     torch.manual_seed(0)
     model = IntenGNN(
@@ -218,9 +218,9 @@ def test_inten_gnn_gpu_forward(cuda_device, smi, max_depth):
     ],
 )
 def test_joint_predict_mol_gpu(cuda_device, smi, precursor_mz):
-    from ms_pred.dag_pred.gen_model import FragGNN
-    from ms_pred.dag_pred.inten_model import IntenGNN
-    from ms_pred.dag_pred.joint_model import JointModel
+    from ms_pred.iceberg.gen_model import FragGNN
+    from ms_pred.iceberg.inten_model import IntenGNN
+    from ms_pred.iceberg.joint_model import JointModel
 
     from ms_pred.common import ELEMENT_DIM, MAX_H
 

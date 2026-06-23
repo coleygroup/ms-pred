@@ -1,6 +1,6 @@
 # Import all submodules in package
 # from . import common
-# from . import dag_pred
+# from . import iceberg
 # from . import ffn_pred
 # from . import gnn_pred
 # from . import magma

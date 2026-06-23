@@ -5,9 +5,9 @@ import pytorch_lightning as pl
 import torch
 
 import ms_pred.common as common
-import ms_pred.dag_pred.gen_model as gen_model
-import ms_pred.dag_pred.inten_model as inten_model
-import ms_pred.dag_pred.dag_data as dag_data
+import ms_pred.iceberg.gen_model as gen_model
+import ms_pred.iceberg.inten_model as inten_model
+import ms_pred.iceberg.dag_data as dag_data
 from ms_pred import nn_utils
 from ms_pred.magma.fragmentation import FRAGMENT_ENGINE_PARAMS
 MAX_BROKEN_BONDS = FRAGMENT_ENGINE_PARAMS['max_broken_bonds']

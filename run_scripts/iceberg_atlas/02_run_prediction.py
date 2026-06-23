@@ -9,7 +9,7 @@ save_dir = "data/retrieval/pubchem/atlas/spectra"
 save_dir = Path(save_dir)
 save_dir.mkdir(parents=True, exist_ok=True)
 # all pytorch c++ warnings are suppressed
-script_pattern = """TORCH_CPP_LOG_LEVEL=ERROR python src/ms_pred/dag_pred/predict_smis.py \\
+script_pattern = """TORCH_CPP_LOG_LEVEL=ERROR python src/ms_pred/iceberg/predict_smis.py \\
     --batch-size 32 \\
     --sparse-out \\
     --sparse-k 100 \\

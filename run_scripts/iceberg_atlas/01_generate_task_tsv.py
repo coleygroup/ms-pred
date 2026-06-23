@@ -6,7 +6,7 @@
 import pickle
 import pandas as pd
 from ms_pred import common
-from ms_pred.dag_pred.iceberg_elucidation import sanitize_smiles
+from ms_pred.iceberg.iceberg_elucidation import sanitize_smiles
 from pathlib import Path
 import numpy as np
 

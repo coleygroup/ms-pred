@@ -1,4 +1,4 @@
-"""Helpers shared by Tier B synthetic forward tests for dag_pred.
+"""Helpers shared by Tier B synthetic forward tests for iceberg.
 
 Build a magma-style tree dict by hand from FragmentEngine, plus per-task
 sample dicts suitable for the gen / inten collate functions. Avoids the
@@ -9,7 +9,7 @@ from typing import Optional
 import numpy as np
 
 from ms_pred.common import instrument2onehot_pos, ion2onehot_pos
-from ms_pred.dag_pred.dag_data import TreeProcessor
+from ms_pred.iceberg.dag_data import TreeProcessor
 from ms_pred.magma.fragmentation import FRAGMENT_ENGINE_PARAMS, FragmentEngine
 
 # Small set of SMILES that exercises ethane (trivial), heteroatom +

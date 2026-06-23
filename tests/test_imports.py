@@ -23,7 +23,7 @@ ANCHOR_MODULES = [
     "ms_pred.nn_utils",
     "ms_pred.nn_utils.form_embedder",
     "ms_pred.massformer_pred",
-    "ms_pred.dag_pred.dag_data",
+    "ms_pred.iceberg.dag_data",
     "ms_pred.ffn_pred.ffn_data",
     "ms_pred.gnn_pred.gnn_data",
     "ms_pred.scarf_pred.scarf_data",

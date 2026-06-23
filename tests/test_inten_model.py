@@ -1,4 +1,4 @@
-"""Synthetic CPU forward through dag_pred IntenGNN (Tier B, inten side).
+"""Synthetic CPU forward through iceberg IntenGNN (Tier B, inten side).
 
 Mirror of test_dag_forward.py for the intensity-prediction half of the
 joint pipeline. Uses TreeProcessor.process_tree_inten_pred so no real
@@ -9,8 +9,8 @@ import pytest
 torch = pytest.importorskip("torch")
 dgl = pytest.importorskip("dgl")
 
-from ms_pred.dag_pred.dag_data import IntenDataset, TreeProcessor
-from ms_pred.dag_pred.inten_model import IntenGNN
+from ms_pred.iceberg.dag_data import IntenDataset, TreeProcessor
+from ms_pred.iceberg.inten_model import IntenGNN
 
 from tests._dag_helpers import TEST_MOLECULES, build_sample_inten, build_tree
 

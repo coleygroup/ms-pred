@@ -11,9 +11,9 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from ms_pred.common import ELEMENT_DIM, MAX_H
-from ms_pred.dag_pred.gen_model import FragGNN
-from ms_pred.dag_pred.inten_model import IntenGNN
-from ms_pred.dag_pred.joint_model import JointModel
+from ms_pred.iceberg.gen_model import FragGNN
+from ms_pred.iceberg.inten_model import IntenGNN
+from ms_pred.iceberg.joint_model import JointModel
 
 # predict_mol calls TreeProcessor.add_pe_embed unconditionally and
 # nn_utils.random_walk_pe always emits >=1 column regardless of k. The

@@ -1,4 +1,4 @@
-"""Instantiation + CLI smoke tests for ms_pred.dag_pred (ICEBERG).
+"""Instantiation + CLI smoke tests for ms_pred.iceberg (ICEBERG).
 
 These do not load any checkpoint, data files, or run a real forward pass.
 They confirm that the joint-model surface assembles and that the predict
@@ -12,9 +12,9 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from ms_pred.dag_pred.gen_model import FragGNN
-from ms_pred.dag_pred.inten_model import IntenGNN
-from ms_pred.dag_pred.joint_model import JointModel
+from ms_pred.iceberg.gen_model import FragGNN
+from ms_pred.iceberg.inten_model import IntenGNN
+from ms_pred.iceberg.joint_model import JointModel
 
 
 def _tiny_gen() -> FragGNN:
@@ -50,9 +50,9 @@ def test_joint_model_composes_gen_and_inten():
 @pytest.mark.parametrize(
     "module_name",
     [
-        "ms_pred.dag_pred.predict_gen",
-        "ms_pred.dag_pred.predict_inten",
-        "ms_pred.dag_pred.predict_smis",
+        "ms_pred.iceberg.predict_gen",
+        "ms_pred.iceberg.predict_inten",
+        "ms_pred.iceberg.predict_smis",
     ],
 )
 def test_predict_cli_help(module_name):

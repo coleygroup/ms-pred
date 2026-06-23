@@ -23,10 +23,10 @@ from rdkit.Chem import rdPartialCharges
 import ms_pred.common as common
 import ms_pred.nn_utils as nn_utils
 import ms_pred.magma.fragmentation as fragmentation
-from ms_pred.dag_pred.dag_data import DAGDataset, _collate_root, _unroll_pad
+from ms_pred.iceberg.dag_data import DAGDataset, _collate_root, _unroll_pad
 import torch.nn.functional as F
 import json
-from ms_pred.dag_pred.graph_mutate import mutate
+from ms_pred.iceberg.graph_mutate import mutate
 from torch.utils.data import Dataset
 
 class TreeProcessor:

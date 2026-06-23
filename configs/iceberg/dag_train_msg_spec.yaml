@@ -1,5 +1,5 @@
 launcher_args: {experiment_name: dag_gen_msg_spec,
-  script_name: "src/ms_pred/dag_pred/train_gen.py",
+  script_name: "src/ms_pred/iceberg/train_gen.py",
   slurm_script: launcher_scripts/generic_slurm.sh, 
   launch_method: local,
   visible_devices: [4, 5, 6, 7]

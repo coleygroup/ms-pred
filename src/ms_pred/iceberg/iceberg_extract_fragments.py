@@ -16,7 +16,7 @@ from typing import List
 import ms_pred.common as common
 from ms_pred.retrieval.retrieval_benchmark import dist_bin
 
-from ms_pred.dag_pred.iceberg_elucidation import load_pred_spec
+from ms_pred.iceberg.iceberg_elucidation import load_pred_spec
 
 def analyze_fragmentation_patterns(
     result_path: str,

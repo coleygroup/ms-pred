@@ -11,7 +11,7 @@ import dgl.nn as dgl_nn
 import ms_pred.common as common
 import ms_pred.nn_utils as nn_utils
 import ms_pred.magma.fragmentation as fragmentation
-import ms_pred.dag_pred.dag_data as dag_data
+import ms_pred.iceberg.dag_data as dag_data
 
 
 class FragGNN(pl.LightningModule):

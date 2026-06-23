@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 
 import ms_pred.common as common
-from ms_pred.dag_pred import dag_data, inten_model
+from ms_pred.iceberg import dag_data, inten_model
 
 
 def get_args():

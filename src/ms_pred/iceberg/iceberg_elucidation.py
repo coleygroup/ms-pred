@@ -310,7 +310,7 @@ def iceberg_prediction(
         df.to_csv(save_dir / f'cands_df_{exp_name}.tsv', sep='\t', index=False)
 
         # run iceberg to generate in-silico spectrum
-        cmd = (f'''{python_path} src/ms_pred/dag_pred/predict_smis.py \\
+        cmd = (f'''{python_path} src/ms_pred/iceberg/predict_smis.py \\
                --batch-size {batch_size} \\
                --num-gpu-workers {num_gpu_workers} \\
                --num-cpu-workers {num_cpu_workers} \\

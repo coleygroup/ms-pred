@@ -1,5 +1,5 @@
 launcher_args: {experiment_name: dag_inten_msg,
-  script_name: "src/ms_pred/dag_pred/train_inten.py",
+  script_name: "src/ms_pred/iceberg/train_inten.py",
   slurm_script: launcher_scripts/generic_slurm.sh, 
   launch_method: local,
   visible_devices: [0]

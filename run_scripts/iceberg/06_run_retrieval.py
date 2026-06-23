@@ -3,7 +3,7 @@ from pathlib import Path
 import subprocess
 import json
 
-pred_file = "src/ms_pred/dag_pred/predict_smis.py"
+pred_file = "src/ms_pred/iceberg/predict_smis.py"
 retrieve_file = "src/ms_pred/retrieval/retrieval_benchmark.py"
 # can change the above to retrieval_benchmark_torchmetrics.py to retrieve with a candidate set that had duplicate stereoisomers, e.g.
 # the spectrum simulation hit rate evaluation of the MassSpecGym challenge. 
