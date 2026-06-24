@@ -6,7 +6,6 @@ Fragment dataset to build out model class
 import logging
 from pathlib import Path
 from typing import List
-import json
 import copy
 import functools
 import random
@@ -28,6 +27,25 @@ from torch.utils.data.dataset import Dataset
 import ms_pred.common as common
 import ms_pred.nn_utils as nn_utils
 import ms_pred.magma.fragmentation as fragmentation
+
+
+def build_predspec_magma_map(magma_tree_path: Path, strip_pred_prefix: bool = False) -> dict:
+    """Build MARASON DAG lookup keys from the current PredSpecDB layout."""
+    predspec_db = common.PredSpecDB(magma_tree_path)
+    name_to_entry = {}
+    try:
+        for name in predspec_db.get_all_names():
+            map_name = name[5:] if strip_pred_prefix and name.startswith("pred_") else name
+            ces, remarks = predspec_db.get_entries(name)
+            for ce, remark in zip(ces, remarks):
+                ce_label = f"{float(ce):.0f}"
+                name_to_entry[f"{map_name}_collision {ce_label}"] = (name, ce, remark)
+    finally:
+        predspec_db.close()
+
+    if len(name_to_entry) == 0:
+        raise ValueError(f"Expected PredSpecDB entries in {magma_tree_path}")
+    return name_to_entry
 
 class TreeProcessor:
     """TreeProcessor.
@@ -699,15 +717,14 @@ class DAGDataset(Dataset):
         else:
             raise KeyError(f"{x} not found in dataset labels or magma map")
 
-        if isinstance(filekeys, tuple):
-            if not type(self.magma_h5) is common.PredSpecDB:
-                self.magma_h5 = common.PredSpecDB(self.magma_h5)
-            return self.magma_h5.read(*filekeys)
-
-        if not type(self.magma_h5) is common.HDF5Dataset:
-            self.magma_h5 = common.HDF5Dataset(self.magma_h5)
-        fp = self.magma_h5.read_str(filekeys)
-        return json.loads(fp)
+        if not isinstance(filekeys, tuple):
+            raise TypeError(
+                "MARASON expects magma_map values from build_predspec_magma_map: "
+                f"(name, collision_energy, remark), got {type(filekeys)} for {x}"
+            )
+        if not type(self.magma_h5) is common.PredSpecDB:
+            self.magma_h5 = common.PredSpecDB(self.magma_h5)
+        return self.magma_h5.read(*filekeys)
 
     def read_fn(self, x):
         return self.read_tree(self.load_tree(x))

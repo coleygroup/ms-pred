@@ -648,7 +648,8 @@ class IntenGNN(pl.LightningModule):
                 adducts, max_add_hs=max_add_hs, 
                 max_remove_hs=max_remove_hs,
                 masses=masses, root_forms=root_forms,
-                frag_forms=frag_forms, hidden_only = False)
+                frag_forms=frag_forms, hidden_only = False,
+                instruments=instruments)
             return {"output_binned":original_pred["output_binned"], "output":original_pred["output"]}
          
         device=num_frags.device
@@ -1314,7 +1315,7 @@ class IntenGNN(pl.LightningModule):
             closest_num_frags = batch["closest_num_frags"],
             closest_broken=batch["closest_broken_bonds"],
             closest_adducts=batch["closest_adducts"],
-            closest_instruments=batch["instruments"] if self.embed_instrument else None,
+            closest_instruments=batch["closest_instruments"] if self.embed_instrument else None,
             closest_max_remove_hs=batch["closest_max_remove_hs"],
             closest_max_add_hs=batch["closest_max_add_hs"],
             closest_masses=batch["closest_masses"],

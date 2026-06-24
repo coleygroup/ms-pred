@@ -6,9 +6,9 @@ python_file = "src/ms_pred/marason/predict_inten.py"
 node_num = 100
 num_workers = 64
 test_entries = [
-    # {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd1"},
-    # {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd2"},
-    # {"dataset": "nist20", "split": "scaffold_1", "folder": "scaffold_1_rnd3"},
+    {"dataset": "msg_simulation", "split": "split", "folder": "split_rnd1"},
+    # {"dataset": "msg_simulation", "split": "split", "folder": "split_rnd2"},
+    # {"dataset": "msg_simulation", "split": "split", "folder": "split_rnd3"},
     {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd1"},
     # {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd2"},
     # {"dataset": "nist20", "split": "split_1", "folder": "split_1_rnd3"},
@@ -24,7 +24,9 @@ for test_entry in test_entries:
     base_formula_folder = Path(f"results/marason_{dataset}")
     res_folder = Path(f"results/marason_{dataset}/")
     model = res_folder / folder / "ckpt/inten/best.ckpt"
-    if test_entry["folder"] == "split_1_rnd1":
+    if dataset == "msg_simulation":
+        ref_dir = "data/msg_simulation/closest_neighbors/infinite"
+    elif test_entry["folder"] == "split_1_rnd1":
         ref_dir = "data/closest_neighbors/infinite"
     elif test_entry["split"] == "scaffold_1_rnd1":
         ref_dir = "data/closest_neighbors/infinite/scaffold"
@@ -59,7 +61,7 @@ for test_entry in test_entries:
     --batch-size {num_workers} \\
     --dataset-name {dataset} \\
     --split-name {split}.tsv \\
-    --checkpoint {model} \\
+    --checkpoint-pth {model} \\
     --save-dir {save_dir} \\
     --gpu \\
     --num-workers 0 \\

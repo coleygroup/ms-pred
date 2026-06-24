@@ -16,17 +16,17 @@ subform_name = "magma_subform_50.hdf5"
 debug = False
 
 res_entries = [
-    {"folder": "results/marason_nist20/split_1_rnd1/",
-     "dataset": "nist20",
-     "test_split": "split_1"},
+    {"folder": "results/marason_msg_simulation/split_rnd1/",
+     "dataset": "msg_simulation",
+     "test_split": "split"},
 
-    # {"folder": "results/marason_nist20/split_1_rnd2/",
-    #  "dataset": "nist20",
-    #  "test_split": "split_1"},
+    # {"folder": "results/marason_msg_simulation/split_rnd2/",
+    #  "dataset": "msg_simulation",
+    #  "test_split": "split"},
     #
-    # {"folder": "results/marason_nist20/split_1_rnd3/",
-    #  "dataset": "nist20",
-    #  "test_split": "split_1"},
+    # {"folder": "results/marason_msg_simulation/split_rnd3/",
+    #  "dataset": "msg_simulation",
+    #  "test_split": "split"},
     #
     # {"folder": "results/marason_nist20/scaffold_1_rnd1/",
     #  "dataset": "nist20",
@@ -68,7 +68,7 @@ for res_entry in res_entries:
             --dataset-name  {dataset} \\
             --split-name {split}.tsv \\
             --subset-datasets test_only  \\
-            --checkpoint {model} \\
+            --checkpoint-pth {model} \\
             --save-dir {save_dir_temp} \\
             --threshold 0  \\
             --max-nodes {max_node} \\

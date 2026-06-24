@@ -43,15 +43,15 @@ def add_frag_train_args(parser):
     parser.add_argument("--save-dir", default=f"results/{date}_tree_pred/")
     parser.add_argument("--version", default="inten", action="store", type=str)
 
-    parser.add_argument("--dataset-name", default="gnps2015_debug")
+    parser.add_argument("--dataset-name", default="msg_simulation")
     parser.add_argument("--dataset-labels", default="labels.tsv")
     parser.add_argument(
         "--magma-dag-folder",
-        default="data/spec_datasets/gnps2015_debug/magma_outputs/magma_tree",
+        default="results/marason_msg_simulation/split_rnd1/preds_train_100_inten.hdf5",
         help="Folder to have outputs",
     )
-    parser.add_argument("--split-name", default="split_1.tsv")
-    parser.add_argument("--reference-dir", default="data/msg/closest_neighbors/10eV")
+    parser.add_argument("--split-name", default="split.tsv")
+    parser.add_argument("--reference-dir", default="data/msg_simulation/closest_neighbors/infinite")
     parser.add_argument("--batch-size", default=3, action="store", type=int)
     parser.add_argument("--max-epochs", default=100, action="store", type=int)
     parser.add_argument("--min-epochs", default=0, action="store", type=int)
@@ -188,12 +188,7 @@ def train_model():
 
     num_workers = kwargs.get("num_workers", 0)
     magma_dag_folder = Path(kwargs["magma_dag_folder"])
-    magma_tree_h5 = common.PredSpecDB(magma_dag_folder)
-    name_to_keys = {}
-    for name in magma_tree_h5.get_all_names():
-        ces, remarks = magma_tree_h5.get_entries(name)
-        for ce, remark in zip(ces, remarks):
-            name_to_keys[f"{name}_collision {ce}"] = (name, ce, remark)
+    name_to_keys = dag_data.build_predspec_magma_map(magma_dag_folder)
 
 
     pe_embed_k = kwargs["pe_embed_k"]

@@ -27,17 +27,7 @@ import ms_pred.marason.train_inten as inten_train
 
 
 def build_inten_magma_map(magma_tree_path: Path):
-    predspec_db = common.PredSpecDB(magma_tree_path)
-    name_to_entry = {}
-    for name in predspec_db.get_all_names():
-        ces, remarks = predspec_db.get_entries(name)
-        for ce, remark in zip(ces, remarks):
-            name_to_entry[f"{name}_collision {ce}"] = (name, ce, remark)
-    if len(name_to_entry) > 0:
-        return name_to_entry
-
-    legacy_h5 = common.HDF5Dataset(magma_tree_path)
-    return {Path(name).stem: name for name in legacy_h5.get_all_names()}
+    return dag_data.build_predspec_magma_map(magma_tree_path)
 
 
 def score_function(config, base_args, orig_dir=""):

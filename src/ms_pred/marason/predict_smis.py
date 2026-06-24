@@ -39,21 +39,9 @@ RDLogger.DisableLog("rdApp.*")
 
 
 def build_gen_magma_map(magma_tree_path: Path, strip_pred_prefix: bool = False):
-    predspec_db = common.PredSpecDB(magma_tree_path)
-    name_to_entry = {}
-    for name in predspec_db.get_all_names():
-        map_name = name[5:] if strip_pred_prefix and name.startswith("pred_") else name
-        ces, remarks = predspec_db.get_entries(name)
-        for ce, remark in zip(ces, remarks):
-            name_to_entry[f"{map_name}_collision {ce}"] = (name, ce, remark)
-    if len(name_to_entry) > 0:
-        return name_to_entry
-
-    legacy_h5 = common.HDF5Dataset(magma_tree_path)
-    return {
-        Path(name).stem.replace("pred_", "") if strip_pred_prefix else Path(name).stem: name
-        for name in legacy_h5.get_all_names()
-    }
+    return dag_data.build_predspec_magma_map(
+        magma_tree_path, strip_pred_prefix=strip_pred_prefix
+    )
 
 
 def get_args():
@@ -74,16 +62,16 @@ def get_args():
     parser.add_argument(
         "--gen-checkpoint",
         help="name of checkpoint file",
-        default="results/debug_marason/split_1/ckpt/gen/best.ckpt",
+        default="results/marason_msg_simulation/split_rnd1/ckpt/gen/best.ckpt",
     )
     parser.add_argument(
         "--inten-checkpoint",
         help="name of checkpoint file",
-        default="results/debug_marason_inten/split_1/ckpt/inten/best.ckpt",
+        default="results/marason_msg_simulation/split_rnd1/ckpt/inten/best.ckpt",
     )
-    parser.add_argument("--dataset-name", default=None)
+    parser.add_argument("--dataset-name", default="msg_simulation")
     parser.add_argument("--dataset-labels", default="labels.tsv")
-    parser.add_argument("--split-name", default="split_22.tsv")
+    parser.add_argument("--split-name", default="split.tsv")
     parser.add_argument("--threshold", default=0.0, action="store", type=float)
     parser.add_argument("--max-nodes", default=100, action="store", type=int)
     parser.add_argument("--upper-limit", default=1500, action="store", type=int)
@@ -97,7 +85,7 @@ def get_args():
     )
     parser.add_argument(
         "--magma-dag-folder",
-        default="data/spec_datasets/gnps2015_debug/magma_outputs/magma_tree",
+        default="results/marason_msg_simulation/split_rnd1/preds_train_100_inten.hdf5",
         help="Folder to have outputs",
     )
     parser.add_argument(
@@ -194,7 +182,7 @@ def predict():
     )
 
     if kwargs["filter"]:
-        dist_df = pd.read_csv("data/msg/closest_neighbors/infinite/test.csv")
+        dist_df = pd.read_csv("data/msg_simulation/closest_neighbors/infinite/test.csv")
         dist_df = dist_df[dist_df["distance"] < kwargs["mol_threshold"]]
         valid_spec = set(dist_df["names_ori"].tolist())
         def filter_map(r):

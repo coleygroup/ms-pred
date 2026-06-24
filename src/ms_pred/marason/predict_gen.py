@@ -45,11 +45,11 @@ def get_args():
     parser.add_argument(
         "--checkpoint-pth",
         help="name of checkpoint file",
-        default="results/debug_marason/split_1/ckpt/gen/best.ckpt",
+        default="results/marason_msg_simulation/split_rnd1/ckpt/gen/best.ckpt",
     )
-    parser.add_argument("--dataset-name", default="gnps2015_debug")
+    parser.add_argument("--dataset-name", default="msg_simulation")
     parser.add_argument("--dataset-labels", default="labels.tsv")
-    parser.add_argument("--split-name", default="split_1.tsv")
+    parser.add_argument("--split-name", default="split.tsv")
     parser.add_argument(
         "--subset-datasets",
         default="none",
@@ -89,6 +89,12 @@ def predict():
 
     if kwargs["subset_datasets"] != "none":
         splits = pd.read_csv(data_dir / "splits" / kwargs["split_name"], sep="\t")
+        if "spec" not in splits.columns and "name" in splits.columns:
+            splits = splits.rename(columns={"name": "spec"})
+        if "spec" not in splits.columns:
+            raise ValueError(
+                "Split file must contain a 'spec' column or a legacy 'name' column."
+            )
         folds = set(splits.keys())
         folds.remove("spec")
         fold_name = list(folds)[0]

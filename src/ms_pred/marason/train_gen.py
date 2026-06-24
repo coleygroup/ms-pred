@@ -22,21 +22,11 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 
 import ms_pred.common as common
-from ms_pred.iceberg import dag_data, gen_model
+from ms_pred.marason import dag_data, gen_model
 
 
 def build_gen_magma_map(magma_tree_path: Path):
-    predspec_db = common.PredSpecDB(magma_tree_path)
-    name_to_entry = {}
-    for name in predspec_db.get_all_names():
-        ces, remarks = predspec_db.get_entries(name)
-        for ce, r in zip(ces, remarks):
-            name_to_entry[f"{name}_collision {ce}"] = (name, ce, r)
-    if len(name_to_entry) > 0:
-        return name_to_entry
-
-    legacy_h5 = common.HDF5Dataset(magma_tree_path)
-    return {Path(name).stem: name for name in legacy_h5.get_all_names()}
+    return dag_data.build_predspec_magma_map(magma_tree_path)
 
 
 def add_frag_train_args(parser):
@@ -53,12 +43,12 @@ def add_frag_train_args(parser):
     parser.add_argument("--save-dir", default=f"results/{date}_tree_pred/")
     parser.add_argument("--version", default="gen", action="store", type=str)
 
-    parser.add_argument("--dataset-name", default="gnps2015_debug")
+    parser.add_argument("--dataset-name", default="msg_simulation")
     parser.add_argument("--dataset-labels", default="labels.tsv")
     parser.add_argument(
         "--magma-folder", default="magma_outputs", help="stem of magma folder"
     )
-    parser.add_argument("--split-name", default="split_1.tsv")
+    parser.add_argument("--split-name", default="split.tsv")
 
     parser.add_argument("--learning-rate", default=7e-4, action="store", type=float)
     parser.add_argument("--lr-decay-rate", default=1.0, action="store", type=float)

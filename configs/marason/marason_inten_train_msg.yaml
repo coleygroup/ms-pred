@@ -1,4 +1,4 @@
-launcher_args: {experiment_name: marason_msg_allev,
+launcher_args: {experiment_name: marason_msg_simulation,
   script_name: "src/ms_pred/marason/train_inten.py",
   slurm_script: launcher_scripts/generic_slurm.sh, 
   launch_method: local,
@@ -17,7 +17,7 @@ universal_args:
   batch-size: [16]
   max-epochs: [200]
 
-  dataset-name: [msg]
+  dataset-name: [msg_simulation]
   split-name: [split.tsv]
   dataset-labels: [labels.tsv]
 
@@ -54,7 +54,7 @@ universal_args:
   add-reference: [true]
   load-reference: [true]
   save-reference: [false]
-  reference-dir: ["data/msg/closest_neighbors/infinite"]
+  reference-dir: ["data/msg_simulation/closest_neighbors/infinite"]
   max-ref-count: [3]
   matching-method: ["softmax"]
   logger: ["marason_inten_msg"]
@@ -65,15 +65,15 @@ universal_args:
 iterative_args:
   -  split-name: [split.tsv]
      save-dir: [split_rnd1]
-     magma-dag-folder: [results/marason_msg/split_rnd1/preds_train_100_inten.hdf5]
+     magma-dag-folder: [results/marason_msg_simulation/split_rnd1/preds_train_100_inten.hdf5]
      seed: [1]
 
   # -  split-name: [split.tsv]
   #    save-dir: [split_rnd2_entropy]
-  #    magma-dag-folder: [results/marason_msg/split_rnd2/preds_train_100_inten.hdf5]
+  #    magma-dag-folder: [results/marason_msg_simulation/split_rnd2/preds_train_100_inten.hdf5]
   #    seed: [2]
 
   # -  split-name: [split.tsv]
   #    save-dir: [split_rnd3_entropy]
-  #    magma-dag-folder: [results/marason_msg/split_rnd3/preds_train_100_inten.hdf5]
+  #    magma-dag-folder: [results/marason_msg_simulation/split_rnd3/preds_train_100_inten.hdf5]
   #    seed: [3]
