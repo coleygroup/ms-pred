@@ -24,15 +24,15 @@ add_ref = True
 
 test_entries = [
     {
-        "dataset": "msg_simulation",
-        "results_name": "msg_simulation",
+        "dataset": "msg",
+        "results_name": "msg",
         "test_split": "test_formula",
         "split_name": "split.tsv",
-        "candidate_table": "data/spec_datasets/msg_simulation/retrieval/cands_df_test_formula_256.tsv",
-        "true_labels": "data/spec_datasets/msg_simulation/labels.tsv",
+        "candidate_table": "data/spec_datasets/msg/retrieval/cands_df_test_formula_256.tsv",
+        "true_labels": "data/spec_datasets/msg/labels.tsv",
         "inten_folder": "split_rnd1",
         "max_k": 256,
-        "ref_dir": "data/msg_simulation/closest_neighbors/infinite",
+        "ref_dir": "data/msg/closest_neighbors/infinite",
     },
 ]
 
@@ -45,8 +45,8 @@ for test_entry in test_entries:
     split = test_entry["test_split"]
     split_name = test_entry.get("split_name", "split.tsv")
     maxk = test_entry["max_k"]
-    inten_dir = Path(f"results/marason_{results_name}")
-    inten_model = inten_dir / inten_split / "ckpt/inten/best.ckpt"
+    inten_dir = Path(f"results/marason_inten_{results_name}")
+    inten_model = inten_dir / inten_split / "version_0/best.ckpt"
 
     if not inten_model.exists():
         print(f"Could not find model {inten_model}; skipping\n: {json.dumps(test_entry, indent=1)}")
@@ -63,7 +63,7 @@ for test_entry in test_entries:
 
     args = yaml.safe_load(open(inten_dir / inten_split / "args.yaml", "r"))
     form_folder = Path(args["magma_dag_folder"])
-    gen_model = form_folder.parent / "ckpt/gen/best.ckpt"
+    gen_model = form_folder.parent / "version_0/best.ckpt"
     print(gen_model)
 
     save_dir = save_dir
