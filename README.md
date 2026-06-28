@@ -197,7 +197,6 @@ Replicating the retrieval metrics and CIs for the MassSpecGym spectrum challenge
 3. and upon completion of ranking, running `src/ms_pred/retrieval/bootstrap_metrics.py`.
 
 ### MARASON
-> Note that MARASON is not actively maintained and is not compatible with this repo at the moment. 
 
 MARASON is trained in two parts: a learned fragment generator (the same as the one in ICEBERG) and an RAG-based intensity predictor. The pipeline for training and evaluating this model can be accessed in `run_scripts/marason/`. 
 There is an all-in-one script ``run_scripts/marason/run_all.sh`` that trains the up-to-date version of MARASON on NIST'20 and MassSpecGym dataset. 
