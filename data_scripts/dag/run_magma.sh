@@ -1,4 +1,4 @@
-dataset=nist20 # nist20, nist23, msg
+dataset=msg # nist20, nist23, msg
 max_peaks=50
 ppm_diff=20
 workers=32
@@ -18,7 +18,7 @@ if [ -f "data/spec_datasets/$dataset/subformulae/no_subform.hdf5" ]; then
 else
   python data_scripts/forms/01_assign_subformulae.py \
   --data-dir data/spec_datasets/$dataset/ \
-  --spectra-dir data/spec_datasets/$dataset/spec_files_w_imputed_eV \
+  --spectra-dir data/spec_datasets/$dataset/spec_files \
   --labels-file data/spec_datasets/$dataset/labels.tsv \
   --use-all \
   --output-dir no_subform.hdf5 \

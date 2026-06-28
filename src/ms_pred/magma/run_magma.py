@@ -176,6 +176,13 @@ def magma_augmentation(
     spectra_smiles = spec_to_smiles.get(spec_name_clean, None)
     spectra_adduct = spec_to_adduct.get(spec_name_clean, None)
 
+    # The spectra HDF5 can contain more spectra than labels.tsv (e.g. when the
+    # --spectra-dir points at a superset). Without a SMILES there is nothing to
+    # fragment, so report it as a missing label rather than a fragmentation bug.
+    if spectra_smiles is None:
+        print(f"Skipping spec {spec_name_clean}: no SMILES found in labels (not in labels.tsv)")
+        return
+
     # Step 1 - Generate fragmentations inside fragmentation engine
     # Outside try except loop
     if debug:
@@ -185,15 +192,16 @@ def magma_augmentation(
         try:
             fe = fragmentation.FragmentEngine(mol_str=spectra_smiles, **fragmentation.FRAGMENT_ENGINE_PARAMS)
             fe.generate_fragments()
-        except:
-            print(f"Error with generating fragments for spec {spec_name_clean}")
+        except Exception as e:
+            print(f"Error with generating fragments for spec {spec_name_clean} "
+                  f"(smiles={spectra_smiles}): {type(e).__name__}: {e}")
             return
 
     # Step 2: Process spec and get comparison points
     # Read in file and filter it down
     spectra.process_spec_file(parentmass=meta['parentmass'] if 'parentmass' in meta else None)
     if len(spectra) == 0:
-        print(f"Error with generating fragments for spec {spec_name_clean}")
+        print(f"Skipping spec {spec_name_clean}: no usable peaks after processing the spectrum")
         return
 
     if merge_specs:
