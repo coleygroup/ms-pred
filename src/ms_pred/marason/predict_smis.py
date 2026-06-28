@@ -302,6 +302,9 @@ def predict():
             if kwargs["add_ref"]:
                 smi_no_stereo = common.rm_stereo(smi)
                 mol = common.smi_inchi_round_mol(smi_no_stereo)
+                if mol is None:
+                    logging.error(f"Could not canonicalize SMILES for ref matching: {smi} (spec {name})")
+                    return []
                 canonical_smi = Chem.MolToSmiles(mol)  # canonical smiles
                 morgan = common.get_morgan_fp_smi(canonical_smi, isbool=True)
                 min_distance, valid_ref_count, closest = find_ref(adduct, morgan, instrument, keep=kwargs["keep"])
