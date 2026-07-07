@@ -1,4 +1,6 @@
-#  Mass Spectrum Predictor
+#  Mass Spectrum Predictors
+
+**Update 7/3/2026:** Introducing ICEBERG 2.1! It has a substantial GPU speedup, and we provide pretrained NIST'23 model. Checkout to the [ICEBERG 2.0 branch](https://github.com/coleygroup/ms-pred/tree/iceberg_2.0) if you want to run the earlier 2.0 model.
 
 [![ICEBERG-WebUI](iceberg_teaser.png)](http://iceberg-ms.mit.edu/)
 
@@ -8,11 +10,11 @@
 
 This repository contains implementations for the following spectrum simulator models predicting molecular tandem mass spectra from molecules: 
 - 🏔️ GLACIER 🏔️: GLACIER: Rethinking Mass Spectrum Prediction as an Object Detection Problem
-- 🧊 ICEBERG 🧊️: [Inferring CID by Estimating Breakage Events and Reconstructing their Graphs](http://arxiv.org/abs/2304.13136) and [Neural Spectral Prediction for Structure Elucidation with Tandem Mass Spectrometry](https://www.biorxiv.org/content/10.1101/2025.05.28.656653v1)
+- 🧊 ICEBERG 2.1 🧊️: [Neural Spectral Prediction for Structure Elucidation with Tandem Mass Spectrometry](https://www.biorxiv.org/content/10.1101/2025.05.28.656653v1)
 - 🏃‍ MARASON 🏃‍: [Neural Graph Matching Improves Retrieval Augmented Generation in Molecular Machine Learning](https://arxiv.org/html/2502.17874)
 - 🧣 SCARF 🧣: [Subformula Classification for Autoregressively Reconstructing Fragmentations](https://arxiv.org/abs/2303.06470)
 
-GLACIER and ICEBERG predict spectra at the level of molecular fragments, whereas SCARF predicts spectra at the level of chemical formula. In order to fairly compare various spectra models, we implement a number of baselines and alternative models using equivalent settings across models (i.e., same covariates, hyperparameter sweeps for each, etc.):
+GLACIER, ICEBERG, and MARASON predict spectra at the level of molecular fragments, whereas SCARF predicts spectra at the level of chemical formula. In order to fairly compare various spectra models, we implement a number of baselines and alternative models using equivalent settings across models (i.e., same covariates, hyperparameter sweeps for each, etc.):
  
 1. *NEIMS* using both FFN and GNN encoders from [Rapid prediction of electron–ionization mass spectrometry using neural networks](https://pubs.acs.org/doi/full/10.1021/acscentsci.9b00085)    
 2. *MassFormer* from [MassFormer: Tandem Mass Spectrum Prediction for Small Molecules using Graph Transformers](https://arxiv.org/abs/2111.04824)  
@@ -59,7 +61,8 @@ Any newer/older CUDA versions should also work, please change the CUDA tags in `
 If you are not using GPU, please update ``envorinment.yml`` following the ``CPU-only`` comments in that file.
 
 ## Demo <a name="demo"></a>
-To easily get started, you can run ICEBERG structural elucidation at the WebUI: http://iceberg-ms.mit.edu/
+To easily get started, you can run ICEBERG structural elucidation at the WebUI: http://iceberg-ms.mit.edu/.
+It supports retrieval from all structures in PubChem, excluding those structures in NIST'23 to avoid license conflict.
 
 If you want more flexibility by doing some coding, a demo of how to use mass spectrum predictors (ICEBERG as an example) for structural elucidation campaigns can be found at [``notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb``](notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb).
 
@@ -68,7 +71,7 @@ Please go through the following prerequisites to run the demo:
 * Start a jupyter notebook server (by ``jupyter notebook``), and navigate to ``notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb`` in the web UI.
 * Get pretrained ICEBERG model weights.
     * You can either train the model by yourself (following instructions below);
-    * Or if you have an NSIT'20 license (or newer), you can [email the maintainer with a proof of license](mailto:runzhong@mit.edu?subject=Inquiry%20of%20pretrianed%20ICEBERG%20on%20NIST20&body=My%20organization%20has%20a%20NIST'20%20(or%20newer)%20license%20and%20I%20would%20like%20to%20receive%20pretrained%20weights%20of%20ICEBERG%20on%20NIST'20.%20Please%20find%20the%20proof%20of%20purchase%20as%20attached.)
+    * Or if you have an NSIT'20 or NIST'23 license, you can [email the maintainer with a proof of license](mailto:runzhong@mit.edu?subject=Inquiry%20of%20pretrianed%20ICEBERG%20on%20NIST20&body=My%20organization%20has%20a%20NIST'20%20(or%20newer)%20license%20and%20I%20would%20like%20to%20receive%20pretrained%20weights%20of%20ICEBERG%20on%20NIST'20.%20Please%20find%20the%20proof%20of%20purchase%20as%20attached.)
 * Update [``the configuration file``](configs/iceberg/iceberg_elucidation.yaml) based your local setting. Change ``python_path`` to your Python excutiable, and update ``gen_ckpt`` and ``inten_ckpt`` to the path of your pretrained models.
     * When you have a GPU with smaller RAM, set smaller numbers for ``batch_size`` and ``num_workers`` to fit the model into GPU RAM (``batch_size: 8``, ``num_workers: 6`` tested on NVIDIA RTX 4070M 8GB; ``batch_size: 8``, ``num_workers: 12`` tested on NVIDIA RTX A5000 24GB).
     * CPU-only inference is also feasible if you set ``cuda_devices: None``.
@@ -78,7 +81,7 @@ Running the demo takes <2 minutes with a regular desktop GPU.
 ## Data <a name="data"></a>
 
 > We are retiring the support of the NPLIB1 dataset (also referred as CANOPUS sometimes) in the main branch. 
-> You can checkout to the [``iceberg_analychem_2024`` branch](https://github.com/coleygroup/ms-pred/tree/iceberg_analychem_2024)
+> You can checkout to the [``iceberg_1.0`` branch](https://github.com/coleygroup/ms-pred/tree/iceberg_1.0)
 > with the legacy code that supports NPLIB1.
 
 ``nist20/nist23`` is a commercial dataset available for purchase through [several vendors worldwide](https://chemdata.nist.gov/dokuwiki/doku.php?id=chemdata:distributors).
@@ -98,6 +101,97 @@ Once the dataset is processed, move the files to ``ms-pred/data/spec_datasets/ni
 ```
 Rename ``nist20`` with ``nist23`` if you are working with the newer version.
 
+
+### MassSpecGym Data Processing
+
+We support two MassSpecGym processing settings for ICEBERG:
+
+1. `msg_simulation`: the official MassSpecGym simulation-challenge subset.
+2. `msg_all`: a streamlined ICEBERG workflow for using all MassSpecGym entries
+   in the main retrieval benchmark.
+
+#### `msg_simulation`: Official Simulation-Challenge Subset
+
+The `msg_simulation` dataset is the MassSpecGym simulation-challenge subset. It is generated from the public
+MassSpecGym 1.5 data on Hugging Face and keeps only rows with
+`simulation_challenge == True` and known collision energies.
+
+First, make sure the base MassSpecGym dataset resources are available under
+`data/spec_datasets/msg`. At minimum, this directory should contain the spectrum
+HDF5 and the retrieval candidate tables you want to reuse:
+
+```text
+data/spec_datasets/msg/
+├── labels.tsv
+├── spec_files.hdf5
+└── retrieval/
+    ├── cands_df_test_formula_256.tsv
+    └── cands_df_test_mass_256.tsv
+```
+
+Then run:
+
+```shell
+python data_scripts/create_msg_simulation_dataset.py \
+  --source-table https://huggingface.co/datasets/roman-bushuiev/MassSpecGym/resolve/main/data/MassSpecGym1.5.tsv \
+  --source-dataset data/spec_datasets/msg \
+  --output-dataset data/spec_datasets/msg_simulation \
+  --force-output \
+  --overwrite \
+  --audit-out data/spec_datasets/msg_simulation/audit.json
+```
+
+The command writes `data/spec_datasets/msg_simulation/labels.tsv`,
+`data/spec_datasets/msg_simulation/splits/split.tsv`, filtered retrieval
+candidate tables, and small debug files for quick smoke checks. It also links or
+copies reusable resources from `data/spec_datasets/msg`, including
+`spec_files.hdf5`, `magma_outputs`, and `subformulae` when they are present.
+
+After generation, check the audit:
+
+```shell
+python - <<'PY'
+import json
+from pathlib import Path
+
+audit = json.loads(Path("data/spec_datasets/msg_simulation/audit.json").read_text())
+print(audit["output_rows"], audit["output_unique_specs"])
+print(audit["imputed_check"])
+PY
+```
+
+For the current MassSpecGym 1.5 TSV, the expected output is 119,029 unique
+simulation-challenge spectra and zero imputed labels.
+
+#### `msg_all`: Full MassSpecGym ICEBERG Workflow
+
+The `msg_all` setting provides an ICEBERG processing framework for all
+MassSpecGym entries. The configuration files live under
+`configs/iceberg/msg_all`, with the staged pipeline scripts under
+`run_scripts/iceberg/msg_all`.
+
+This setting is needed because ICEBERG 2.0+ models use collision energy as an
+input, while not every MassSpecGym entry has an annotated collision energy. The
+workflow first trains ICEBERG on the subset with known collision energies, uses
+that model to annotate missing collision energies and generate pseudo labels,
+then trains again on the full dataset containing both real and imputed collision
+energy labels. The resulting full-dataset model is then evaluated on the full
+MassSpecGym retrieval benchmark, which enables a fair comparison of ICEBERG on
+the main MassSpecGym task.
+
+The end-to-end stage order is encoded in
+`run_scripts/iceberg/msg_all/run_all.sh`:
+
+```text
+train on known collision energies
+-> predict known-CE spectra
+-> train the known-CE intensity model
+-> impute missing collision energies with ICEBERG
+-> build data/spec_datasets/msg_all_iceberg
+-> assign subformulae
+-> train on the full real+pseudo-labeled dataset
+-> evaluate retrieval on the full benchmark
+```
 
 ### SCARF Processing
 
@@ -154,29 +248,31 @@ python data_scripts/predict_chemical_class.py
  
 ## Experiments <a name="experiments"></a>
 
-### ICEBERG
+### ICEBERG 2.1
 
-ICEBERG is our recommended model with a 40% top-1 retrieval accuracy with [M+H]+, benchmarked on the NIST'20 dataset. 
+ICEBERG 2.1 is our recommended model with a ~3 times speedup and official support on NIST'23. 
 ICEBERG is trained in two parts: a learned fragment generator and an intensity predictor. The pipeline for training and evaluating this model can be accessed in `run_scripts/iceberg/`. 
-There is an all-in-one script ``run_scripts/iceberg/run_all.sh`` that trains the up-to-date version of ICEBERG on NIST'20 dataset described in [Wang et al. (2025)](https://doi.org/10.1101/2025.05.28.656653). 
-The archived version released with [Goldman et al. (2024)](http://arxiv.org/abs/2304.13136) is at the [``iceberg_analychem_2024`` branch](https://github.com/coleygroup/ms-pred/tree/iceberg_analychem_2024).
+There is an all-in-one script ``run_scripts/iceberg/nist23/run_all.sh`` that trains ICEBERG 2.1 on NIST'23 dataset.
+
+Current version is an update to ICEBERG 2.0 which is described in [Wang et al. (2025)](https://doi.org/10.1101/2025.05.28.656653), available at the [``iceberg_2.0`` branch](https://github.com/coleygroup/ms-pred/tree/iceberg_2.0). 
+The archived version released with [Goldman et al. (2024)](http://arxiv.org/abs/2304.13136) is at the [``iceberg_1.0`` branch](https://github.com/coleygroup/ms-pred/tree/iceberg_1.0).
 The internal pipeline used to conduct experiments can be followed below:
 
-1. *Train dag model*: `run_scripts/iceberg/01_run_dag_gen_train.sh`   
-2. *Sweep over the number of fragments to generate*: `run_scripts/iceberg/02_sweep_gen_thresh.py`     
-3. *Use model 1 to predict model 2 training set*: `run_scripts/iceberg/03_run_dag_gen_predict.sh`   
-4. *Train intensity model, including contrastive training*: `run_scripts/iceberg/04_train_dag_inten.sh`   
-5. *Make and evaluate intensity predictions*: `run_scripts/iceberg/05_predict_dag_inten.py`  
-6. *Run retrieval*: `run_scripts/iceberg/06_run_retrieval.py`
+1. *Train dag model*: `run_scripts/iceberg/nist23/01_run_dag_gen_train.sh`   
+2. *Sweep over the number of fragments to generate*: `run_scripts/iceberg/nist23/02_sweep_gen_thresh.py`     
+3. *Use model 1 to predict model 2 training set*: `run_scripts/iceberg/nist23/03_run_dag_gen_predict.sh`   
+4. *Train intensity model, including contrastive training*: `run_scripts/iceberg/nist23/04_train_dag_inten.sh`   
+5. *Make and evaluate intensity predictions*: `run_scripts/iceberg/nist23/05_predict_dag_inten.py`  
+6. *Run retrieval*: `run_scripts/iceberg/nist23/06_run_retrieval.py`
 
 > The above scripts will only run for split_1_rnd1 (random split, seed=1), which is suitable if you want to train your own ICEBERG for structural elucidation applications.
 > 
 > If you want to replicate our reported result with random + scaffold splits and 3 random seeds, please uncomment
 > all entries in the following files
-> * ``configs/iceberg/*.yaml``
-> * ``run_scripts/iceberg/02_sweep_gen_thresh.py``
-> * ``run_scripts/iceberg/05_predict_dag_inten.py``
-> * ``run_scripts/iceberg/06_run_retrieval.py``
+> * ``configs/iceberg/nist23/*.yaml``
+> * ``run_scripts/iceberg/nist23/02_sweep_gen_thresh.py``
+> * ``run_scripts/iceberg/nist23/05_predict_dag_inten.py``
+> * ``run_scripts/iceberg/nist23/06_run_retrieval.py``
 
 > You need two GPUs with at least 24GB RAM to train ICEBERG (we used NVIDIA A5000 for development). If you are trying to
 > train the model on a smaller GPU, try cutting down the batch size and skipping the contrastive 
@@ -238,13 +334,13 @@ training, and predict calls can be made using the following scripts respectively
 You can use `python launcher_scripts/run_from_config.py configs/marason/marason_inten_test_nist.yaml` to generate relevant analysis and visualizations in the MARASON paper. You can draw the matching pattern and the spectra visualization by setting `draw` and `plot-spec` to be true respectively. If you want to do the similarity-grouped analysis described in the paper, set `draw` and `plot-spec` to be false. The bootstrap analysis for MassSpecGym retrieval task can be carried out by running `analysis/msg_bootstrap.py`.
 
 ### GLACIER
-GLACIER is the first ms/ms machine learning model that predict multi-breakpoint fragmentation process in single pass. You can reproduce the experiments in our paper with the following scripts.
-0. *Add spectral intensity to the magma heuristics prediction*: `run_scripts/GLACIER/add_inten.sh`
-2. *Train model*: `run_scripts/GLACIER/01_train_joint.sh`   
-3. *Predict spectral intensity*: `run_scripts/GLACIER/02_predict_inten.py`     
-4. *Retrieval*: `run_scripts/GLACIER/03_run_retrieval.py` 
+GLACIER is the first ms/ms machine learning model that predicts multi-breakpoint fragmentation process in single pass. You can reproduce the experiments in our paper with the following scripts.
+0. *Add spectral intensity to the magma heuristics prediction*: `run_scripts/glacier/add_inten.sh`
+2. *Train model*: `run_scripts/glacier/01_train_joint.sh`   
+3. *Predict spectral intensity*: `run_scripts/glacier/02_predict_inten.py`     
+4. *Retrieval*: `run_scripts/glacier/03_run_retrieval.py` 
 
-We provide a [checkpoint](https://www.dropbox.com/scl/fo/ta99j0mp1w7qzek5zvy3w/AFCLQNO8W2EP7ZDMOj9nxWI?rlkey=563zxtyvvhwfu1uyz6n10n2ui&st=k8km33p3&dl=0) of GLACIER trained and finetuned on the MassSpecGym dataset. 
+We provide a [checkpoint](https://www.dropbox.com/scl/fo/ta99j0mp1w7qzek5zvy3w/AFCLQNO8W2EP7ZDMOj9nxWI?rlkey=563zxtyvvhwfu1uyz6n10n2ui&st=k8km33p3&dl=0) of GLACIER trained on the MassSpecGym dataset. 
 
 > You need two GPUs with at least 24GB RAM to train GLACIER (we used NVIDIA A5000 for development). 
 
