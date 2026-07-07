@@ -1,40 +1,31 @@
-dataset=msg # nist20, nist23, msg
-max_peaks=50
-ppm_diff=20
-workers=32
+#!/usr/bin/env bash
+
+dataset=${1:-${dataset:-nist23}} # nist20, nist23, msg_all, msg_simulate
+max_peaks=${max_peaks:-50}
+ppm_diff=${ppm_diff:-20}
+workers=${workers:-32}
+
+data_dir="data/spec_datasets/$dataset"
+labels="$data_dir/labels.tsv"
+spec_files="$data_dir/spec_files.hdf5"
+subform_file="$data_dir/subformulae/no_subform.hdf5"
 
 python3 src/ms_pred/magma/run_magma.py  \
---spectra-dir data/spec_datasets/$dataset/spec_files.hdf5  \
---output-dir data/spec_datasets/$dataset/magma_outputs  \
---spec-labels data/spec_datasets/$dataset/labels.tsv \
+--spectra-dir "$spec_files"  \
+--output-dir "$data_dir/magma_outputs"  \
+--spec-labels "$labels" \
 --max-peaks $max_peaks \
---ppm-diff $ppm_diff \
---workers $workers \
-
-# for msg: may need to override the --spectra-dir flag to point to a different spec_files folder as needed. 
-
-if [ -f "data/spec_datasets/$dataset/subformulae/no_subform.hdf5" ]; then
-  echo "no_subform.hdf5 exists for $dataset, skipping"
-else
-  python data_scripts/forms/01_assign_subformulae.py \
-  --data-dir data/spec_datasets/$dataset/ \
-  --spectra-dir data/spec_datasets/$dataset/spec_files \
-  --labels-file data/spec_datasets/$dataset/labels.tsv \
-  --use-all \
-  --output-dir no_subform.hdf5 \
-  --num-workers $workers \
-
-fi
 --ppm-diff $ppm_diff \
 --workers $workers
 
-if [ -f "data/spec_datasets/$dataset/subformulae/no_subform.hdf5" ]; then
+if [ -f "$subform_file" ]; then
   echo "no_subform.hdf5 exists for $dataset, skipping"
 else
+  mkdir -p "$data_dir/subformulae"
   python data_scripts/forms/01_assign_subformulae.py \
-  --data-dir data/spec_datasets/$dataset/ \
-  --labels-file data/spec_datasets/$dataset/labels.tsv \
+  --data-dir "$data_dir" \
+  --labels-file "$labels" \
   --use-all \
-  --output-dir no_subform.hdf5 \
+  --output-dir-name no_subform.hdf5 \
   --num-workers $workers
 fi

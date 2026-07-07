@@ -9,3 +9,4 @@ pygmtools
 h5py
 msbuddy
 lightgbm
+linsatnet

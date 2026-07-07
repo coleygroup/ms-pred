@@ -33,8 +33,6 @@ MAX_ID=3000
 
 # usage: sbatch run_scripts/iceberg_atlas/02_run_prediction_slurm.sh
 
-set -euo pipefail
-
 # --------------------------
 # Runtime setup
 # --------------------------

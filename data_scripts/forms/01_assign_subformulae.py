@@ -7,7 +7,9 @@ and save to JSON files.
 
 from pathlib import Path
 import argparse
+import ast
 from functools import partial
+import math
 import numpy as np
 import pandas as pd
 import json
@@ -29,6 +31,12 @@ def get_args():
         help="Name of output dir (in data_dir/subformulae)",
     )
     parser.add_argument(
+        "--output-dir",
+        dest="output_dir_name",
+        default=None,
+        help="Alias for --output-dir-name.",
+    )
+    parser.add_argument(
         "--labels-file",
         default="data/spec_datasets/gnps2015_debug/labels.tsv",
         help="Data debug",
@@ -47,6 +55,15 @@ def get_args():
         action="store_true",
         default=False,
         help="If true, do not subset formula.",
+    )
+    parser.add_argument(
+        "--collision-source",
+        choices=["raw", "labels"],
+        default="raw",
+        help=(
+            "Use raw spectrum collision labels for output keys, or rewrite output "
+            "keys from labels.tsv collision_energies while keeping the raw peaks."
+        ),
     )
     parser.add_argument(
         "--mass-diff-type",
@@ -83,6 +100,70 @@ def get_args():
         help="Number of parallel workers",
     )
     return parser.parse_args()
+
+
+def parse_label_collision_energies(value) -> list[float]:
+    """Parse a labels.tsv collision_energies cell into collision values."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return [float("nan")]
+    if isinstance(value, str):
+        text = value.strip()
+        if text == "" or text.lower() in {"nan", "none", "null"}:
+            return [float("nan")]
+        try:
+            value = ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            value = [text]
+    if not isinstance(value, (list, tuple, np.ndarray)):
+        value = [value]
+
+    out = []
+    for item in value:
+        if item is None or (isinstance(item, float) and math.isnan(item)):
+            out.append(float("nan"))
+            continue
+        if isinstance(item, str):
+            item = item.strip()
+            if item == "" or item.lower() in {"nan", "none", "null"}:
+                out.append(float("nan"))
+                continue
+            item = item.split()[0]
+        out.append(float(item))
+    return out or [float("nan")]
+
+
+def format_collision_energy(collision_energy: float) -> str:
+    """Format collision values for subformula HDF5 keys."""
+    if collision_energy is None or math.isnan(float(collision_energy)):
+        return "nan"
+    return f"{float(collision_energy):.0f}"
+
+
+def find_matching_raw_spec(raw_specs, label_collision_energy, fallback_index: int):
+    """Select the raw spectrum whose peaks should be written under a label CE key."""
+    raw_items = list(raw_specs.items())
+    if len(raw_items) == 1:
+        return raw_items[0][1]
+
+    label_is_nan = label_collision_energy is None or math.isnan(float(label_collision_energy))
+    for raw_collision_energy, raw_spec in raw_items:
+        raw_collision_float = common.collision_energy_to_float(raw_collision_energy)
+        raw_is_nan = math.isnan(raw_collision_float)
+        if (label_is_nan and raw_is_nan) or (
+            not label_is_nan
+            and not raw_is_nan
+            and float(f"{raw_collision_float:.0f}") == float(f"{float(label_collision_energy):.0f}")
+        ):
+            return raw_spec
+
+    if fallback_index < len(raw_items):
+        return raw_items[fallback_index][1]
+
+    raw_keys = [raw_key for raw_key, _ in raw_items]
+    raise ValueError(
+        "Could not match label collision energy "
+        f"{format_collision_energy(label_collision_energy)} to raw collisions {raw_keys}"
+    )
 
 
 
@@ -274,7 +355,20 @@ def process_spec_file(spec_name: str, data_dir: Path):
     ms_h5 = common.HDF5Dataset(data_dir / "spec_files.hdf5")
     spec_lines = ms_h5.read_str(f"{spec_name}.ms").split('\n')
     meta, specs = common.parse_spectra(spec_lines)
-    specs.process_spec_file(parentmass=meta['parentmass'] if 'parentmass' in meta else None)
+    parentmass = meta['parentmass'] if 'parentmass' in meta else None
+    for ce_key, ms_obj in list(specs.items()):
+        try:
+            specs.ce_to_ms[ce_key] = ms_obj.process_spec_file(parentmass=parentmass)
+        except KeyError:
+            specs.ce_to_ms[ce_key] = common.MassSpec(
+                collision_energy=ms_obj.collision_energy,
+                root_canonical_smiles=ms_obj.root_canonical_smiles,
+                adduct=ms_obj.adduct,
+                remark=ms_obj.remark,
+                masses=np.array([], dtype=float),
+                intens=np.array([], dtype=float),
+                **ms_obj.meta,
+            )
     # if 'nan' not in specs:  # include a merged spec
     #     specs['collision nan'] = common.process_spec_file(meta, tuples, merge_specs=True)
     return spec_name, specs
@@ -290,6 +384,7 @@ def main():
     mass_diff_type = args.mass_diff_type
     inten_thresh = args.inten_thresh
     use_all = args.use_all
+    collision_source = args.collision_source
 
     max_form = args.max_formulae
     max_formulae = args.max_formulae
@@ -326,7 +421,23 @@ def main():
     export_dicts = []
     for _, row in labels_df.iterrows():
         spec_name = row["spec"]
-        for colli_eng, spec in input_specs_dict[spec_name].items():
+        if collision_source == "labels":
+            collision_specs = [
+                (
+                    format_collision_energy(colli_eng),
+                    find_matching_raw_spec(input_specs_dict[spec_name], colli_eng, fallback_index),
+                )
+                for fallback_index, colli_eng in enumerate(
+                    parse_label_collision_energies(row.get("collision_energies"))
+                )
+            ]
+        else:
+            collision_specs = [
+                (colli_eng, spec)
+                for colli_eng, spec in input_specs_dict[spec_name].items()
+            ]
+
+        for colli_eng, spec in collision_specs:
             new_entry = {
                 "spec_name": f'{spec_name}_collision {colli_eng}',
                 "spec": spec.spec,

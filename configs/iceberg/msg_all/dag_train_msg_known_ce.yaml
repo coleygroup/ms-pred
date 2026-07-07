@@ -1,22 +1,21 @@
-launcher_args: {experiment_name: dag_gen_msg_spec,
+launcher_args: {experiment_name: iceberg_msg_known_ce,
   script_name: "src/ms_pred/iceberg/train_gen.py",
-  slurm_script: launcher_scripts/generic_slurm.sh, 
+  slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,
-  visible_devices: [4, 5, 6, 7]
+  visible_devices: [0]
 }
 universal_args:
   _slurm_args:
-  - {_num_gpu: 1, cpus-per-task: 7, job-name: forward_train, mem-per-cpu: 8G,
+  - {nodes: 1, ntasks: 1, gpus: l40s:1, cpus-per-task: 16, job-name: forward_train, mem: 160G,
     time: '1-18:00:00'}
   debug: [false]
   gpu: [true]
 
   seed: [1]
-  num-workers: [12]
+  num-workers: [16]
   batch-size: [32]
   max-epochs: [200]
-
-  dataset-name: [msg]
+  dataset-name: [msg_known_ce]
   split-name: [split.tsv]
   dataset-labels: [labels.tsv]
   magma-folder: [magma_outputs]
@@ -45,12 +44,3 @@ iterative_args:
   -  split-name: [split.tsv]
      save-dir: [split_rnd1]
      seed: [1]
-
-  -  split-name: [split.tsv]
-     save-dir: [split_rnd2]
-     seed: [2]
-
-  -  split-name: [split.tsv]
-     save-dir: [split_rnd3]
-     seed: [3]
-

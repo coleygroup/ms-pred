@@ -1,13 +1,13 @@
-launcher_args: {experiment_name: dag_inten_msg_spec,
+launcher_args: {experiment_name: iceberg_msg_known_ce,
   script_name: "src/ms_pred/iceberg/train_inten.py",
-  slurm_script: launcher_scripts/generic_slurm.sh, 
+  slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,
-  visible_devices: [0, 1, 2, 3, 4, 5]
+  visible_devices: [0]
 }
 universal_args:
   _slurm_args:
-  - {_num_gpu: 1, cpus-per-task: 7, job-name: forward_train, mem-per-cpu: 8G, 
-    nodelist: 'node[1236]', time: '1-18:00:00'}
+  - {nodes: 1, ntasks: 1, gpus: l40s:1, cpus-per-task: 16, job-name: forward_train, mem: 160G,
+    time: '1-18:00:00'}
   debug: [false]
   debug-overfit: [false]
   gpu: [true]
@@ -16,8 +16,7 @@ universal_args:
   num-workers: [16]
   batch-size: [32]
   max-epochs: [200]
-
-  dataset-name: [msg]
+  dataset-name: [msg_known_ce]
   split-name: [split.tsv]
   dataset-labels: [labels.tsv]
 
@@ -27,6 +26,7 @@ universal_args:
   dropout: [0.1]
   mpnn-type: [GGNN]
   pe-embed-k: [0]
+  min-epochs: [50]
   pool-op: [avg]
   hidden-size: [256]
   weight-decay: [1e-7]
@@ -34,6 +34,8 @@ universal_args:
   frag-set-layers: [3]
   mlp-layers: [1]
   gnn-layers: [4]
+  loss-fn: [cosine]
+  track-cosine: [false]
   root-encode: [gnn]
   inject-early: [false]
 
@@ -49,22 +51,8 @@ universal_args:
   sk-tau: [0.05]
   ppm-tol: [20]
 
-
 iterative_args:
   -  split-name: [split.tsv]
-     save-dir: [split_1_rnd1]
-     magma-dag-folder: [results/dag_gen_msg_spec/split_rnd1/preds_train_100_inten.hdf5]
+     save-dir: [split_rnd1]
+     magma-dag-folder: [results/iceberg_msg_known_ce/split_rnd1/preds_train_100_inten.hdf5]
      seed: [1]
-     loss-fn: [cosine]
-
-  -  split-name: [split.tsv]
-     save-dir: [split_1_rnd2]
-     magma-dag-folder: [results/dag_gen_msg_spec/split_rnd2/preds_train_100_inten.hdf5]
-     seed: [2]
-     loss-fn: [cosine]
-
-  -  split-name: [split.tsv]
-     save-dir: [split_1_rnd3]
-     magma-dag-folder: [results/dag_gen_msg_spec/split_rnd3/preds_train_100_inten.hdf5]
-     seed: [3]
-     loss-fn: [cosine]

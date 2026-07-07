@@ -1,0 +1,1 @@
+python launcher_scripts/run_from_config.py configs/iceberg/msg_all/dag_inten_train_msg_known_ce.yaml

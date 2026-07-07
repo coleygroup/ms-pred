@@ -28,6 +28,30 @@ import joblib
 import ms_pred.common as common
 
 
+def _get_sa_scorer():
+    """Load RDKit's contributed synthetic accessibility scorer when requested."""
+    try:
+        from SA_Score import sascorer
+        return sascorer
+    except ImportError:
+        pass
+
+    try:
+        import sys
+        from rdkit import RDConfig
+
+        rdkit_contrib_dir = Path(RDConfig.RDContribDir)
+        if rdkit_contrib_dir.exists() and str(rdkit_contrib_dir) not in sys.path:
+            sys.path.append(str(rdkit_contrib_dir))
+        from SA_Score import sascorer
+        return sascorer
+    except (AttributeError, ImportError) as exc:
+        raise ImportError(
+            "plot_top_mols(sa_score=True) requires RDKit's Contrib/SA_Score "
+            "module, but it could not be imported."
+        ) from exc
+
+
 def load_global_config(path_to_config='configs/iceberg/iceberg_elucidation.yaml', hostname=None):
     all_configs = yaml.safe_load(open(path_to_config, "r"))
     if hostname is None:
@@ -349,6 +373,8 @@ def load_real_spec(
     nist_path:str='data/spec_datasets/nist20/spec_files.hdf5',
     denoise_spectrum:bool=False,
     intensity_threshold:float=0.05,
+    clean_precursor_peaks:bool=False,
+    precursor_peak_window:float=1.0,
     mgf_query_dict:dict=None,
     **kwargs,
 ) -> common.CompositeMassSpec:
@@ -399,6 +425,17 @@ def load_real_spec(
 
     real_spec.process_spec_file(parentmass=precursor_mass, denoise=denoise_spectrum,
                                 max_num_inten=20, inten_thresh=intensity_threshold)
+    if clean_precursor_peaks:
+        for ms in real_spec.values():
+            spec = ms.spec
+            precursor_mask = np.abs(spec[:, 0] - precursor_mass) <= precursor_peak_window
+            if np.sum(precursor_mask) > 1:
+                precursor_indices = np.where(precursor_mask)[0]
+                keep_index = precursor_indices[np.argmax(spec[precursor_indices, 1])]
+                keep_mask = ~precursor_mask
+                keep_mask[keep_index] = True
+                ms.masses = spec[keep_mask, 0]
+                ms.intens = spec[keep_mask, 1]
     if nce: real_spec.nce_to_ev(precursor_mass)
 
     return real_spec
@@ -555,96 +592,9 @@ def ion_onehot(ion: str) -> np.ndarray:
 
 
 def build_conf_feature(dists, adduct, mass, num_peaks_avg, num_collision_engs, topk_features) -> np.ndarray:
-    X_num = [dists[1] if i < len(dists) else np.nan for i in range(topk_features)]
+    X_num = [dists[i] if i < len(dists) else np.nan for i in range(topk_features)]
     X_num += [mass, num_peaks_avg, num_collision_engs]
     return np.concatenate([X_num, ion_onehot(adduct)], axis=0)
-
-
-def elucidation_over_energies(
-    load_dir,
-    real_spec,
-    precursor_mass,
-    real_smiles,
-    real_spec_type='ms',
-    mol_name='',
-    nce=False,
-    num_bins=2000,
-    ppm=20,
-    step_collision_energy=False,
-    ignore_precursor=True,
-    dist_func='entropy',
-    topk=5,
-    nist_path=None,
-    **kwargs
-):
-    """
-    Similar to elucidation_over_candidates, but for a single SMILES.
-    Ranks predicted spectra for the single molecule by energy (or prediction index).
-
-    Returns: list of TopK predictions:
-        [ (energy, entropy distance, is_true_molecule),
-          ...
-        ]
-    """
-    # hack the precursor mz if there are multiple formulae within tolerance
-    precursor_mass = common.merge_mz(precursor_mass, ppm)
-
-    real_spec = load_real_spec(real_spec, real_spec_type, precursor_mass, nce, ppm, nist_path, **kwargs)
-    smiles, pred_specs, pred_frags = load_pred_spec(load_dir, step_collision_energy)
-
-    # Only one SMILES, so just use the first (or only) one
-    if isinstance(smiles, list):
-        smi = smiles[0]
-    else:
-        smi = smiles
-
-    # transform spec to binned spectrum
-    real_binned = {k: common.bin_spectra([v], num_bins)[0] for k, v in real_spec.items()}
-    pred_binned_specs = [
-        {k: common.bin_spectra([v], num_bins, pool_fn='add')[0] for k, v in s.items()}
-        for s in pred_specs]
-    # now break up into individual spectra
-    if len(pred_binned_specs) == 1:
-            
-        pred_binned_specs = [[{k: v}] for k, v in pred_binned_specs[0].items()]
-        real_binned = [{k: v} for k, v in real_binned.items()]
-        pred_binned_specs = sorted(pred_binned_specs, key=lambda x: float(list(x[0].keys())[0]))
-
-        dist = [dist_bin(
-            pred,
-            real,
-            ignore_peak=(precursor_mass - 1) * 10 if ignore_precursor else None,
-            sparse=False,
-            func=dist_func
-        ) for pred, real in zip(pred_binned_specs, real_binned)]
-        dist = np.array(dist).squeeze()
-    else:
-        # compute distance for each predicted spectrum (over energies)
-        dist = dist_bin(
-            pred_binned_specs,
-            real_binned,
-            ignore_peak=(precursor_mass - 1) * 10 if ignore_precursor else None,
-            sparse=False,
-            func=dist_func
-        )
-
-    sorted_indices = np.argsort(dist)
-    # If step_collision_energy, get the energy for each prediction
-    # if step_collision_energy:
-    #     energies = [s.get('energy', idx) for idx, s in enumerate(pred_specs)]
-    # else:
-    #     energies = list(range(len(pred_specs)))
-    energies = np.array([float(k) for k in pred_specs[0].keys()])
-
-    # Only one true molecule, so is_true is always True for all
-    results = []
-    for rnk, idx in enumerate(sorted_indices[:topk]):
-        energy = energies[idx]
-        d = dist[idx]
-        results.append((energy, d, True))
-        if rnk == 0 and len(mol_name) > 0:
-            print(f'[{mol_name}] Top1 energy={energy}, ent_dist={d:.3f}')
-    return results
 
 
 def plot_top_mols(
@@ -662,6 +612,7 @@ def plot_top_mols(
     """
     mols = []
     legends = []
+    sascorer = _get_sa_scorer() if sa_score else None
     for rnk, (smi, dist, is_true) in enumerate(topk_results):
         mol = Chem.MolFromSmiles(smi)
         mols.append(mol)

@@ -5,21 +5,27 @@ import json
 
 pred_file = "src/ms_pred/iceberg/predict_smis.py"
 retrieve_file = "src/ms_pred/retrieval/retrieval_benchmark.py"
-# can change the above to retrieval_benchmark_torchmetrics.py to retrieve with a candidate set that had duplicate stereoisomers, e.g.
-# the spectrum simulation hit rate evaluation of the MassSpecGym challenge. 
 subform_name = "no_subform"
 devices = [0, 1]
 vis_devices = ",".join([str(_) for _ in devices])
-num_workers = len(devices) * 6
+num_gpu_workers = len(devices) * 2
+num_cpu_workers = 128
 max_nodes = 100
-batch_size = 8
+batch_size = 64
 dist = "entropy"
 binned_out = True
+num_bins = 15000
+upper_limit = 1500
 
 test_entries = [
     {"dataset": "nist20",
      "train_split": "split_1_rnd1",
      "test_split": "split_1",
+     "max_k": 50},
+
+    {"dataset": "nist20",
+     "train_split": "split_1_rnd1",
+     "test_split": "split_1_val",
      "max_k": 50},
 
     # {"dataset": "nist20",
@@ -46,51 +52,28 @@ test_entries = [
     #  "train_split": "scaffold_1_rnd3",
     #  "test_split": "scaffold_1",
     #  "max_k": 50},
-
-    ## MassSpecGym retrieval set
-    # {"dataset": "msg",
-    #     "train_split": "split_1_rnd1",
-    #     "test_split": "split_1",
-    #     "max_k": 256,
-    #     "candidates": "cands_df_test_formula_256_no_stereo_clean_tauts.tsv",
-    #     "true_labels": "labels.tsv",
-    # },
-    
-    ## If using retrieval on full set with stereoisomers (to ensure fair comparison to challenge baselines)
-    # Add full_labels flag and change retrieval_benchmark.py to retrieval_benchmark_torchmetrics.py
-    # {"dataset": "msg",
-    #     "train_split": "split_1_rnd1",
-    #     "test_split": "split_1",
-    #     "max_k": 256,
-    #     "candidates": "cands_df_test_formula_256_no_stereo_clean_tauts.tsv",
-    #     "true_labels": "labels.tsv",
-    #     "full_labels": "cands_df_test_formula_256.tsv"
-    # },
-
 ]
 
-pred_filename = "binned_preds.hdf5" if binned_out else "preds.hdf5"
+pred_filename = "preds.hdf5"
 
 for test_entry in test_entries:
     dataset = test_entry['dataset']
     train_split = test_entry['train_split']
     split = test_entry['test_split']
     maxk = test_entry['max_k']
-    inten_dir = Path(f"results/dag_inten_{dataset}")
-    inten_model = inten_dir / train_split / "version_1/best.ckpt"  # contrastive learning model is version 1
-                                                                   # if no contrastive finetuning, change version_1 to version_0
+    inten_dir = Path(f"results/iceberg_{dataset}")
+    inten_model = inten_dir / train_split / "ckpt/inten_contr/best.ckpt"
     if not inten_model.exists():
         print(f"Could not find model {inten_model}; skipping\n: {json.dumps(test_entry, indent=1)}")
         continue
 
-    candidates = f"data/spec_datasets/{dataset}/retrieval/cands_df_{split}_{maxk}.tsv"
+    labels = f"data/spec_datasets/{dataset}/retrieval/cands_df_{split}_{maxk}.tsv"
 
-    save_dir = inten_model.parent.parent / f"retrieval_{dataset}_{split}_{maxk}"
+    save_dir = inten_dir / train_split / f"retrieval_{dataset}_{split}_{maxk}"
     save_dir.mkdir(exist_ok=True)
 
-    args = yaml.safe_load(open(inten_model.parent.parent / "args.yaml", "r"))
-    form_folder = Path(args["magma_dag_folder"])
-    gen_model = form_folder.parent / "version_0/best.ckpt"
+    form_dir = Path(f"results/iceberg_{dataset}")
+    gen_model = form_dir / train_split / "ckpt/gen/best.ckpt"
 
     save_dir = save_dir
     save_dir.mkdir(exist_ok=True)
@@ -104,8 +87,9 @@ for test_entry in test_entries:
     --gen-checkpoint {gen_model} \\
     --inten-checkpoint {inten_model} \\
     --save-dir {save_dir} \\
-    --dataset-labels {candidates} \\
-    --num-workers {num_workers} \\
+    --dataset-labels {labels} \\
+    --num-cpu-workers {num_cpu_workers} \\
+    --num-gpu-workers {num_gpu_workers} \\
     --gpu \\
     --adduct-shift \\
     """
@@ -119,15 +103,13 @@ for test_entry in test_entries:
     # Run retrieval
     cmd = f"""python {retrieve_file} \\
     --dataset {dataset} \\
+    --full-labels {labels} \\
     --formula-dir-name {subform_name}.hdf5 \\
     --pred-file {save_dir / pred_filename} \\
-    --true-labels data/spec_datasets/{dataset}/labels.tsv \\
+    --num-bins {num_bins} \\
+    --upper-limit {upper_limit} \\
     --dist-fn {dist} \\
     """
-    if binned_out:
-        cmd += "--binned-pred"
-    if "full_labels" in test_entry:
-        cmd += f" --full-labels data/spec_datasets/{dataset}/{test_entry['full_labels']} "
 
     print(cmd + "\n")
     subprocess.run(cmd, shell=True)

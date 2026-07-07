@@ -22,7 +22,10 @@ and transformed before being fed into the corresponding program.
     universal_args:
         program-arg-1 : [combo_1, combo_2]
         program-arg-2: [combo_1, combo_2, combo_3]
-        _slurm_args : [{time: time, _num_gpu : 1, job-name}]
+        _slurm_args : [{time: time, gpus: l40s:1, job-name}]
+
+GPU requests in _slurm_args use Slurm's --gpus style.  Use `gpus: 1`,
+`gpus: l40s:1`, or `gpus: h200:2`.
     iterative_args:
         - universal_arg_replacement_1: [new_val1, new_val2]
           universal_arg_replacement_2: [new_val1, new_val2]
@@ -150,13 +153,8 @@ def construct_slurm_args(experiment_name: str, slurm_args: dict):
     Path("logs").mkdir(exist_ok=True)
     sbatch_args = f"--output=logs/{experiment_name}_%j.log"
     for k, v in slurm_args.items():
-        if k == "_num_gpu":
-            # Specify node number
-            if v > 0:
-                sbatch_args = f"{sbatch_args} --gres=gpu:{v}"
-        elif k == "node":
+        if k == "node":
             sbatch_args = f"{sbatch_args} -w {v}"
-
         else:
             new_flag = convert_flag(k, v)
             sbatch_args = f"{sbatch_args} {new_flag}".strip()
