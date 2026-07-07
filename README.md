@@ -1,6 +1,8 @@
 #  Mass Spectrum Predictors
 
-**Update 7/3/2026:** Introducing ICEBERG 2.1! It has a substantial GPU speedup, and we provide pretrained NIST'23 model. Checkout to the [ICEBERG 2.0 branch](https://github.com/coleygroup/ms-pred/tree/iceberg_2.0) if you want to run the earlier 2.0 model.
+**Update 7/7/2026:** 
+- Introducing ICEBERG 2.1! It has a substantial GPU speedup, and we provide pretrained NIST'23 model. Checkout to the [ICEBERG 2.0 branch](https://github.com/coleygroup/ms-pred/tree/iceberg_2.0) if you want to run the earlier 2.0 model.
+- Introducing GLACIER! GLACIER is our state-of-the-art single-stage MS/MS simulator that is faster and more accurate. Check [our preprint](https://arxiv.org/abs/2606.29161).
 
 [![ICEBERG-WebUI](iceberg_teaser.png)](http://iceberg-ms.mit.edu/)
 
