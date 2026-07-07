@@ -38,6 +38,8 @@ dependencies = [
     "torchdata<0.10",
     "numpy>=2",
     "linsatnet",
+    "msbuddy",
+    "lightgbm",
 ]
 
 [project.optional-dependencies]
@@ -46,6 +48,7 @@ cu124 = ["torch==2.6.0+cu124", "torchvision==0.21.0+cu124", "dgl", "torch-scatte
 cu118 = ["torch==2.6.0+cu118", "torchvision==0.21.0+cu118", "dgl", "torch-scatter", "torch-sparse", "torch-geometric"]
 mces = ["myopic-mces>=1.1.0", "pulp[cbc]>=2.7"]
 test = ["pytest>=8", "pytest-xdist"]
+webui = ["flask>=3.0", "flask-login>=0.6", "werkzeug>=3.0", "pyyaml", "gunicorn>=21.0", "geoip2>=4.0"]
 
 [tool.uv]
 conflicts = [[{ extra = "cpu" }, { extra = "cu124" }, { extra = "cu118" }]]

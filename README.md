@@ -2,7 +2,7 @@
 
 **Update 7/7/2026:** 
 - Introducing ICEBERG 2.1! It has a substantial GPU speedup, and we provide pretrained NIST'23 model. Checkout to the [ICEBERG 2.0 branch](https://github.com/coleygroup/ms-pred/tree/iceberg_2.0) if you want to run the earlier 2.0 model.
-- Introducing GLACIER! GLACIER is our state-of-the-art single-stage MS/MS simulator that is faster and more accurate. Check [our preprint](https://arxiv.org/abs/2606.29161).
+- Introducing GLACIER! GLACIER is our state-of-the-art single-stage MS/MS simulator that is even faster and more accurate. Check [our preprint](https://arxiv.org/abs/2606.29161).
 
 [![ICEBERG-WebUI](iceberg_teaser.png)](http://iceberg-ms.mit.edu/)
 
@@ -44,23 +44,40 @@ Contributors: Sam Goldman, Runzhong Wang, Rui-Xi Wang, Mrunali Manjrekar, John B
 
 ## Install & setup <a name="setup"></a>
 
-Install [mamba](https://mamba.readthedocs.io/en/latest/) if it is not on your system. On Linux, run
+Install [uv](https://docs.astral.sh/uv/) if it is not on your system. On Linux or macOS, run:
 ```shell
-curl -L -O "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"
-bash Miniforge3-$(uname)-$(uname -m).sh
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
-Please refer to [the official repo](https://github.com/conda-forge/miniforge?tab=readme-ov-file#install) for detailed instructions.
+Please refer to the [official uv installation guide](https://docs.astral.sh/uv/getting-started/installation/) for other platforms and installation methods.
 
-Make sure you have ``gcc`` installed. Use mamba to set up the environment
+Make sure you have ``gcc`` installed. Create the environment from ``pyproject.toml`` with one accelerator extra. For CUDA 12.4, run:
 ```shell
-mamba env create -f environment.yml
-mamba activate ms-gen
+uv sync --extra cu124
+source .venv/bin/activate
 ```
 Installation will take ~10 minutes.
 
-Note: The ``environment.yml`` has configurations for CUDA 11.8. 
-Any newer/older CUDA versions should also work, please change the CUDA tags in ``environment.yml`` accordingly.
-If you are not using GPU, please update ``envorinment.yml`` following the ``CPU-only`` comments in that file.
+For CUDA 11.8, use:
+```shell
+uv sync --extra cu118
+source .venv/bin/activate
+```
+
+For CPU-only installs, use:
+```shell
+uv sync --extra cpu
+source .venv/bin/activate
+```
+
+The ``cpu``, ``cu118``, and ``cu124`` extras are mutually exclusive; choose exactly one. Optional dependency groups can be added to the same command, for example:
+```shell
+uv sync --extra cu124 --extra test --extra mces
+```
+
+For WebUI dependencies, add the ``webui`` extra:
+```shell
+uv sync --extra cpu --extra webui
+```
 
 ## Demo <a name="demo"></a>
 To easily get started, you can run ICEBERG structural elucidation at the WebUI: http://iceberg-ms.mit.edu/.

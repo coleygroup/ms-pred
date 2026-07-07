@@ -1,6 +1,6 @@
 scikit-learn
 pathos
-setuptools==59.5.0
+setuptools>=61
 CairoSVG
 ipdb
 omegaconf
