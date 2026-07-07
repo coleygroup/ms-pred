@@ -1,4 +1,4 @@
-launcher_args: {experiment_name: joint_train_msg,
+launcher_args: {experiment_name: glacier_msg,
   script_name: "src/ms_pred/glacier/train_joint.py",
   slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,

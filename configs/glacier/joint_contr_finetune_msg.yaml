@@ -1,4 +1,4 @@
-launcher_args: {experiment_name: joint_train_msg,
+launcher_args: {experiment_name: glacier_msg,
   script_name: "src/ms_pred/glacier/train_contr_joint.py",
   slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,
@@ -71,4 +71,4 @@ iterative_args:
   -  split-name: [split.tsv]
      save-dir: [split_rnd1]
      seed: [1]
-     train-checkpoint: [results/joint_train_msg/split_rnd1/version_0/best.ckpt]
+     train-checkpoint: [results/glacier_msg/split_rnd1/version_0/best.ckpt]

@@ -129,7 +129,7 @@ def get_args():
     parser.add_argument(
         "--checkpoint",
         help="name of checkpoint file",
-        default="results/joint_train_nist20/split_1_rnd1/version_7/best.ckpt",
+        default="results/glacier_nist20/split_1_rnd1/version_7/best.ckpt",
     )
     parser.add_argument("--dataset-name", default=None)
     parser.add_argument("--dataset-labels", default="labels.tsv")

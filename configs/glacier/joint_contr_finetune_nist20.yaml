@@ -1,4 +1,4 @@
-launcher_args: {experiment_name: joint_train_nist20,
+launcher_args: {experiment_name: glacier_nist20,
   script_name: "src/ms_pred/glacier/train_contr_joint.py",
   slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,
@@ -72,29 +72,29 @@ iterative_args:
   -  split-name: [split_1.tsv]
      save-dir: [split_1_rnd1]
      seed: [1]
-     train-checkpoint: [results/joint_train_nist20/split_1_rnd1/version_0/best.ckpt]
+     train-checkpoint: [results/glacier_nist20/split_1_rnd1/version_0/best.ckpt]
 
-  -  split-name: [split_1.tsv]
-     save-dir: [split_1_rnd2]
-     seed: [2]
-     train-checkpoint: [results/joint_train_nist20/split_1_rnd2/version_0/best.ckpt]
-
-  -  split-name: [split_1.tsv]
-     save-dir: [split_1_rnd3]
-     seed: [3]
-     train-checkpoint: [results/joint_train_nist20/split_1_rnd3/version_0/best.ckpt]
-
-  -  split-name: [scaffold_1.tsv]
-     save-dir: [scaffold_1_rnd1]
-     seed: [1]
-     train-checkpoint: [results/joint_train_nist20/scaffold_1_rnd1/version_0/best.ckpt]
-
-  -  split-name: [scaffold_1.tsv]
-     save-dir: [scaffold_1_rnd2]
-     seed: [2]
-     train-checkpoint: [results/joint_train_nist20/scaffold_1_rnd2/version_0/best.ckpt]
-
-  -  split-name: [scaffold_1.tsv]
-     save-dir: [scaffold_1_rnd3]
-     seed: [3]
-     train-checkpoint: [results/joint_train_nist20/scaffold_1_rnd3/version_0/best.ckpt]
+#  -  split-name: [split_1.tsv]
+#     save-dir: [split_1_rnd2]
+#     seed: [2]
+#     train-checkpoint: [results/glacier_nist20/split_1_rnd2/version_0/best.ckpt]
+#
+#  -  split-name: [split_1.tsv]
+#     save-dir: [split_1_rnd3]
+#     seed: [3]
+#     train-checkpoint: [results/glacier_nist20/split_1_rnd3/version_0/best.ckpt]
+#
+#  -  split-name: [scaffold_1.tsv]
+#     save-dir: [scaffold_1_rnd1]
+#     seed: [1]
+#     train-checkpoint: [results/glacier_nist20/scaffold_1_rnd1/version_0/best.ckpt]
+#
+#  -  split-name: [scaffold_1.tsv]
+#     save-dir: [scaffold_1_rnd2]
+#     seed: [2]
+#     train-checkpoint: [results/glacier_nist20/scaffold_1_rnd2/version_0/best.ckpt]
+#
+#  -  split-name: [scaffold_1.tsv]
+#     save-dir: [scaffold_1_rnd3]
+#     seed: [3]
+#     train-checkpoint: [results/glacier_nist20/scaffold_1_rnd3/version_0/best.ckpt]

@@ -4,7 +4,7 @@ import subprocess
 import json
 import math
 
-pred_file = "src/ms_pred/GLACIER/predict_smis_joint.py"
+pred_file = "src/ms_pred/glacier/predict_smis_joint.py"
 retrieve_file = "src/ms_pred/retrieval/retrieval_benchmark.py"
 subform_name = "no_subform"
 devices = [0, 1]
@@ -37,47 +37,47 @@ test_entries = [
      "max_k": 50, 
      "num_bins": 15000},
 
-    {"dataset": "nist20",
-     "train_split": "split_1_rnd2",
-     "test_split": "split_1",
-     "max_k": 50, 
-     "num_bins": 15000},
-    
-    {"dataset": "nist20",
-     "train_split": "split_1_rnd3",
-     "test_split": "split_1",
-     "max_k": 50, 
-     "num_bins": 15000},
-    
-    {"dataset": "nist20",
-     "train_split": "scaffold_1_rnd1",
-     "test_split": "scaffold_1",
-     "max_k": 50,
-     "num_bins": 15000},
-    
-    {"dataset": "nist20",
-     "train_split": "scaffold_1_rnd2",
-     "test_split": "scaffold_1",
-     "max_k": 50,
-     "num_bins": 15000},
-    
-    {"dataset": "nist20",
-     "train_split": "scaffold_1_rnd3",
-     "test_split": "scaffold_1",
-     "max_k": 50, 
-     "num_bins": 15000},
-
-    {"dataset": "msg",
-     "train_split": "split_rnd1",
-     "test_split": "test_mass",
-     "max_k": 256, 
-     "num_bins": 150000,},
-
-    {"dataset": "msg",
-     "train_split": "split_rnd1",
-     "test_split": "test_formula",
-     "max_k": 256, 
-     "num_bins": 150000,},
+    # {"dataset": "nist20",
+    #  "train_split": "split_1_rnd2",
+    #  "test_split": "split_1",
+    #  "max_k": 50,
+    #  "num_bins": 15000},
+    #
+    # {"dataset": "nist20",
+    #  "train_split": "split_1_rnd3",
+    #  "test_split": "split_1",
+    #  "max_k": 50,
+    #  "num_bins": 15000},
+    #
+    # {"dataset": "nist20",
+    #  "train_split": "scaffold_1_rnd1",
+    #  "test_split": "scaffold_1",
+    #  "max_k": 50,
+    #  "num_bins": 15000},
+    #
+    # {"dataset": "nist20",
+    #  "train_split": "scaffold_1_rnd2",
+    #  "test_split": "scaffold_1",
+    #  "max_k": 50,
+    #  "num_bins": 15000},
+    #
+    # {"dataset": "nist20",
+    #  "train_split": "scaffold_1_rnd3",
+    #  "test_split": "scaffold_1",
+    #  "max_k": 50,
+    #  "num_bins": 15000},
+    #
+    # {"dataset": "msg",
+    #  "train_split": "split_rnd1",
+    #  "test_split": "test_mass",
+    #  "max_k": 256,
+    #  "num_bins": 150000,},
+    #
+    # {"dataset": "msg",
+    #  "train_split": "split_rnd1",
+    #  "test_split": "test_formula",
+    #  "max_k": 256,
+    #  "num_bins": 150000,},
 ]
 
 pred_filename = "binned_preds.hdf5" if binned_out else "preds.hdf5"
@@ -86,7 +86,7 @@ for test_entry in test_entries:
     train_split = test_entry['train_split']
     split = test_entry['test_split']
     maxk = test_entry['max_k']
-    model_dir = Path(f"results/joint_train_{dataset}")
+    model_dir = Path(f"results/glacier_{dataset}")
     num_bins = test_entry['num_bins']
     joint_model = model_dir/train_split/"version_1/best.ckpt"
     if not joint_model.exists():

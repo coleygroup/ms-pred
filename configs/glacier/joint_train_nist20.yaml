@@ -1,4 +1,4 @@
-launcher_args: {experiment_name: joint_train_nist20,
+launcher_args: {experiment_name: glacier_nist20,
   script_name: "src/ms_pred/glacier/train_joint.py",
   slurm_script: launcher_scripts/generic_slurm.sh,
   launch_method: local,
@@ -63,23 +63,23 @@ iterative_args:
      save-dir: [split_1_rnd1]
      seed: [1]
      
-  -  split-name: [split_1.tsv]
-     save-dir: [split_1_rnd2]
-     seed: [2]
-
-  -  split-name: [split_1.tsv]
-     save-dir: [split_1_rnd3]
-     seed: [3]
-
-  -  split-name: [scaffold_1.tsv]
-     save-dir: [scaffold_1_rnd1]
-     seed: [1]
-
-  -  split-name: [scaffold_1.tsv]
-     save-dir: [scaffold_1_rnd2]
-     seed: [2]
-
-  -  split-name: [scaffold_1.tsv]
-     save-dir: [scaffold_1_rnd3]
-     seed: [3]
+#  -  split-name: [split_1.tsv]
+#     save-dir: [split_1_rnd2]
+#     seed: [2]
+#
+#  -  split-name: [split_1.tsv]
+#     save-dir: [split_1_rnd3]
+#     seed: [3]
+#
+#  -  split-name: [scaffold_1.tsv]
+#     save-dir: [scaffold_1_rnd1]
+#     seed: [1]
+#
+#  -  split-name: [scaffold_1.tsv]
+#     save-dir: [scaffold_1_rnd2]
+#     seed: [2]
+#
+#  -  split-name: [scaffold_1.tsv]
+#     save-dir: [scaffold_1_rnd3]
+#     seed: [3]
 
