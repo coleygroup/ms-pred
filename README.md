@@ -517,7 +517,7 @@ Forward models could be applied for structural elucidation tasks with a set of c
 
 We ask any user of this repository to cite the following works based upon the portion of the repository used.
 
-🧣SCARF model:
+🧣SCARF:
 ```
 @article{goldman2023prefix,
   title={Prefix-tree decoding for predicting mass spectra from molecules},
@@ -529,7 +529,7 @@ We ask any user of this repository to cite the following works based upon the po
 }
 ```
 
-🧊ICEBERG model:
+🧊ICEBERG 1.0:
 ```
 @article{goldman2024generating,
   title={Generating molecular fragmentation graphs with autoregressive neural networks},
@@ -541,7 +541,10 @@ We ask any user of this repository to cite the following works based upon the po
   year={2024},
   publisher={ACS Publications}
 }
+```
 
+🧊ICEBERG 2.0:
+```
 @article{wang2025neuralspec,
 	author={Wang, Runzhong and Manjrekar, Mrunali and Mahjour, Babak and Avila-Pacheco, Julian and Provenzano, Joules and Reynolds, Erin and Lederbauer, Magdalena and Mashin, Eivgeni and Goldman, Samuel L. and Wang, Mingxun and Weng, Jing-Ke and Plata, Desir{\'e}e L. and Clish, Clary B. and Coley, Connor W.},
 	title={Neural Spectral Prediction for Structure Elucidation with Tandem Mass Spectrometry},
@@ -553,7 +556,17 @@ We ask any user of this repository to cite the following works based upon the po
 }
 ```
 
-🏃‍MARASON model:
+🏔️GLACIER: 
+```
+@article{wang2026glacier,
+  title={GLACIER: Rethinking Mass Spectrum Prediction as an Object Detection Problem},
+  author={Wang, Rui-Xi and Wang, Runzhong and Coley, Connor W},
+  journal={arXiv preprint arXiv:2606.29161},
+  year={2026}
+}
+```
+
+🏃‍MARASON:
 ```
 @article{wang2025neuralgraph,
   title={Neural Graph Matching Improves Retrieval Augmented Generation in Molecular Machine Learning},
