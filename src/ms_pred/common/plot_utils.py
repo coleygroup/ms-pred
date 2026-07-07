@@ -188,9 +188,9 @@ def plot_compare_ms(spec1, spec2, spec1_name='', spec2_name='', ce_label='', dpi
         for mz, inten in zip(spec[:, 0], intensity_arr):
             mz_in_spec1 = np.min(np.abs(mz - spec1[:, 0])) / mz < 1e-6 * ppm
             mz_in_spec2 = np.min(np.abs(mz - spec2[:, 0])) / mz < 1e-6 * ppm
-            # if mz_in_spec1 and mz_in_spec2:
-            #     color = matched_color
-            if inten > 0:
+            if mz_in_spec1 and mz_in_spec2:
+                color = matched_color
+            elif inten > 0:
                 color = spec1_color
             else:
                 color = spec2_color
