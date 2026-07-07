@@ -2034,6 +2034,7 @@ def _mgf_features_payload(parsed: List[Tuple[dict, Any]]) -> List[Dict[str, Any]
             "pepmass":      meta.get("PEPMASS"),
             "adduct":       meta.get("ADDUCT"),
             "formula":      meta.get("FORMULA"),
+            "filename":     meta.get("FILENAME"),
             "num_peaks":    int(len(peaks)),
             "spectrum": {
                 "collision_energy": 0,

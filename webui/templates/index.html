@@ -187,9 +187,11 @@
         }
         .spectrum-header {
             display: flex;
-            justify-content: space-between;
             align-items: center;
+            gap: 0.4rem;
             margin-bottom: 0.25rem;
+            cursor: pointer;
+            user-select: none;
         }
         .spectrum-header span {
             font-weight: 500;
@@ -198,6 +200,30 @@
         .spectrum-header button {
             font-size: 0.75rem;
             padding: 0.25rem 0.6rem;
+            margin-left: auto;   /* push Remove to the far right */
+        }
+        .spectrum-fold-chevron {
+            font-size: 0.7rem;
+            display: inline-block;
+            transition: transform 0.15s;
+            color: #6b7280;
+            flex-shrink: 0;
+        }
+        .spectrum-summary {
+            font-size: 0.78rem;
+            color: #6b7280;
+            font-weight: 400;
+            display: none;
+        }
+        /* When folded: hide everything in the block except the header */
+        .spectrum-block.folded > *:not(.spectrum-header) {
+            display: none !important;
+        }
+        .spectrum-block.folded .spectrum-summary {
+            display: inline;
+        }
+        .spectrum-block.folded .spectrum-fold-chevron {
+            transform: rotate(-90deg);
         }
         table {
             width: 100%;
@@ -641,6 +667,81 @@
             const block = button.closest(".spectrum-block");
             block.remove();
         }
+
+        // ---- Per-spectrum block folding ----
+
+        function computeSpectrumSummary(block) {
+            const ta = block.querySelector('textarea[name="spectrum_text"]');
+            const peakCount = ta
+                ? ta.value.split("\n").filter(l => l.trim().length > 0).length
+                : 0;
+
+            const modeEl = block.querySelector('select[name="spectrum_mode"]');
+            const mode   = modeEl ? modeEl.value : "single";
+
+            let ceStr;
+            if (mode === "stepped") {
+                const checked = Array.from(
+                    block.querySelectorAll(".stepped-nce-checkbox:checked")
+                ).map(c => c.value);
+                ceStr = checked.length
+                    ? "stepped NCE " + checked.join("/") + "%"
+                    : "stepped NCE (none selected)";
+            } else {
+                const nceEl = block.querySelector('select[name="spectrum_nce"]');
+                ceStr = nceEl ? "NCE " + nceEl.value + "%" : "";
+            }
+
+            return peakCount + " peaks" + (ceStr ? " · " + ceStr : "");
+        }
+
+        function setSpectrumFolded(block, folded) {
+            // Lazily inject chevron into the header (before the label span).
+            let chevron = block.querySelector(".spectrum-fold-chevron");
+            if (!chevron) {
+                chevron = document.createElement("span");
+                chevron.className = "spectrum-fold-chevron";
+                chevron.textContent = "▼";
+                const header = block.querySelector(".spectrum-header");
+                if (header) header.insertBefore(chevron, header.firstChild);
+            }
+
+            // Lazily inject summary span after the label span.
+            let summary = block.querySelector(".spectrum-summary");
+            if (!summary) {
+                summary = document.createElement("span");
+                summary.className = "spectrum-summary";
+                const labelSpan = block.querySelector(".spectrum-header span");
+                if (labelSpan) labelSpan.after(summary);
+            }
+
+            if (folded) {
+                summary.textContent = " — " + computeSpectrumSummary(block);
+                block.classList.add("folded");
+            } else {
+                block.classList.remove("folded");
+            }
+        }
+
+        function toggleSpectrumFold(block) {
+            setSpectrumFolded(block, !block.classList.contains("folded"));
+        }
+
+        function foldAllSpectrumBlocks() {
+            const container = document.getElementById("spectra-container");
+            if (!container) return;
+            container.querySelectorAll(".spectrum-block").forEach(b => setSpectrumFolded(b, true));
+        }
+
+        // Delegated click: clicking anywhere in .spectrum-header toggles fold,
+        // except interactive controls (buttons, selects, inputs) which keep their own behaviour.
+        document.addEventListener("click", function (e) {
+            const header = e.target.closest(".spectrum-header");
+            if (!header) return;
+            if (e.target.closest("button, select, input, label")) return;
+            const block = header.closest(".spectrum-block");
+            if (block) toggleSpectrumFold(block);
+        });
 
         function csvEscape(value) {
             if (value == null) return "";
@@ -2621,6 +2722,11 @@
             });
         }
 
+        // ---- File-upload loading overlay ----
+        const fileUploadOverlay = document.getElementById("file-upload-overlay");
+        function showFileOverlay()  { if (fileUploadOverlay) fileUploadOverlay.style.display = "flex"; }
+        function hideFileOverlay()  { if (fileUploadOverlay) fileUploadOverlay.style.display = "none"; }
+
         // ---- .ms upload → call /upload_ms ----
         const msInput = document.getElementById("ms-file-input");
         if (msInput) {
@@ -2632,6 +2738,7 @@
                 const formData = new FormData();
                 formData.append("ms_file", file);
 
+                showFileOverlay();
                 fetch("/upload_ms", {
                     method: "POST",
                     body: formData,
@@ -2652,7 +2759,8 @@
                     .catch(err => {
                         console.error(err);
                         alert("Failed to parse .ms file: " + err.message);
-                    });
+                    })
+                    .finally(() => hideFileOverlay());
             });
         }
 
@@ -2672,7 +2780,7 @@
             // Auto-fill formula if present in the MGF metadata.
             if (feature.formula) {
                 const formulaEl = document.getElementById("formula");
-                if (formulaEl) formulaEl.value = feature.formula;
+                if (formulaEl) formulaEl.value = feature.formula.replace(/[₀-₉]/g, c => ({'₀':'0','₁':'1','₂':'2','₃':'3','₄':'4','₅':'5','₆':'6','₇':'7','₈':'8','₉':'9'}[c]||c));
             }
 
             // Auto-fill adduct if the value is present in the dropdown.
@@ -2696,62 +2804,161 @@
             }
         }
 
+        // In-memory cache: file identity → parsed features. No size limit, instant lookup.
+        window._mgfCache = {};
+
+        function _mgfEsc(s) {
+            return String(s == null ? "" : s)
+                .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+        }
+
+        function loadMgfFeatureList(features) {
+            window.MGF_FEATURES = features;
+
+            // Pre-build lowercased search strings once — avoids per-keystroke allocation.
+            window._mgfSearchKeys = features.map(f =>
+                (String(f.feature_id) + " " + (f.pepmass || "") + " " + (f.adduct || "")).toLowerCase()
+            );
+
+            // Count occurrences of each feature_id to detect duplicates.
+            const _fidCount = Object.create(null);
+            const _fidSeen  = Object.create(null);
+            for (const f of features) _fidCount[f.feature_id] = (_fidCount[f.feature_id] || 0) + 1;
+
+            // Pre-build display labels once.
+            window._mgfLabels = features.map(f => {
+                let s = _mgfEsc(f.feature_id);
+                if (f.pepmass) s += " — m/z " + _mgfEsc(f.pepmass);
+                if (f.adduct)  s += " — " + _mgfEsc(f.adduct);
+                s += " (" + f.num_peaks + " peaks)";
+
+                // Append a disambiguator for duplicate feature IDs.
+                if (_fidCount[f.feature_id] > 1) {
+                    _fidSeen[f.feature_id] = (_fidSeen[f.feature_id] || 0) + 1;
+                    if (f.filename) {
+                        // Strip directory path and extension for brevity.
+                        const base = _mgfEsc(f.filename.replace(/\\/g, "/").split("/").pop().replace(/\.[^.]+$/, ""));
+                        s += " — " + base;
+                    } else {
+                        s += " [" + _fidSeen[f.feature_id] + "]";
+                    }
+                }
+                return s;
+            });
+
+            const countEl = document.getElementById("mgf-feature-count");
+            if (countEl) countEl.textContent = `${features.length} features loaded. Type to search, or press ↓ to browse.`;
+
+            document.getElementById("mgf-feature-row").style.display = "";
+
+            const inputEl = document.getElementById("mgf-feature-input");
+            if (inputEl && features[0]) inputEl.value = features[0].feature_id;
+            applyMgfFeature(0);
+        }
+
+        // ---- Searchable results dropdown ----
+        const MGF_MAX_RESULTS = 50;
+
+        function renderMgfResults(query) {
+            const resultsEl = document.getElementById("mgf-feature-results");
+            if (!resultsEl) return;
+            const keys   = window._mgfSearchKeys || [];
+            const labels = window._mgfLabels     || [];
+            if (!keys.length) return;
+
+            const q = (query || "").trim().toLowerCase();
+            const shown = [];
+            let extra = 0;
+
+            if (!q) {
+                // No query: first N items directly, no scan needed.
+                for (let i = 0; i < Math.min(MGF_MAX_RESULTS, keys.length); i++) shown.push(i);
+                extra = Math.max(0, keys.length - MGF_MAX_RESULTS);
+            } else {
+                for (let i = 0; i < keys.length; i++) {
+                    if (keys[i].includes(q)) {
+                        if (shown.length < MGF_MAX_RESULTS) shown.push(i);
+                        else extra++;
+                    }
+                }
+            }
+
+            let html = shown.map(i =>
+                `<div class="mgf-result-item" data-idx="${i}"
+                      style="padding:0.35rem 0.75rem; cursor:pointer; font-size:0.85rem;
+                             white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"
+                      onmouseover="this.style.background='#f3f4f6'"
+                      onmouseout="this.style.background=''">${labels[i]}</div>`
+            ).join("");
+            if (!shown.length) {
+                html = '<div style="padding:0.4rem 0.75rem; color:#6b7280; font-size:0.85rem;">No matches</div>';
+            } else if (extra > 0) {
+                html += `<div style="padding:0.3rem 0.75rem; color:#9ca3af; font-size:0.78rem; border-top:1px solid #f3f4f6;">${extra} more — type to narrow</div>`;
+            }
+            resultsEl.innerHTML = html;
+            resultsEl.style.display = "";
+        }
+
+        (function () {
+            const inputEl  = document.getElementById("mgf-feature-input");
+            const resultsEl = document.getElementById("mgf-feature-results");
+            if (!inputEl || !resultsEl) return;
+
+            inputEl.addEventListener("focus", function () { renderMgfResults(inputEl.value); });
+
+            let _mgfSearchTimer = null;
+            inputEl.addEventListener("input", function () {
+                clearTimeout(_mgfSearchTimer);
+                _mgfSearchTimer = setTimeout(function () { renderMgfResults(inputEl.value); }, 80);
+            });
+
+            resultsEl.addEventListener("mousedown", function (e) {
+                const item = e.target.closest(".mgf-result-item");
+                if (!item) return;
+                e.preventDefault();  // keep focus on input
+                const idx = parseInt(item.dataset.idx, 10);
+                const f = (window.MGF_FEATURES || [])[idx];
+                if (f) inputEl.value = f.feature_id;
+                resultsEl.style.display = "none";
+                applyMgfFeature(idx);
+            });
+
+            document.addEventListener("click", function (e) {
+                if (!inputEl.contains(e.target) && !resultsEl.contains(e.target)) {
+                    resultsEl.style.display = "none";
+                }
+            });
+        })();
+
         const mgfInput = document.getElementById("mgf-file-input");
         if (mgfInput) {
             mgfInput.addEventListener("change", function () {
                 const file = mgfInput.files[0];
                 if (!file) return;
 
+                // In-memory cache hit: same file selected again this session.
+                const cacheKey = `${file.name}_${file.size}_${file.lastModified}`;
+                if (window._mgfCache[cacheKey]) {
+                    loadMgfFeatureList(window._mgfCache[cacheKey]);
+                    return;
+                }
+
                 const formData = new FormData();
                 formData.append("mgf_file", file);
 
-                fetch("/upload_mgf", {
-                    method: "POST",
-                    body: formData,
-                })
+                showFileOverlay();
+                fetch("/upload_mgf", { method: "POST", body: formData })
                     .then(resp => resp.json())
                     .then(data => {
-                        if (data.error) {
-                            alert("Error: " + data.error);
-                            return;
-                        }
-                        if (!data.features || !data.features.length) {
-                            alert("No spectra found in the MGF file.");
-                            return;
-                        }
-
-                        window.MGF_FEATURES = data.features;
-
-                        // Populate the feature dropdown.
-                        const sel = document.getElementById("mgf-feature-select");
-                        sel.innerHTML = "";
-                        data.features.forEach(function (f, i) {
-                            const opt = document.createElement("option");
-                            opt.value = i;
-                            let label = f.feature_id;
-                            if (f.pepmass) label += " — m/z " + f.pepmass;
-                            if (f.adduct)  label += " — " + f.adduct;
-                            label += " (" + f.num_peaks + " peaks)";
-                            opt.textContent = label;
-                            sel.appendChild(opt);
-                        });
-
-                        // Show the feature row and load the first feature.
-                        document.getElementById("mgf-feature-row").style.display = "";
-                        applyMgfFeature(0);
+                        if (data.error) { alert("Error: " + data.error); return; }
+                        if (!data.features || !data.features.length) { alert("No spectra found in the MGF file."); return; }
+                        window._mgfCache[cacheKey] = data.features;
+                        loadMgfFeatureList(data.features);
                     })
-                    .catch(err => {
-                        console.error(err);
-                        alert("Failed to parse .mgf file: " + err.message);
-                    });
+                    .catch(err => { console.error(err); alert("Failed to parse .mgf file: " + err.message); })
+                    .finally(() => hideFileOverlay());
             });
-
-            const mgfSel = document.getElementById("mgf-feature-select");
-            if (mgfSel) {
-                mgfSel.addEventListener("change", function () {
-                    applyMgfFeature(mgfSel.value);
-                });
-            }
         }
 
         // ---- Load example spectrum → call /load_example_ms ----
@@ -3810,6 +4017,9 @@
             var startTab = hasResults ? "query" : (tabs.indexOf(tabPart) !== -1 ? tabPart : "query");
             showTab(startTab);
 
+            // After a retrieval run, fold all spectrum blocks so the results are visible.
+            if (hasResults) foldAllSpectrumBlocks();
+
             // Deep-link into Explore: #explore?query=<val>&query_type=<type>
             if (!hasResults && tabPart === "explore" && paramPart) {
                 var params = {};
@@ -3843,6 +4053,34 @@
                 }
             }
         });
+
+        // Normalise Unicode subscript digits (e.g. C₉H₉N₃O₂ → C9H9N3O2) in the formula field.
+        (function () {
+            const SUB = {'₀':'0','₁':'1','₂':'2','₃':'3','₄':'4',
+                         '₅':'5','₆':'6','₇':'7','₈':'8','₉':'9'};
+            function normFormula(s) {
+                return s.replace(/[₀-₉]/g, c => SUB[c] || c);
+            }
+            document.addEventListener("DOMContentLoaded", function () {
+                const el = document.getElementById("formula");
+                if (!el) return;
+                el.addEventListener("input", function () {
+                    const norm = normFormula(el.value);
+                    if (norm !== el.value) {
+                        const pos = el.selectionStart;
+                        el.value = norm;
+                        el.setSelectionRange(pos, pos);
+                    }
+                });
+                el.addEventListener("paste", function () {
+                    // Run after paste content lands in the field.
+                    setTimeout(function () {
+                        const norm = normFormula(el.value);
+                        if (norm !== el.value) el.value = norm;
+                    }, 0);
+                });
+            });
+        })();
     </script>
 </head>
 <body>
@@ -3958,9 +4196,20 @@
             </div>
             <div id="mgf-feature-row" style="display:none; margin-top:0.5rem;">
                 <div>
-                    <label for="mgf-feature-select">MGF feature</label>
-                    <select id="mgf-feature-select" style="max-width:30rem;"></select>
-                    <p id="mgf-feature-hint" style="font-size:0.8rem; color:#6b7280; margin-top:0.25rem;"></p>
+                    <label for="mgf-feature-input">MGF feature</label>
+                    <div style="position:relative; max-width:30rem;">
+                        <input type="text" id="mgf-feature-input" autocomplete="off"
+                               placeholder="Type to search features…"
+                               style="width:100%; box-sizing:border-box;">
+                        <div id="mgf-feature-results" style="
+                            display:none; position:absolute; top:100%; left:0; right:0;
+                            background:#fff; border:1px solid #d1d5db; border-radius:0.375rem;
+                            max-height:220px; overflow-y:auto; z-index:200;
+                            box-shadow:0 4px 12px rgba(0,0,0,0.12);
+                        "></div>
+                    </div>
+                    <p id="mgf-feature-count" style="font-size:0.8rem; color:#6b7280; margin-top:0.25rem;"></p>
+                    <p id="mgf-feature-hint"  style="font-size:0.8rem; color:#6b7280; margin-top:0.1rem;"></p>
                 </div>
             </div>
 
@@ -4544,6 +4793,14 @@
     </div>
 </main>
 <div id="copy-toast">Copied!</div>
+<div id="file-upload-overlay" style="
+    display:none; position:fixed; inset:0;
+    background:rgba(15,23,42,0.45);
+    align-items:center; justify-content:center; z-index:2100;">
+  <div class="loading-panel" style="width:360px; text-align:center;">
+    <div style="font-weight:600; font-size:1rem;">Loading file…</div>
+  </div>
+</div>
 <div id="loading-overlay" class="loading-overlay">
   <div class="loading-panel">
     <div style="display:flex; align-items:center; justify-content:space-between; gap:1rem;">
