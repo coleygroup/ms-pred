@@ -271,13 +271,13 @@ def main(
         if launch_method == "slurm":
             for cmd_str in scripts_to_run:
                 print(f"_Command String_\n{cmd_str}")
-                subprocess.call(cmd_str, shell=True)
+                subprocess.run(cmd_str, shell=True, check=True)
                 if log is not None:
                     log.write(cmd_str + "\n")
         elif launch_method == "local":
             for cmd_str in scripts_to_run:
                 print(f"_Command String_\n{cmd_str}")
-                subprocess.call(cmd_str, shell=True)
+                subprocess.run(cmd_str, shell=True, check=True)
                 if log is not None:
                     log.write(cmd_str + "\n")
         elif launch_method == "local_parallel":

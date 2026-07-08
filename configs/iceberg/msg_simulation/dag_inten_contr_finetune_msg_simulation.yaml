@@ -1,0 +1,62 @@
+launcher_args: {experiment_name: iceberg_msg_simulation,
+  script_name: "src/ms_pred/iceberg/train_contr_inten.py",
+  slurm_script: launcher_scripts/generic_slurm.sh,
+  launch_method: local,
+  visible_devices: [0, 1]
+}
+universal_args:
+  _slurm_args:
+  - {nodes: 1, ntasks: 1, gpus: l40s:2, cpus-per-task: 32,
+    job-name: msg_simulation_contr, mem: 320G, time: '1-18:00:00'}
+  debug: [false]
+  debug-overfit: [false]
+  gpu: [true]
+
+  seed: [1]
+  num-workers: [64]
+  batch-size: [32]
+  num-decoys: [3]
+  num-decoy-h5s: [10]
+  max-epochs: [10]
+  dataset-name: [msg_simulation]
+  split-name: [split.tsv]
+  dataset-labels: [labels.tsv]
+
+  learning-rate: [0.0005]
+  lr-decay-rate: [0.825]
+  contr-weight: [1]
+
+  dropout: [0.1]
+  mpnn-type: [GGNN]
+  pe-embed-k: [0]
+  pool-op: [avg]
+  hidden-size: [256]
+  weight-decay: [1e-7]
+  set-layers: [0]
+  frag-set-layers: [3]
+  mlp-layers: [1]
+  gnn-layers: [4]
+  loss-fn: [cosine]
+  track-cosine: [false]
+  root-encode: [gnn]
+  inject-early: [false]
+
+  include-unshifted-mz: [true]
+  binned-targs: [true]
+  embed-adduct: [true]
+  embed-collision: [true]
+  embed-instrument: [true]
+  embed-elem-group: [true]
+  grad-accumulate: [1]
+  encode-forms: [true]
+  add-hs: [true]
+  sk-tau: [0.05]
+  ppm-tol: [20]
+
+iterative_args:
+  -  split-name: [split.tsv]
+     save-dir: [split_rnd1]
+     magma-dag-folder: [results/iceberg_msg_simulation/split_rnd1/preds_train_100_inten.hdf5]
+     decoy-path: ['results/iceberg_msg_simulation/split_rnd1/preds_train_100/decoy_tree_preds/decoy_tree_preds.hdf5']
+     train-checkpoint: [results/iceberg_msg_simulation/split_rnd1/ckpt/inten/best.ckpt]
+     seed: [1]

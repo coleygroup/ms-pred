@@ -10,8 +10,10 @@ quick MARASON checks.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Iterable
@@ -197,6 +199,83 @@ def write_tsv(df: pd.DataFrame, path: Path, overwrite: bool):
     df.to_csv(path, sep="\t", index=False)
 
 
+def collision_key(value) -> str | None:
+    try:
+        return f"{float(value):.0f}"
+    except (TypeError, ValueError):
+        return None
+
+
+def iter_label_collision_pairs(labels: pd.DataFrame) -> set[tuple[str, str]]:
+    pairs = set()
+    for spec, collision_energies in zip(labels["spec"].astype(str), labels["collision_energies"].astype(str)):
+        try:
+            parsed = ast.literal_eval(collision_energies)
+        except (SyntaxError, ValueError):
+            parsed = [collision_energies]
+        if not isinstance(parsed, list):
+            parsed = [parsed]
+        for collision_energy in parsed:
+            ce_key = collision_key(str(collision_energy).split()[0])
+            if ce_key is not None:
+                pairs.add((spec, ce_key))
+    return pairs
+
+
+def parse_subformula_key(key: str) -> tuple[str, str] | None:
+    match = re.match(r"(.+)_collision\s+([0-9]+\.?[0-9]*|nan)\.json$", key)
+    if match is None:
+        return None
+    spec, collision_energy = match.groups()
+    ce_key = collision_key(collision_energy)
+    if ce_key is None:
+        return None
+    return spec, ce_key
+
+
+def filter_subformulae(source_dataset: Path, output_dataset: Path, labels: pd.DataFrame, overwrite: bool) -> dict:
+    source_root = (source_dataset / "labels.tsv").resolve().parent
+    source_h5 = source_root / "subformulae/no_subform.hdf5"
+    if not source_h5.exists():
+        source_h5 = source_dataset / "subformulae/no_subform.hdf5"
+    if not source_h5.exists():
+        raise FileNotFoundError(source_h5)
+
+    valid_pairs = iter_label_collision_pairs(labels)
+    subformula_dir = output_dataset / "subformulae"
+    replace_path(subformula_dir, overwrite=overwrite)
+    subformula_dir.mkdir(parents=True, exist_ok=True)
+    out_h5 = subformula_dir / "no_subform.hdf5"
+
+    source_entries = 0
+    written = 0
+    skipped_unparsed = 0
+    skipped_not_in_labels = 0
+    with h5py.File(source_h5, "r") as src, h5py.File(out_h5, "w") as dst:
+        for key in src.keys():
+            source_entries += 1
+            pair = parse_subformula_key(key)
+            if pair is None:
+                skipped_unparsed += 1
+                continue
+            if pair not in valid_pairs:
+                skipped_not_in_labels += 1
+                continue
+            src.copy(key, dst, name=key)
+            written += 1
+
+    return {
+        "source_subformulae": str(source_h5),
+        "output_subformulae": str(out_h5),
+        "label_collision_pairs": int(len(valid_pairs)),
+        "source_entries": int(source_entries),
+        "written_entries": int(written),
+        "skipped_unparsed": int(skipped_unparsed),
+        "skipped_not_in_labels": int(skipped_not_in_labels),
+        "missing_label_pairs": int(len(valid_pairs) - written),
+    }
+
+
 def copy_debug_spec_files(source_dataset: Path, output_dataset: Path, overwrite: bool) -> dict:
     labels_path = output_dataset / "labels_debug.tsv"
     if not labels_path.exists():
@@ -364,13 +443,19 @@ def main():
 
         resource_dir = (args.source_dataset / "labels.tsv").resolve().parent
         linked = {}
-        for name in ["magma_outputs", "subformulae", "spec_files.hdf5", "spec_files", "spec_files_w_eV"]:
+        for name in ["magma_outputs", "spec_files.hdf5", "spec_files", "spec_files_w_eV"]:
             linked[name] = symlink_or_copy(
                 resource_dir / name,
                 args.output_dataset / name,
                 overwrite=args.overwrite,
             )
         audit["linked_resources"] = linked
+        audit["subformulae"] = filter_subformulae(
+            source_dataset=args.source_dataset,
+            output_dataset=args.output_dataset,
+            labels=labels,
+            overwrite=args.overwrite,
+        )
 
         candidate_frames = {}
         spec_set = set(labels["spec"].astype(str))

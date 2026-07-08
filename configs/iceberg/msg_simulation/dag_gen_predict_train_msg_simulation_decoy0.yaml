@@ -1,0 +1,25 @@
+launcher_args: {experiment_name: iceberg_msg_simulation,
+  script_name: "src/ms_pred/iceberg/predict_gen.py",
+  slurm_script: launcher_scripts/generic_slurm.sh,
+  launch_method: local,
+  visible_devices: [0, 1]
+}
+universal_args:
+  _slurm_args:
+  - {nodes: 1, ntasks: 1, gpus: l40s:2, cpus-per-task: 16, job-name: forward_train, mem: 160G,
+    time: '1-18:00:00'}
+  debug: [false]
+  gpu: [true]
+  dataset-name: [msg_simulation]
+  batch-size: [96]
+  num-gpu-workers: [4]
+  num-cpu-workers: [32]
+  threshold: [0.0]
+  max-nodes: [100]
+  num-decoys: [0]
+  pubchem-map-path: ['data/retrieval/pubchem/pubchem_formulae_inchikey.hdf5']
+
+iterative_args:
+  -  split-name: [split.tsv]
+     checkpoint-pth: [results/iceberg_msg_simulation/split_rnd1/ckpt/gen/best.ckpt]
+     save-dir: [split_rnd1/preds_train_100]
