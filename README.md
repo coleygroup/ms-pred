@@ -81,7 +81,7 @@ uv sync --extra cpu --extra webui
 
 ## Demo <a name="demo"></a>
 To easily get started, you can run ICEBERG structural elucidation at the WebUI: http://iceberg-ms.mit.edu/.
-It supports retrieval from all structures in PubChem, excluding those structures in NIST'23 to avoid license conflict.
+It supports retrieval from 91 million structures in PubChem, excluding those structures in NIST'23 to avoid license conflict.
 
 If you want more flexibility by doing some coding, a demo of how to use mass spectrum predictors (ICEBERG as an example) for structural elucidation campaigns can be found at [``notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb``](notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb).
 
@@ -90,7 +90,8 @@ Please go through the following prerequisites to run the demo:
 * Start a jupyter notebook server (by ``jupyter notebook``), and navigate to ``notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb`` in the web UI.
 * Get pretrained ICEBERG model weights.
     * You can either train the model by yourself (following instructions below);
-    * Or if you have an NSIT'20 or NIST'23 license, you can [email the maintainer with a proof of license](mailto:runzhong@mit.edu?subject=Inquiry%20of%20pretrianed%20ICEBERG%20on%20NIST20&body=My%20organization%20has%20a%20NIST'20%20(or%20newer)%20license%20and%20I%20would%20like%20to%20receive%20pretrained%20weights%20of%20ICEBERG%20on%20NIST'20.%20Please%20find%20the%20proof%20of%20purchase%20as%20attached.)
+    * Or if you have an NSIT'20/23/26 license, you can [email the maintainer with a proof of license](mailto:runzhong@mit.edu?subject=Inquiry%20of%20pretrianed%20ICEBERG%20on%20NIST20&body=My%20organization%20has%20a%20NIST'20%20(or%20newer)%20license%20and%20I%20would%20like%20to%20receive%20pretrained%20weights%20of%20ICEBERG%20on%20NIST'20.%20Please%20find%20the%20proof%20of%20purchase%20as%20attached.) and we will send you the weights;
+    * Or you can use the [open-source MassSpecGym-trained weights](https://www.dropbox.com/scl/fo/kwm35ih8tlfnshfrcq8ot/AOeS4M0_v9MhqeEZys9sCRQ?rlkey=f1n6pbzx94g1k2el2wcbmee61&st=dcl9pbyp&dl=0). 
 * Update [``the configuration file``](configs/iceberg/iceberg_elucidation.yaml) based your local setting. Change ``python_path`` to your Python excutiable, and update ``gen_ckpt`` and ``inten_ckpt`` to the path of your pretrained models.
     * When you have a GPU with smaller RAM, set smaller numbers for ``batch_size`` and ``num_workers`` to fit the model into GPU RAM (``batch_size: 8``, ``num_workers: 6`` tested on NVIDIA RTX 4070M 8GB; ``batch_size: 8``, ``num_workers: 12`` tested on NVIDIA RTX A5000 24GB).
     * CPU-only inference is also feasible if you set ``cuda_devices: None``.
@@ -272,6 +273,14 @@ python data_scripts/predict_chemical_class.py
 ICEBERG 2.1 is our recommended model with a ~3 times speedup and official support on NIST'23. 
 ICEBERG is trained in two parts: a learned fragment generator and an intensity predictor. The pipeline for training and evaluating this model can be accessed in `run_scripts/iceberg/`. 
 There is an all-in-one script ``run_scripts/iceberg/nist23/run_all.sh`` that trains ICEBERG 2.1 on NIST'23 dataset.
+
+#### Pretrained ICEBERG 2.1 Model Weights on MassSpecGym
+
+We provide pretrained ICEBERG 2.1 model weights for the MassSpecGym workflows:
+
+1. [`msg_all`](https://www.dropbox.com/scl/fo/kwm35ih8tlfnshfrcq8ot/AOeS4M0_v9MhqeEZys9sCRQ?rlkey=f1n6pbzx94g1k2el2wcbmee61&st=dcl9pbyp&dl=0)
+2. [`msg_simulation`](https://www.dropbox.com/scl/fo/mcj0ngdvuj2xkhr983frb/ABGLrS8ZCeyYUWhzRfxPtRg?rlkey=rccvo52cehh75ma1yy8jji46t&st=4e3b946v&dl=0)
+
 
 Current version is an update to ICEBERG 2.0 which is described in [Wang et al. (2025)](https://doi.org/10.1101/2025.05.28.656653), available at the [``iceberg_2.0`` branch](https://github.com/coleygroup/ms-pred/tree/iceberg_2.0). 
 The archived version released with [Goldman et al. (2024)](http://arxiv.org/abs/2304.13136) is at the [``iceberg_1.0`` branch](https://github.com/coleygroup/ms-pred/tree/iceberg_1.0).
