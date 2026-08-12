@@ -48,11 +48,13 @@ Environment="ICEBERG_ADMIN_EMAILS=admin@example.com"
 #   https://dev.maxmind.com/geoip/geolite2-free-geolocation-data
 # Environment="GEOIP_DB=/path/to/GeoLite2-City.mmdb"
 
-# ── SMTP email (optional) ─────────────────────────────────────────────────────
+# ── Email notifications (optional) ────────────────────────────────────────────
 
 # Used to email new users their login credentials when added via the admin dashboard.
 # If unconfigured, the dashboard displays the generated password on-screen instead.
 #
+# Store SMTP credentials only in the service environment or an EnvironmentFile
+# excluded from source control.
 # Gmail example (use an App Password — https://myaccount.google.com/apppasswords):
 # Environment="SMTP_HOST=smtp.gmail.com"
 # Environment="SMTP_PORT=587"

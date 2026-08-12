@@ -14,7 +14,7 @@ import smtplib
 import sqlite3
 import ipaddress
 import functools
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
 from dataclasses import dataclass, field
 from http.client import RemoteDisconnected
@@ -72,7 +72,7 @@ _ADMIN_EMAILS_ENV: set = {
     if e.strip()
 }
 
-# SMTP config for sending registration emails (all optional — if unset, email is skipped)
+# SMTP config for sending registration emails (optional; if unset, email is skipped).
 _SMTP_HOST: str = os.environ.get("SMTP_HOST", "")
 _SMTP_PORT: int = int(os.environ.get("SMTP_PORT", "587"))
 _SMTP_USER: str = os.environ.get("SMTP_USER", "")
@@ -1353,13 +1353,14 @@ def _generate_initial_password(length: int = 14) -> str:
 
 def _send_email(to: str, subject: str, body: str) -> Optional[str]:
     """
-    Send a plain-text email via SMTP relay.
-    Returns None if SMTP is not configured, empty string on success,
+    Send a plain-text credential email.
+    Returns None if email is not configured, empty string on success,
     or an error message string if the send failed.
     """
     if not _SMTP_HOST:
-        app.logger.warning("SMTP not configured; skipping email to %s", to)
+        app.logger.warning("Email not configured; skipping email to %s", to)
         return None
+
     try:
         msg = EmailMessage()
         msg["From"] = _SMTP_FROM or _SMTP_USER
@@ -1395,6 +1396,9 @@ def _build_credential_email(email: str, password: str, kind: str = "new") -> tup
 
 _ANALYTICS_INIT_DONE = False
 _SKIP_ANALYTICS_PREFIXES = ("/static/", "/admin/api/", "/favicon")
+_ANALYTICS_CACHE_TTL_SECONDS = int(os.environ.get("ICEBERG_ANALYTICS_CACHE_TTL_SECONDS", "300"))
+_ANALYTICS_CACHE: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
+_analytics_cache_lock = threading.Lock()
 
 
 def _analytics_conn() -> Optional[sqlite3.Connection]:
@@ -1407,6 +1411,46 @@ def _analytics_conn() -> Optional[sqlite3.Connection]:
         return conn
     except Exception:
         return None
+
+
+def _analytics_window_arg(default: str = "30") -> str:
+    """Return a supported analytics window: 30, 90, 365, or all."""
+    window = (request.args.get("days") or default).strip().lower()
+    if window in {"30", "90", "365", "all"}:
+        return window
+    return default
+
+
+def _analytics_cutoff(window: str) -> Optional[str]:
+    if window == "all":
+        return None
+    try:
+        days = int(window)
+    except ValueError:
+        days = 30
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+
+def _analytics_cache_get(kind: str, window: str) -> Optional[Dict[str, Any]]:
+    now = time.monotonic()
+    key = (kind, window)
+    with _analytics_cache_lock:
+        item = _ANALYTICS_CACHE.get(key)
+        if item is None:
+            return None
+        expires_at, payload = item
+        if expires_at < now:
+            _ANALYTICS_CACHE.pop(key, None)
+            return None
+        return payload
+
+
+def _analytics_cache_set(kind: str, window: str, payload: Dict[str, Any]) -> None:
+    if _ANALYTICS_CACHE_TTL_SECONDS <= 0:
+        return
+    expires_at = time.monotonic() + _ANALYTICS_CACHE_TTL_SECONDS
+    with _analytics_cache_lock:
+        _ANALYTICS_CACHE[(kind, window)] = (expires_at, payload)
 
 
 def _ensure_analytics_schema() -> None:
@@ -1660,7 +1704,7 @@ def admin_add_user():
     sent = _send_email(email, subject, body)
 
     if sent is None:
-        flash(f"User {email} created. SMTP not configured — temp password: {password}", "warning")
+        flash(f"User {email} created. Email not configured — temp password: {password}", "warning")
     elif sent == "":
         flash(f"User {email} created and credentials emailed. Temp password: {password}", "success")
     else:
@@ -1688,7 +1732,7 @@ def admin_reset_password():
     sent = _send_email(email, subject, body)
 
     if sent is None:
-        flash(f"Password reset for {email}. SMTP not configured — temp password: {password}", "warning")
+        flash(f"Password reset for {email}. Email not configured — temp password: {password}", "warning")
     elif sent == "":
         flash(f"Password reset for {email} and emailed. Temp password: {password}", "success")
     else:
@@ -1777,30 +1821,49 @@ def api_log_event(event: str):
 @app.route("/admin/api/stats")
 @admin_required
 def admin_api_stats():
-    """Return daily request counts + unique IPs, top paths, top countries (last 90 days)."""
+    """Return daily request counts + unique IPs, top paths, top countries."""
     _ensure_analytics_schema()
+    window = _analytics_window_arg()
+    cached = _analytics_cache_get("stats", window)
+    if cached is not None:
+        return jsonify(cached)
+
     conn = _analytics_conn()
     if conn is None:
         return jsonify({"error": "Analytics DB not configured"}), 503
     try:
-        days = int(request.args.get("days", 90))
+        cutoff = _analytics_cutoff(window)
         # Daily counts
-        cur = conn.execute(
-            """SELECT date(ts) AS day, COUNT(*) AS reqs, COUNT(DISTINCT ip) AS ips
-               FROM requests
-               WHERE ts >= datetime('now', ? || ' days')
-               GROUP BY day ORDER BY day""",
-            (f"-{days}",),
-        )
+        if cutoff is None:
+            cur = conn.execute(
+                """SELECT substr(ts, 1, 10) AS day, COUNT(*) AS reqs, COUNT(DISTINCT ip) AS ips
+                   FROM requests
+                   GROUP BY day ORDER BY day"""
+            )
+        else:
+            cur = conn.execute(
+                """SELECT substr(ts, 1, 10) AS day, COUNT(*) AS reqs, COUNT(DISTINCT ip) AS ips
+                   FROM requests
+                   WHERE ts >= ?
+                   GROUP BY day ORDER BY day""",
+                (cutoff,),
+            )
         daily = [{"day": r[0], "requests": r[1], "unique_ips": r[2]} for r in cur.fetchall()]
         # Top actions (grouped by path+method+ip so unique visitors are exact per action)
-        cur = conn.execute(
-            """SELECT path, method, ip, COUNT(*) AS n
-               FROM requests
-               WHERE ts >= datetime('now', ? || ' days')
-               GROUP BY path, method, ip""",
-            (f"-{days}",),
-        )
+        if cutoff is None:
+            cur = conn.execute(
+                """SELECT path, method, ip, COUNT(*) AS n
+                   FROM requests
+                   GROUP BY path, method, ip"""
+            )
+        else:
+            cur = conn.execute(
+                """SELECT path, method, ip, COUNT(*) AS n
+                   FROM requests
+                   WHERE ts >= ?
+                   GROUP BY path, method, ip""",
+                (cutoff,),
+            )
         buckets: Dict[str, Any] = {}
         for path, method, ip, n in cur.fetchall():
             label = _classify_action(path, method)
@@ -1816,15 +1879,31 @@ def admin_api_stats():
             key=lambda d: d["count"], reverse=True,
         )
         # Top countries
-        cur = conn.execute(
-            """SELECT g.country, COUNT(*) AS n
-               FROM requests r JOIN ip_geo g ON r.ip = g.ip
-               WHERE r.ts >= datetime('now', ? || ' days') AND g.country != ''
-               GROUP BY g.country ORDER BY n DESC LIMIT 20""",
-            (f"-{days}",),
-        )
+        if cutoff is None:
+            cur = conn.execute(
+                """SELECT g.country, COUNT(*) AS n
+                   FROM requests r JOIN ip_geo g ON r.ip = g.ip
+                   WHERE g.country != ''
+                   GROUP BY g.country ORDER BY n DESC LIMIT 20"""
+            )
+        else:
+            cur = conn.execute(
+                """SELECT g.country, COUNT(*) AS n
+                   FROM requests r JOIN ip_geo g ON r.ip = g.ip
+                   WHERE r.ts >= ? AND g.country != ''
+                   GROUP BY g.country ORDER BY n DESC LIMIT 20""",
+                (cutoff,),
+            )
         top_countries = [{"country": r[0], "count": r[1]} for r in cur.fetchall()]
-        return jsonify({"daily": daily, "top_actions": top_actions, "top_countries": top_countries})
+        payload = {
+            "daily": daily,
+            "top_actions": top_actions,
+            "top_countries": top_countries,
+            "window": window,
+            "cached_seconds": _ANALYTICS_CACHE_TTL_SECONDS,
+        }
+        _analytics_cache_set("stats", window, payload)
+        return jsonify(payload)
     finally:
         conn.close()
 
@@ -1834,23 +1913,43 @@ def admin_api_stats():
 def admin_api_geo():
     """Return aggregated geo points [{lat, lon, country, count}] for the map."""
     _ensure_analytics_schema()
+    window = _analytics_window_arg()
+    cached = _analytics_cache_get("geo", window)
+    if cached is not None:
+        return jsonify(cached)
+
     conn = _analytics_conn()
     if conn is None:
         return jsonify({"error": "Analytics DB not configured"}), 503
     try:
-        days = int(request.args.get("days", 90))
-        cur = conn.execute(
-            """SELECT g.lat, g.lon, g.country, COUNT(*) AS n
-               FROM requests r JOIN ip_geo g ON r.ip = g.ip
-               WHERE r.ts >= datetime('now', ? || ' days')
-                 AND g.lat IS NOT NULL AND g.lon IS NOT NULL
-               GROUP BY g.ip
-               ORDER BY n DESC""",
-            (f"-{days}",),
-        )
+        cutoff = _analytics_cutoff(window)
+        if cutoff is None:
+            cur = conn.execute(
+                """SELECT g.lat, g.lon, g.country, COUNT(*) AS n
+                   FROM requests r JOIN ip_geo g ON r.ip = g.ip
+                   WHERE g.lat IS NOT NULL AND g.lon IS NOT NULL
+                   GROUP BY g.ip
+                   ORDER BY n DESC"""
+            )
+        else:
+            cur = conn.execute(
+                """SELECT g.lat, g.lon, g.country, COUNT(*) AS n
+                   FROM requests r JOIN ip_geo g ON r.ip = g.ip
+                   WHERE r.ts >= ?
+                     AND g.lat IS NOT NULL AND g.lon IS NOT NULL
+                   GROUP BY g.ip
+                   ORDER BY n DESC""",
+                (cutoff,),
+            )
         points = [{"lat": r[0], "lon": r[1], "country": r[2], "count": r[3]}
                   for r in cur.fetchall()]
-        return jsonify({"points": points})
+        payload = {
+            "points": points,
+            "window": window,
+            "cached_seconds": _ANALYTICS_CACHE_TTL_SECONDS,
+        }
+        _analytics_cache_set("geo", window, payload)
+        return jsonify(payload)
     finally:
         conn.close()
 

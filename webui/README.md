@@ -60,12 +60,33 @@ The application requires the following environment variables:
 | `MSPRED_ATLAS_DIR` | Base directory of predicted MGF atlas |
 | `MSPRED_JOB_DIR`   | Directory for temporary job storage   |
 
+Email notifications are optional. If email is not configured, the admin
+dashboard displays generated temporary passwords on-screen.
+
+SMTP credentials must be stored only in the deployment environment or an
+`EnvironmentFile` excluded from source control. The available settings are:
+
+| Variable           | Description                                      |
+|--------------------|--------------------------------------------------|
+| `SMTP_HOST`        | SMTP relay hostname                              |
+| `SMTP_PORT`        | SMTP relay port, defaults to `587`               |
+| `SMTP_USER`        | SMTP login username                              |
+| `SMTP_PASSWORD`    | SMTP login password                              |
+| `SMTP_FROM`        | Sender address, defaults to `SMTP_USER`          |
+| `SMTP_USE_TLS`     | Whether to use STARTTLS, defaults to `true`      |
+
 Example:
 
 ```bash
 export FLASK_SECRET_KEY="replace-with-long-random-string"
 export MSPRED_ATLAS_DIR="/data/atlas"
 export MSPRED_JOB_DIR="/var/lib/iceberg_jobs"
+export SMTP_HOST="smtp.example.com"
+export SMTP_PORT="587"
+export SMTP_USER="iceberg@example.com"
+export SMTP_PASSWORD="replace-with-an-app-password"
+export SMTP_FROM="iceberg@example.com"
+export SMTP_USE_TLS="true"
 ```
 
 Ensure the job directory exists and has proper permissions:

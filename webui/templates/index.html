@@ -7,6 +7,7 @@
     <meta name="google-site-verification" content="gQzn4SSh1MqEOOBUlUzN1pPBxcCeJUg0fvI8wE-xbRw" />
 
     <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+    <script src="{{ url_for('static', filename='iceberg-name-animation.js') }}" defer></script>
 
     <style>
         body {
@@ -23,15 +24,89 @@
         }
         .header-inner {
             display: flex;
-            align-items: center;
+            align-items: flex-start;
             justify-content: space-between;
+            gap: 0.75rem 2rem;
+            flex-wrap: wrap;
+        }
+        .iceberg-brand {
+            flex: 1 1 42rem;
+            min-width: 0;
         }
         .header-title {
             margin: 0;
-            font-size: 1.3rem;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: baseline;
+            font-size: clamp(0.82rem, 1.35vw, 1.3rem);
             font-weight: 600;
+            line-height: 1.45;
+            letter-spacing: -0.01em;
         }
-
+        .iceberg-word {
+            display: inline-flex;
+            align-items: baseline;
+            flex: 0 0 auto;
+        }
+        .iceberg-title-animation {
+            display: inline-flex;
+            flex-wrap: wrap;
+            align-items: baseline;
+        }
+        .iceberg-inline-animation {
+            color: #4b5563;
+            font-weight: 600;
+            vertical-align: baseline;
+        }
+        .iceberg-initial {
+            position: relative;
+            z-index: 1;
+            display: inline-block;
+            line-height: 1.1;
+            border-bottom: 0.1em solid currentColor;
+        }
+        .iceberg-tail {
+            display: inline-block;
+            width: 0;
+            overflow: hidden;
+            opacity: 0;
+            transform: translateX(-0.25em);
+            white-space: nowrap;
+            transition-property: width, opacity, transform;
+            transition-duration: 680ms, 320ms, 680ms;
+            transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1), ease-out, cubic-bezier(0.22, 1, 0.36, 1);
+            will-change: width, opacity, transform;
+        }
+        .iceberg-title-animation[data-expanded="true"] .iceberg-tail {
+            width: var(--iceberg-tail-width);
+            opacity: 1;
+            transform: translateX(0);
+        }
+        .header-title-suffix {
+            margin-left: 0.35em;
+            white-space: nowrap;
+        }
+        .header-actions {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 0.6rem 1rem;
+            flex: 0 1 auto;
+            flex-wrap: wrap;
+            color: #9ca3af;
+            font-size: 0.85rem;
+        }
+        @media (max-width: 760px) {
+            header {
+                padding-inline: 1rem;
+            }
+            .iceberg-brand {
+                flex-basis: 100%;
+            }
+            .header-actions {
+                justify-content: flex-start;
+            }
+        }
         main {
             max-width: 1150px;
             margin: 1.5rem auto 3rem;
@@ -2531,7 +2606,7 @@
                     .filter(v => Number.isFinite(v));
 
                 if (!ceList.length) {
-                    win.alert("Internal error: no collision energies parsed from selection.");
+                    win.alert("Error: no collision energies parsed from selection.");
                     return;
                 }
 
@@ -4086,8 +4161,22 @@
 <body>
 <header>
     <div class="header-inner">
-        <h1 class="header-title">ICEBERG Spectrum Retrieval (PubChem Atlas)</h1>
-        <div style="display:flex;align-items:center;gap:1rem;font-size:0.85rem;color:#9ca3af;">
+        <div class="iceberg-brand">
+            <h1 class="header-title"
+                aria-label="ICEBERG Spectral Retrieval and PubChem Atlas">
+                <span class="iceberg-title-animation" aria-hidden="true">
+                    <span class="iceberg-word"><span class="iceberg-initial">I</span><span class="iceberg-tail">nferring&nbsp;</span></span>
+                    <span class="iceberg-word"><span class="iceberg-initial">C</span><span class="iceberg-tail">ollision-induced-dissociation by&nbsp;</span></span>
+                    <span class="iceberg-word"><span class="iceberg-initial">E</span><span class="iceberg-tail">stimating&nbsp;</span></span>
+                    <span class="iceberg-word"><span class="iceberg-initial">B</span><span class="iceberg-tail">reakage&nbsp;</span></span>
+                    <span class="iceberg-word"><span class="iceberg-initial">E</span><span class="iceberg-tail">vents and&nbsp;</span></span>
+                    <span class="iceberg-word"><span class="iceberg-initial">R</span><span class="iceberg-tail">econstructing their&nbsp;</span></span>
+                    <span class="iceberg-word"><span class="iceberg-initial">G</span><span class="iceberg-tail">raphs</span></span>
+                </span>
+                <span class="header-title-suffix">Spectral Retrieval and PubChem Atlas</span>
+            </h1>
+        </div>
+        <div class="header-actions">
             <span>Please report any issues to {{ CONTACT_EMAIL }}</span>
             {% if current_user.is_authenticated %}
             {% if current_user.can_access_nist %}
@@ -4106,7 +4195,7 @@
                 </button>
             </form>
             {% else %}
-            <a href="{{ url_for('login') }}" style="color:#93c5fd;text-decoration:none;">Internal login</a>
+            <a href="{{ url_for('login') }}" style="color:#93c5fd;text-decoration:none;">User login</a>
             {% endif %}
         </div>
     </div>
@@ -4771,7 +4860,16 @@
             <div>
                 <h3>About ICEBERG</h3>
                 <p>
-                    ICEBERG is a neural network model that predicts mass spectra from molecular structures.
+                    <span class="iceberg-title-animation iceberg-inline-animation"
+                          aria-label="ICEBERG: Inferring Collision-induced-dissociation by Estimating Breakage Events and Reconstructing their Graphs">
+                        <span class="iceberg-word"><span class="iceberg-initial">I</span><span class="iceberg-tail">nferring&nbsp;</span></span>
+                        <span class="iceberg-word"><span class="iceberg-initial">C</span><span class="iceberg-tail">ollision-induced-dissociation by&nbsp;</span></span>
+                        <span class="iceberg-word"><span class="iceberg-initial">E</span><span class="iceberg-tail">stimating&nbsp;</span></span>
+                        <span class="iceberg-word"><span class="iceberg-initial">B</span><span class="iceberg-tail">reakage&nbsp;</span></span>
+                        <span class="iceberg-word"><span class="iceberg-initial">E</span><span class="iceberg-tail">vents and&nbsp;</span></span>
+                        <span class="iceberg-word"><span class="iceberg-initial">R</span><span class="iceberg-tail">econstructing their&nbsp;</span></span>
+                        <span class="iceberg-word"><span class="iceberg-initial">G</span><span class="iceberg-tail">raphs</span></span>
+                    </span> is a neural network model that predicts mass spectra from molecular structures.
                     It can be used to elucidate unknown structures given mass spec.
                     </p>
                 <img src="{{ url_for('static', filename='iceberg_illustration.svg') }}"
