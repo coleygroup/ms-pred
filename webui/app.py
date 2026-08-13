@@ -2833,7 +2833,7 @@ def api_resolve_query():
         })
 
     candidates: List[Dict[str, Any]] = []
-    seen_inchikeys: set = set()
+    seen_connectivity_keys: set = set()
 
     for cmpd in compounds:
         smi = getattr(cmpd, "isomeric_smiles", None) or getattr(cmpd, "canonical_smiles", None)
@@ -2846,9 +2846,10 @@ def api_resolve_query():
             continue
 
         ikey = keys.get("inchikey", "")
-        if not ikey or ikey in seen_inchikeys:
+        connectivity_key = ikey.split("-", 1)[0] if ikey else ""
+        if not connectivity_key or connectivity_key in seen_connectivity_keys:
             continue
-        seen_inchikeys.add(ikey)
+        seen_connectivity_keys.add(connectivity_key)
 
         cid = getattr(cmpd, "cid", None)
         name = getattr(cmpd, "iupac_name", None) or getattr(cmpd, "synonyms", [None])[0] or ""
