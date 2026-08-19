@@ -2,11 +2,11 @@
 
 **Update 7/7/2026:** 
 - Introducing ICEBERG 2.1! It has a substantial GPU speedup, and we provide pretrained NIST'23 model. Checkout to the [ICEBERG 2.0 branch](https://github.com/coleygroup/ms-pred/tree/iceberg_2.0) if you want to run the earlier 2.0 model.
-- Introducing GLACIER! GLACIER is our state-of-the-art single-stage MS/MS simulator that is even faster and more accurate. Check [our preprint](https://arxiv.org/abs/2606.29161).
+- Introducing GLACIER! GLACIER is our state-of-the-art single-stage MS/MS simulator that is even faster and more accurate. Check the [introduction video](https://lnkd.in/p/g6jCsT7Y) and [our preprint](https://arxiv.org/abs/2606.29161).
 
 [![ICEBERG-WebUI](iceberg_teaser.png)](http://iceberg-ms.mit.edu/)
 
-**Update 4/4/2026:** You can run ICEBERG structural elucidation easily at http://iceberg-ms.mit.edu/! By inputting the chemical formula and your experimental spectrum, the WebUI will rank it against all candidates from PubChem. No GPU is required.
+**Update 4/4/2026:** ICEBERG atlas is online at http://iceberg-ms.mit.edu/! You can browse predicted spectra for all PubChem structures, query your experimental spectra, and download predicted spectra.
 
 ------------
 
@@ -88,7 +88,7 @@ If you want more flexibility by doing some coding, a demo of how to use mass spe
 Please go through the following prerequisites to run the demo:
 * Clone the repository ``git clone https://github.com/coleygroup/ms-pred.git``.
 * Start a jupyter notebook server (by ``jupyter notebook``), and navigate to ``notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb`` in the web UI.
-* Get pretrained ICEBERG model weights.
+* Get pretrained ICEBERG and GLACIER model weights.
     * You can either train the model by yourself (following instructions below);
     * Or if you have an NSIT'20/23/26 license, you can [email the maintainer with a proof of license](mailto:runzhong@mit.edu?subject=Inquiry%20of%20pretrianed%20ICEBERG%20on%20NIST20&body=My%20organization%20has%20a%20NIST'20%20(or%20newer)%20license%20and%20I%20would%20like%20to%20receive%20pretrained%20weights%20of%20ICEBERG%20on%20NIST'20.%20Please%20find%20the%20proof%20of%20purchase%20as%20attached.) and we will send you the weights;
     * Or you can use the [open-source MassSpecGym-trained weights](https://www.dropbox.com/scl/fo/kwm35ih8tlfnshfrcq8ot/AOeS4M0_v9MhqeEZys9sCRQ?rlkey=f1n6pbzx94g1k2el2wcbmee61&st=dcl9pbyp&dl=0). 
@@ -363,7 +363,8 @@ You can use `python launcher_scripts/run_from_config.py configs/marason/marason_
 
 ### GLACIER
 GLACIER is the first ms/ms machine learning model that predicts multi-breakpoint fragmentation process in single pass. You can reproduce the experiments in our paper with the following scripts.
-0. *Add spectral intensity to the magma heuristics prediction*: `run_scripts/glacier/add_inten.sh`
+
+1. *Add spectral intensity to the magma heuristics prediction*: `run_scripts/glacier/add_inten.sh`
 2. *Train model*: `run_scripts/glacier/01_train_joint.sh`   
 3. *Predict spectral intensity*: `run_scripts/glacier/02_predict_inten.py`     
 4. *Retrieval*: `run_scripts/glacier/03_run_retrieval.py` 
