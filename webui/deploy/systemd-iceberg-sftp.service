@@ -1,0 +1,42 @@
+[Unit]
+Description=iceberg atlas read-only SFTP
+After=network.target
+
+[Service]
+Type=simple
+User=USER
+Group=USER
+WorkingDirectory=/path/to/ms-pred/webui
+
+# Path to the public ICEBERG atlas (contains h_plus_out_mgf/ and h_minus_out_mgf/)
+Environment="MSPRED_ATLAS_DIR=/path/to/atlas"
+
+# YAML file mapping email -> {password, role, created}.
+# Roles: admin | authorized_user (NIST access) | user (public atlas only)
+Environment="ICEBERG_USERS_FILE=/path/to/iceberg_users.yaml"
+
+# Comma-separated emails that always have admin/NIST access.
+Environment="ICEBERG_ADMIN_EMAILS=admin@example.com"
+
+# Optional NIST'23 atlas tree. Only visible to admin and authorized_user roles.
+# Environment="MSPRED_ATLAS_DIR_NIST=/path/to/atlas_nist"
+
+# SFTP listener. Port 2222 avoids replacing the system SSH daemon.
+Environment="ICEBERG_SFTP_HOST=0.0.0.0"
+Environment="ICEBERG_SFTP_PORT=2222"
+
+# Generate once, store outside source control, and keep readable by this service user:
+#   ssh-keygen -t ed25519 -f /path/to/iceberg_sftp_ed25519 -N ""
+Environment="ICEBERG_SFTP_HOST_KEY=/path/to/iceberg_sftp_ed25519"
+
+ExecStart=/path/to/miniforge3/envs/ms-gen/bin/python sftp_server.py
+
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -20,6 +20,16 @@ Gunicorn (127.0.0.1:4285)
 Flask app (wsgi:app)
 ```
 
+Optional read-only atlas file access:
+
+```
+SFTP client
+   ↓
+AsyncSSH SFTP service (port 2222)
+   ↓
+Atlas virtual filesystem
+```
+
 ---
 
 ## Clone Repository
@@ -59,6 +69,14 @@ The application requires the following environment variables:
 | `FLASK_SECRET_KEY` | Secret key for session security       |
 | `MSPRED_ATLAS_DIR` | Base directory of predicted MGF atlas |
 | `MSPRED_JOB_DIR`   | Directory for temporary job storage   |
+| `ICEBERG_USERS_FILE` | YAML file with WebUI email/password users |
+
+The optional NIST'23 atlas is configured with:
+
+| Variable                 | Description                                  |
+|--------------------------|----------------------------------------------|
+| `MSPRED_ATLAS_DIR_NIST`  | Base directory of the gated NIST'23 atlas    |
+| `ICEBERG_ADMIN_EMAILS`   | Comma-separated admin safety-net email list  |
 
 Email notifications are optional. If email is not configured, the admin
 dashboard displays generated temporary passwords on-screen.
@@ -80,7 +98,10 @@ Example:
 ```bash
 export FLASK_SECRET_KEY="replace-with-long-random-string"
 export MSPRED_ATLAS_DIR="/data/atlas"
+export MSPRED_ATLAS_DIR_NIST="/data/atlas_nist"
 export MSPRED_JOB_DIR="/var/lib/iceberg_jobs"
+export ICEBERG_USERS_FILE="/var/lib/iceberg_users.yaml"
+export ICEBERG_ADMIN_EMAILS="admin@example.com"
 export SMTP_HOST="smtp.example.com"
 export SMTP_PORT="587"
 export SMTP_USER="iceberg@example.com"
@@ -148,6 +169,61 @@ sudo systemctl enable iceberg-webui
 sudo systemctl start iceberg-webui
 sudo systemctl status iceberg-webui
 ```
+
+---
+
+## Install Read-Only SFTP Service
+
+The SFTP service uses the same `ICEBERG_USERS_FILE` credentials as the WebUI.
+Usernames are full email addresses. Users with role `user` see only `/public`;
+roles `authorized_user` and `admin` also see `/nist23` when
+`MSPRED_ATLAS_DIR_NIST` is configured.
+
+Install or update the environment so `asyncssh` is available:
+
+```bash
+mamba env update -f environment.yml --prune
+```
+
+Generate a dedicated host key outside the repository:
+
+```bash
+ssh-keygen -t ed25519 -f /path/to/iceberg_sftp_ed25519 -N ""
+```
+
+Copy the service file:
+
+```bash
+sudo cp deploy/systemd-iceberg-sftp.service \
+  /etc/systemd/system/iceberg-sftp.service
+```
+
+Edit the placeholders in `/etc/systemd/system/iceberg-sftp.service`, then reload
+and start:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now iceberg-sftp
+sudo systemctl status iceberg-sftp
+```
+
+Open TCP port `2222` in any host firewall or security group if it is blocked.
+
+Client examples:
+
+```bash
+sftp -P 2222 -o User=user@domain.edu iceberg-ms.mit.edu
+sshfs -p 2222 -o User=user@domain.edu iceberg-ms.mit.edu:/ ~/iceberg-atlas
+```
+
+The exposed virtual paths are:
+
+| Virtual path       | Source directory                              |
+|--------------------|-----------------------------------------------|
+| `/public/h_plus/`  | `MSPRED_ATLAS_DIR/h_plus_out_mgf/`            |
+| `/public/h_minus/` | `MSPRED_ATLAS_DIR/h_minus_out_mgf/`           |
+| `/nist23/h_plus/`  | `MSPRED_ATLAS_DIR_NIST/h_plus_out_mgf/`       |
+| `/nist23/h_minus/` | `MSPRED_ATLAS_DIR_NIST/h_minus_out_mgf/`      |
 
 ---
 

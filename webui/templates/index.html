@@ -2063,7 +2063,7 @@
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
                         smiles: smiles,
-                        frag_id: parseInt(key, 10),
+                        frag_id: key,
                     }),
                 });
 
@@ -2195,12 +2195,9 @@
 
                             let candidates = peaks;
                             if (useFragFilter && fragIdStr) {
-                                const fragIdInt = parseInt(fragIdStr, 10);
-                                if (Number.isFinite(fragIdInt)) {
-                                    const filtered = peaks.filter(p => p.frag_id === fragIdInt);
-                                    if (filtered.length) {
-                                        candidates = filtered;
-                                    }
+                                const filtered = peaks.filter(p => String(p.frag_id) === fragIdStr);
+                                if (filtered.length) {
+                                    candidates = filtered;
                                 }
                             }
 
@@ -3263,13 +3260,19 @@
         const topKInput    = document.getElementById("smi-topk");
         const topKValEl    = document.getElementById("smi-topk-val");
         const overlayContainerEl = document.getElementById("smi-overlay-container");
+        const copyEntryBtn = document.getElementById("smi-copy-entry-btn");
+        const copyEntryStatusEl = document.getElementById("smi-copy-entry-status");
 
         let exploreSmiles       = "";
         let exploreFormula      = "";
         let exploreInchikey     = "";
+        let exploreAdduct       = "";
+        let exploreInstrument   = "";
+        let exploreNce          = "";
         let explorePredSpectra  = [];   // [{collision_energy_ev, peaks:[…]}, …]
         let exploreFragCache    = new Map();
         let currentPrecursorMz  = null;
+        window.pendingExploreCeEv = null;
 
         function escapeHtml(s) {
             return String(s == null ? "" : s)
@@ -3390,7 +3393,7 @@
             const resp = await fetch("/fragment_svg", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ smiles: exploreSmiles, frag_id: parseInt(key, 10) }),
+                body: JSON.stringify({ smiles: exploreSmiles, frag_id: key }),
             });
             if (!resp.ok) {
                 const errJson = await resp.json().catch(() => null);
@@ -3505,7 +3508,7 @@
                 ov.addEventListener("mouseenter", () => highlightExplorePeak(fragIdStr, true));
                 ov.addEventListener("mouseleave", () => highlightExplorePeak(fragIdStr, false));
                 ov.addEventListener("click", () => {
-                    fetchFragment(exploreSmiles, a.frag_id, a.mz, adductSel.value, fragPane, fragTitle);
+                    fetchFragment(exploreSmiles, a.frag_id, a.mz, exploreAdduct || adductSel.value, fragPane, fragTitle);
                     highlightExplorePeak(fragIdStr, true);
                     // Also show & position the fragment detail panel under the peak bar.
                     const svgEl = plotContainer.querySelector("svg");
@@ -3525,14 +3528,16 @@
                 ? (explorePredSpectra.find(s => s.collision_energy_ev === ceEv) || explorePredSpectra[0])
                 : explorePredSpectra[0];
             if (!entry) return;
-            drawSpectrumSVG(entry.peaks, exploreSmiles, adductSel.value, currentPrecursorMz);
+            drawSpectrumSVG(entry.peaks, exploreSmiles, exploreAdduct || adductSel.value, currentPrecursorMz);
             buildExploreOverlays(entry.peaks);
+            updateExploreEntryHash();
         }
 
         // Bind CE dropdown, top-K slider, and download button (once, survive re-queries).
         if (ceSelectEl)  ceSelectEl.addEventListener("change", renderExploreCE);
         const downloadBtn = document.getElementById("smi-download-btn");
         if (downloadBtn) downloadBtn.addEventListener("click", downloadSpectraMs);
+        if (copyEntryBtn) copyEntryBtn.addEventListener("click", copyExploreEntryLink);
         if (topKInput && topKValEl) {
             topKInput.addEventListener("input", () => {
                 topKValEl.textContent = topKInput.value;
@@ -3561,7 +3566,7 @@
         // ---- .ms export ----
         function downloadSpectraMs() {
             if (!explorePredSpectra.length) return;
-            const adduct = adductSel.value;
+            const adduct = exploreAdduct || adductSel.value;
             const lines = [];
             lines.push(">compound " + (exploreInchikey || exploreSmiles || "predicted"));
             if (exploreFormula)     lines.push(">formula "     + exploreFormula);
@@ -3595,6 +3600,79 @@
             a.click();
             URL.revokeObjectURL(url);
             try { navigator.sendBeacon("/api/event/download_ms"); } catch (e) {}
+        }
+
+        function selectedExploreCeEv() {
+            if (!ceSelectEl) return NaN;
+            const ceEv = parseFloat(ceSelectEl.value);
+            return Number.isFinite(ceEv) ? ceEv : NaN;
+        }
+
+        function formatParamNumber(value) {
+            const n = Number(value);
+            if (!Number.isFinite(n)) return "";
+            return Number.isInteger(n) ? String(n) : String(Number(n.toFixed(6)));
+        }
+
+        function buildExploreEntryParams() {
+            if (!exploreSmiles || !explorePredSpectra.length) return null;
+            const nceForUrl = exploreNce !== "" && exploreNce != null ? exploreNce : (nceInput.value || 30);
+            const params = new URLSearchParams({
+                query: exploreSmiles,
+                query_type: "smiles",
+                adduct: exploreAdduct || adductSel.value,
+                instrument: exploreInstrument || instSel.value,
+                nce: formatParamNumber(nceForUrl),
+            });
+            const ceEv = selectedExploreCeEv();
+            if (Number.isFinite(ceEv)) params.set("ce_ev", formatParamNumber(ceEv));
+            if (exploreInchikey) params.set("inchikey", exploreInchikey);
+            return params;
+        }
+
+        function buildExploreEntryUrl() {
+            const params = buildExploreEntryParams();
+            if (!params) return "";
+            return location.origin + location.pathname + location.search + "#explore?" + params.toString();
+        }
+
+        function updateExploreEntryHash() {
+            const params = buildExploreEntryParams();
+            if (!params) return;
+            try { history.replaceState(null, "", location.pathname + location.search + "#explore?" + params.toString()); } catch (e) {}
+        }
+
+        function fallbackCopyText(text) {
+            const ta = document.createElement("textarea");
+            ta.value = text;
+            ta.setAttribute("readonly", "readonly");
+            ta.style.position = "fixed";
+            ta.style.left = "-9999px";
+            document.body.appendChild(ta);
+            ta.select();
+            let ok = false;
+            try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+            document.body.removeChild(ta);
+            return ok;
+        }
+
+        async function copyExploreEntryLink() {
+            const url = buildExploreEntryUrl();
+            if (!url) return;
+            let copied = false;
+            try {
+                if (navigator.clipboard && window.isSecureContext) {
+                    await navigator.clipboard.writeText(url);
+                    copied = true;
+                }
+            } catch (e) {
+                copied = false;
+            }
+            if (!copied) copied = fallbackCopyText(url);
+            if (copyEntryStatusEl) {
+                copyEntryStatusEl.textContent = copied ? "Copied" : "Copy failed";
+                window.setTimeout(() => { copyEntryStatusEl.textContent = ""; }, 2200);
+            }
         }
 
         function drawSpectrumSVG(peaks, smiles, adduct, precursorMz) {
@@ -3880,6 +3958,9 @@
                     exploreSmiles      = data.canonical_smiles || canonicalSmiles;
                     exploreFormula     = data.formula || "";
                     exploreInchikey    = data.inchikey || "";
+                    exploreAdduct      = data.adduct || adduct;
+                    exploreInstrument  = data.instrument || instrument;
+                    exploreNce         = data.requested_nce != null ? data.requested_nce : nce;
                     currentPrecursorMz = data.precursor_mz != null ? data.precursor_mz : null;
                     explorePredSpectra = (data.pred_spectra || []).slice().sort(
                         (a, b) => a.collision_energy_ev - b.collision_energy_ev);
@@ -3893,15 +3974,17 @@
                     if (ceSelectEl && ceControlsEl) {
                         ceSelectEl.innerHTML = "";
                         const matchedCe = data.matched_ce_ev;
+                        const requestedCe = Number.isFinite(window.pendingExploreCeEv) ? window.pendingExploreCeEv : matchedCe;
                         explorePredSpectra.forEach(s => {
                             const opt = document.createElement("option");
                             opt.value = s.collision_energy_ev;
                             opt.textContent = s.collision_energy_ev.toFixed(0) + " eV";
-                            if (s.collision_energy_ev === matchedCe) opt.selected = true;
+                            if (Math.abs(Number(s.collision_energy_ev) - Number(requestedCe)) < 1e-6) opt.selected = true;
                             ceSelectEl.appendChild(opt);
                         });
                         ceControlsEl.style.display = explorePredSpectra.length ? "flex" : "none";
                     }
+                    window.pendingExploreCeEv = null;
 
                     renderExploreCE();
                 })
@@ -4069,14 +4152,16 @@
     {% endif %}
     <script>
         // ---- Tab switching ----
-        function showTab(name) {
+        function showTab(name, options) {
             document.querySelectorAll(".tab-panel").forEach(function(p) {
                 p.classList.toggle("active", p.dataset.tab === name);
             });
             document.querySelectorAll(".tab-nav-btn").forEach(function(b) {
                 b.classList.toggle("active", b.dataset.tab === name);
             });
-            try { history.replaceState(null, "", "#" + name); } catch(e) {}
+            if (!options || options.updateHash !== false) {
+                try { history.replaceState(null, "", "#" + name); } catch(e) {}
+            }
         }
 
         document.addEventListener("DOMContentLoaded", function() {
@@ -4090,7 +4175,7 @@
             // If results are present, always start on the query tab
             var hasResults = !!document.getElementById("results-body");
             var startTab = hasResults ? "query" : (tabs.indexOf(tabPart) !== -1 ? tabPart : "query");
-            showTab(startTab);
+            showTab(startTab, { updateHash: false });
 
             // After a retrieval run, fold all spectrum blocks so the results are visible.
             if (hasResults) foldAllSpectrumBlocks();
@@ -4107,6 +4192,9 @@
                 if (params.query) {
                     var queryEl = document.getElementById("smi-query");
                     var queryTypeEl = document.getElementById("smi-query-type");
+                    var adductEl = document.getElementById("smi-adduct");
+                    var nceEl = document.getElementById("smi-nce");
+                    var instrumentEl = document.getElementById("smi-instrument");
                     var lookupBtn = document.getElementById("smi-lookup-btn");
                     if (queryEl) queryEl.value = params.query;
                     if (queryTypeEl && params.query_type) {
@@ -4117,6 +4205,26 @@
                                 break;
                             }
                         }
+                    }
+                    if (adductEl && params.adduct) {
+                        for (var j = 0; j < adductEl.options.length; j++) {
+                            if (adductEl.options[j].value === params.adduct) {
+                                adductEl.selectedIndex = j;
+                                break;
+                            }
+                        }
+                    }
+                    if (nceEl && params.nce) nceEl.value = params.nce;
+                    if (instrumentEl && params.instrument) {
+                        for (var k = 0; k < instrumentEl.options.length; k++) {
+                            if (instrumentEl.options[k].value === params.instrument) {
+                                instrumentEl.selectedIndex = k;
+                                break;
+                            }
+                        }
+                    }
+                    if (params.ce_ev) {
+                        window.pendingExploreCeEv = parseFloat(params.ce_ev);
                     }
                     // Record PubChem bookmarklet arrivals (the bookmarklet appends &src=pubchem).
                     if (params.src === "pubchem") {
@@ -4553,8 +4661,13 @@
                 <label for="smi-topk">Fragments:</label>
                 <input type="range" id="smi-topk" min="0" max="20" value="5">
                 <span id="smi-topk-val">5</span>
+                <button type="button" class="btn btn-secondary btn-sm" id="smi-copy-entry-btn"
+                        style="margin-left:auto;" title="Copy a permanent link for this structure, adduct, instrument, and collision energy">
+                    Copy link to this entry
+                </button>
+                <span id="smi-copy-entry-status" style="font-size:0.8rem; color:#16a34a; min-width:4.5rem;"></span>
                 <button type="button" class="btn btn-secondary btn-sm" id="smi-download-btn"
-                        style="margin-left:auto;" title="Download all collision energies as .ms">
+                        title="Download all collision energies as .ms">
                     &#8595; Download .ms
                 </button>
             </div>
@@ -4711,6 +4824,23 @@
         <p style="font-size:0.85rem; color:#6b7280; margin-top:0.3rem;">
             The current ICEBERG PubChem atlas contains <strong>91,424,208</strong> unique structures from PubChem.
         </p>
+        <details style="margin:0.9rem 0 1rem; padding:0.75rem 0.9rem; border:1px solid #e5e7eb; border-radius:6px; background:#f9fafb;">
+            <summary style="cursor:pointer; font-size:0.9rem; font-weight:600; color:#111827; user-select:none;">
+                SFTP Access
+            </summary>
+            <div style="font-size:0.85rem; color:#4b5563; line-height:1.5;">
+                Browse the atlas with your WebUI email and password. The SFTP service is read-only and listens on port 2222.
+                Available folders are <code>/public/h_plus</code>, <code>/public/h_minus</code>, and, for authorized accounts,
+                <code>/nist23/h_plus</code> and <code>/nist23/h_minus</code>. Files are grouped by formula-derived
+                <code>C*</code>, <code>O*</code>, and <code>H*</code> folders, for example
+                <code>C9/O4/H8/C9H8O4.mgf</code>; formulas without those headers go under <code>others</code>.
+                The layout is defined by
+                <a href="https://github.com/coleygroup/ms-pred/blob/main/src/ms_pred/common/chem_utils.py#L860"
+                   target="_blank" rel="noopener noreferrer">get_formula_subdir</a>.
+            </div>
+            <pre style="margin:0.55rem 0 0; padding:0.65rem; overflow:auto; border-radius:4px; background:#111827; color:#f9fafb; font-size:0.78rem;"><code>sftp -P 2222 -o User=your.email@domain.edu iceberg-ms.mit.edu
+sshfs -p 2222 -o User=your.email@domain.edu iceberg-ms.mit.edu:/ ~/iceberg-atlas</code></pre>
+        </details>
         <form id="download-form" class="row" onsubmit="return false;">
             <div>
                 <label for="download-formula">Chemical formula</label>

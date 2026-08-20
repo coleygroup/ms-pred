@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Atlas Files - ICEBERG</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+    <style>
+        body {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            margin: 0;
+            background: #f5f5f7;
+            color: #111827;
+        }
+        header {
+            background: #111827;
+            color: #f9fafb;
+            padding: 0.75rem 2rem;
+        }
+        .header-inner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+        .header-title {
+            margin: 0;
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+        .header-actions {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 0.6rem 1rem;
+            flex-wrap: wrap;
+            font-size: 0.85rem;
+        }
+        .header-actions a {
+            color: #93c5fd;
+            text-decoration: none;
+        }
+        main {
+            max-width: 1100px;
+            margin: 1.5rem auto 3rem;
+            padding: 0 1rem;
+        }
+        .panel {
+            background: #fff;
+            border-radius: 0.75rem;
+            padding: 1rem 1.25rem;
+            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+        }
+        .breadcrumbs {
+            display: flex;
+            gap: 0.35rem;
+            flex-wrap: wrap;
+            align-items: center;
+            font-size: 0.9rem;
+            margin-bottom: 1rem;
+        }
+        .breadcrumbs a {
+            color: #2563eb;
+            text-decoration: none;
+        }
+        .breadcrumbs span {
+            color: #9ca3af;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.88rem;
+        }
+        th, td {
+            padding: 0.55rem 0.45rem;
+            border-bottom: 1px solid #e5e7eb;
+            text-align: left;
+        }
+        th {
+            color: #6b7280;
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        tbody tr:hover {
+            background: #f9fafb;
+        }
+        .name-link {
+            color: #111827;
+            text-decoration: none;
+            font-weight: 500;
+            word-break: break-word;
+        }
+        .name-link:hover {
+            color: #2563eb;
+            text-decoration: underline;
+        }
+        .muted {
+            color: #6b7280;
+        }
+        .empty {
+            padding: 2rem 0;
+            text-align: center;
+            color: #6b7280;
+        }
+    </style>
+</head>
+<body>
+<header>
+    <div class="header-inner">
+        <h1 class="header-title">ICEBERG Atlas Files</h1>
+        <div class="header-actions">
+            <span>{{ current_user.id }}</span>
+            <a href="{{ url_for('index') }}">Atlas</a>
+            {% if current_user.is_admin %}
+            <a href="{{ url_for('admin_dashboard') }}">Admin</a>
+            {% endif %}
+            <a href="{{ url_for('change_password') }}">Change password</a>
+            <form method="post" action="{{ url_for('logout') }}" style="margin:0;">
+                <button type="submit" style="background:none;border:1px solid #4b5563;color:#d1d5db;
+                    padding:0.25rem 0.6rem;border-radius:0.35rem;cursor:pointer;font-size:0.8rem;">
+                    Log out
+                </button>
+            </form>
+        </div>
+    </div>
+</header>
+<main>
+    <div class="panel">
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+            {% for crumb in breadcrumbs %}
+                {% if not loop.last %}
+                <a href="{{ crumb.url }}">{{ crumb.name }}</a><span>/</span>
+                {% else %}
+                <strong>{{ crumb.name }}</strong>
+                {% endif %}
+            {% endfor %}
+        </nav>
+
+        {% if entries %}
+        <table>
+            <thead>
+            <tr>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Size</th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for entry in entries %}
+            <tr>
+                <td>
+                    {% if entry.is_dir %}
+                    <a class="name-link" href="{{ url_for('files_browser', vpath=entry.path.lstrip('/')) }}">{{ entry.name }}/</a>
+                    {% else %}
+                    <a class="name-link" href="{{ url_for('files_download', vpath=entry.path.lstrip('/')) }}">{{ entry.name }}</a>
+                    {% endif %}
+                </td>
+                <td class="muted">{{ "Directory" if entry.is_dir else "MGF" }}</td>
+                <td class="muted">{{ "-" if entry.is_dir else "{:,}".format(entry.size) }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty">No files found.</div>
+        {% endif %}
+    </div>
+</main>
+</body>
+</html>

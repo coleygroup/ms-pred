@@ -10,6 +10,7 @@ import os
 import json
 import secrets
 import string
+import sys
 import smtplib
 import sqlite3
 import ipaddress
@@ -27,6 +28,11 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import numpy as np
 import pubchempy as pcp
 import yaml
+
+try:
+    from .vfs import AtlasVirtualFS, VfsError, normalize_virtual_path
+except ImportError:  # pragma: no cover - direct execution from webui/
+    from vfs import AtlasVirtualFS, VfsError, normalize_virtual_path
 
 from ms_pred import common
 from ms_pred.common import MassSpec, CompositeMassSpec
@@ -282,7 +288,7 @@ def smiles_to_lookup_keys(smiles: str) -> Dict[str, str]:
 
     return {
         "canonical_smiles": canonical_smiles,
-        "formula": rdMolDescriptors.CalcMolFormula(canon_mol),
+        "formula": common.uncharged_formula(canon_mol, mol_type="mol"),
         "inchikey": Chem.MolToInchiKey(canon_mol),
     }
 
@@ -694,7 +700,9 @@ def _massspec_to_peak_objects(ms: MassSpec) -> List[Tuple]:
         frag_id = None
         if int_frags is not None:
             try:
-                frag_id = int(int_frags[i])
+                # Fragment bitmasks can exceed JavaScript's Number.MAX_SAFE_INTEGER.
+                # Serialize as a decimal string so the browser doesn't round atoms away.
+                frag_id = str(int(int_frags[i]))
             except Exception:
                 frag_id = None
         peaks.append(
@@ -1397,8 +1405,14 @@ def _build_credential_email(email: str, password: str, kind: str = "new") -> tup
 _ANALYTICS_INIT_DONE = False
 _SKIP_ANALYTICS_PREFIXES = ("/static/", "/admin/api/", "/favicon")
 _ANALYTICS_CACHE_TTL_SECONDS = int(os.environ.get("ICEBERG_ANALYTICS_CACHE_TTL_SECONDS", "300"))
+_ANALYTICS_AGG_BATCH_ROWS = int(os.environ.get("ICEBERG_ANALYTICS_AGG_BATCH_ROWS", "50000"))
+_ANALYTICS_AGG_REFRESH_SECONDS = int(os.environ.get("ICEBERG_ANALYTICS_AGG_REFRESH_SECONDS", "60"))
+_ANALYTICS_AGG_LOCK_SECONDS = int(os.environ.get("ICEBERG_ANALYTICS_AGG_LOCK_SECONDS", "300"))
+_ANALYTICS_GEO_RESOLVE_LIMIT = int(os.environ.get("ICEBERG_ANALYTICS_GEO_RESOLVE_LIMIT", "100"))
 _ANALYTICS_CACHE: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
 _analytics_cache_lock = threading.Lock()
+_analytics_refresh_thread_lock = threading.Lock()
+_analytics_last_refresh_started = 0.0
 
 
 def _analytics_conn() -> Optional[sqlite3.Connection]:
@@ -1421,14 +1435,20 @@ def _analytics_window_arg(default: str = "30") -> str:
     return default
 
 
-def _analytics_cutoff(window: str) -> Optional[str]:
+def _analytics_cutoff_day(window: str) -> Optional[str]:
     if window == "all":
         return None
     try:
         days = int(window)
     except ValueError:
         days = 30
-    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    return (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
+
+
+def _analytics_day(ts: str) -> Optional[str]:
+    if not ts or len(ts) < 10:
+        return None
+    return ts[:10]
 
 
 def _analytics_cache_get(kind: str, window: str) -> Optional[Dict[str, Any]]:
@@ -1453,6 +1473,36 @@ def _analytics_cache_set(kind: str, window: str, payload: Dict[str, Any]) -> Non
         _ANALYTICS_CACHE[(kind, window)] = (expires_at, payload)
 
 
+def _analytics_cache_clear() -> None:
+    with _analytics_cache_lock:
+        _ANALYTICS_CACHE.clear()
+
+
+def _analytics_meta_get(conn: sqlite3.Connection, key: str, default: str = "") -> str:
+    row = conn.execute("SELECT value FROM analytics_meta WHERE key = ?", (key,)).fetchone()
+    return str(row[0]) if row and row[0] is not None else default
+
+
+def _analytics_meta_set(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        """INSERT INTO analytics_meta (key, value) VALUES (?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+        (key, value),
+    )
+
+
+def _analytics_lock_owner_alive(owner: str) -> bool:
+    try:
+        pid = int(str(owner).split(":", 1)[0])
+    except (TypeError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
 def _ensure_analytics_schema() -> None:
     """Lazily create tables on first use."""
     global _ANALYTICS_INIT_DONE
@@ -1470,9 +1520,14 @@ def _ensure_analytics_schema() -> None:
                     ip      TEXT,
                     path    TEXT,
                     method  TEXT,
-                    user_id TEXT
+                    user_id TEXT,
+                    source  TEXT DEFAULT 'web'
                 )
             """)
+            request_cols = {row[1] for row in conn.execute("PRAGMA table_info(requests)").fetchall()}
+            if "source" not in request_cols:
+                conn.execute("ALTER TABLE requests ADD COLUMN source TEXT DEFAULT 'web'")
+            conn.execute("UPDATE requests SET source = 'web' WHERE source IS NULL OR source = ''")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS ip_geo (
                     ip           TEXT PRIMARY KEY,
@@ -1482,13 +1537,219 @@ def _ensure_analytics_schema() -> None:
                     resolved_ts  TEXT
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS analytics_meta (
+                    key    TEXT PRIMARY KEY,
+                    value  TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS analytics_locks (
+                    name        TEXT PRIMARY KEY,
+                    owner       TEXT,
+                    expires_at  REAL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS analytics_day_ip (
+                    day       TEXT NOT NULL,
+                    ip        TEXT NOT NULL,
+                    requests  INTEGER NOT NULL,
+                    PRIMARY KEY (day, ip)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS analytics_action_day_ip (
+                    day       TEXT NOT NULL,
+                    action    TEXT NOT NULL,
+                    ip        TEXT NOT NULL,
+                    requests  INTEGER NOT NULL,
+                    PRIMARY KEY (day, action, ip)
+                )
+            """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_ts  ON requests(ts)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_ip  ON requests(ip)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_source ON requests(source)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_analytics_day_ip_day ON analytics_day_ip(day)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_analytics_action_day_ip_day ON analytics_action_day_ip(day)")
         _ANALYTICS_INIT_DONE = True
     except Exception as exc:
         app.logger.debug("Analytics schema init error: %s", exc)
     finally:
         conn.close()
+
+
+def _analytics_try_acquire_lock(conn: sqlite3.Connection, name: str, owner: str) -> bool:
+    now = time.time()
+    expires_at = now + _ANALYTICS_AGG_LOCK_SECONDS
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT owner, expires_at FROM analytics_locks WHERE name = ?", (name,)).fetchone()
+        if row and row[1] is not None and float(row[1]) > now and _analytics_lock_owner_alive(row[0]):
+            conn.rollback()
+            return False
+        conn.execute(
+            """INSERT INTO analytics_locks (name, owner, expires_at) VALUES (?, ?, ?)
+               ON CONFLICT(name) DO UPDATE SET owner = excluded.owner, expires_at = excluded.expires_at""",
+            (name, owner, expires_at),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+
+
+def _analytics_release_lock(conn: sqlite3.Connection, name: str, owner: str) -> None:
+    try:
+        with conn:
+            conn.execute("DELETE FROM analytics_locks WHERE name = ? AND owner = ?", (name, owner))
+    except Exception:
+        pass
+
+
+def _resolve_unresolved_geo_from_aggregates(limit: int = _ANALYTICS_GEO_RESOLVE_LIMIT) -> None:
+    if not _GEOIP_DB_PATH or limit <= 0:
+        return
+    conn = _analytics_conn()
+    if conn is None:
+        return
+    try:
+        rows = conn.execute(
+            """SELECT DISTINCT a.ip
+               FROM analytics_day_ip a
+               LEFT JOIN ip_geo g ON a.ip = g.ip
+               WHERE a.ip != '' AND g.ip IS NULL
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        unresolved = [r[0] for r in rows if r[0] and not _is_private_ip(r[0])]
+    except Exception:
+        unresolved = []
+    finally:
+        conn.close()
+    if unresolved:
+        _resolve_geo_ips(unresolved)
+
+
+def _analytics_aggregate_state(conn: sqlite3.Connection) -> Dict[str, Any]:
+    try:
+        max_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM requests").fetchone()[0] or 0
+    except Exception:
+        max_id = 0
+    try:
+        last_id = int(_analytics_meta_get(conn, "last_aggregated_request_id", "0"))
+    except ValueError:
+        last_id = 0
+    return {
+        "last_request_id": last_id,
+        "max_request_id": max_id,
+        "pending_requests": max(0, int(max_id) - int(last_id)),
+        "last_refresh_ts": _analytics_meta_get(conn, "last_aggregate_refresh_ts", ""),
+    }
+
+
+def _refresh_analytics_aggregates(max_batches: int = 1) -> int:
+    """Incrementally fold raw request rows into persistent aggregate tables."""
+    _ensure_analytics_schema()
+    if _ANALYTICS_DB_PATH is None:
+        return 0
+
+    owner = f"{os.getpid()}:{threading.get_ident()}:{uuid.uuid4().hex}"
+    conn = _analytics_conn()
+    if conn is None:
+        return 0
+    if not _analytics_try_acquire_lock(conn, "aggregate_refresh", owner):
+        conn.close()
+        return 0
+
+    processed = 0
+    try:
+        for _ in range(max(1, max_batches)):
+            last_id_raw = _analytics_meta_get(conn, "last_aggregated_request_id", "0")
+            try:
+                last_id = int(last_id_raw)
+            except ValueError:
+                last_id = 0
+            rows = conn.execute(
+                """SELECT id, ts, COALESCE(ip, ''), COALESCE(path, ''), COALESCE(method, '')
+                   FROM requests
+                   WHERE id > ?
+                   ORDER BY id
+                   LIMIT ?""",
+                (last_id, _ANALYTICS_AGG_BATCH_ROWS),
+            ).fetchall()
+            if not rows:
+                _analytics_meta_set(conn, "last_aggregate_refresh_ts", datetime.now(timezone.utc).isoformat())
+                conn.commit()
+                break
+
+            day_ip_counts: Dict[Tuple[str, str], int] = {}
+            action_counts: Dict[Tuple[str, str, str], int] = {}
+            max_id = last_id
+            for req_id, ts, ip, path, method in rows:
+                max_id = max(max_id, int(req_id))
+                day = _analytics_day(ts)
+                if day is None:
+                    continue
+                day_key = (day, ip or "")
+                day_ip_counts[day_key] = day_ip_counts.get(day_key, 0) + 1
+                action = _classify_action(path or "", method or "")
+                if action is not None:
+                    action_key = (day, action, ip or "")
+                    action_counts[action_key] = action_counts.get(action_key, 0) + 1
+
+            with conn:
+                conn.executemany(
+                    """INSERT INTO analytics_day_ip (day, ip, requests) VALUES (?, ?, ?)
+                       ON CONFLICT(day, ip) DO UPDATE SET requests = requests + excluded.requests""",
+                    [(day, ip, count) for (day, ip), count in day_ip_counts.items()],
+                )
+                conn.executemany(
+                    """INSERT INTO analytics_action_day_ip (day, action, ip, requests) VALUES (?, ?, ?, ?)
+                       ON CONFLICT(day, action, ip) DO UPDATE SET requests = requests + excluded.requests""",
+                    [(day, action, ip, count) for (day, action, ip), count in action_counts.items()],
+                )
+                _analytics_meta_set(conn, "last_aggregated_request_id", str(max_id))
+                _analytics_meta_set(conn, "last_aggregate_refresh_ts", datetime.now(timezone.utc).isoformat())
+
+            processed += len(rows)
+            if len(rows) < _ANALYTICS_AGG_BATCH_ROWS:
+                break
+
+        if processed:
+            _analytics_cache_clear()
+            _resolve_unresolved_geo_from_aggregates()
+        return processed
+    except Exception as exc:
+        app.logger.debug("analytics aggregate refresh error: %s", exc)
+        return processed
+    finally:
+        _analytics_release_lock(conn, "aggregate_refresh", owner)
+        conn.close()
+
+
+def _analytics_refresh_worker(max_batches: int = 1) -> None:
+    try:
+        _refresh_analytics_aggregates(max_batches=max_batches)
+    except Exception as exc:
+        app.logger.debug("analytics refresh worker error: %s", exc)
+
+
+def _maybe_start_analytics_refresh(force: bool = False) -> None:
+    global _analytics_last_refresh_started
+    if _ANALYTICS_DB_PATH is None:
+        return
+    now = time.monotonic()
+    with _analytics_refresh_thread_lock:
+        if not force and now - _analytics_last_refresh_started < _ANALYTICS_AGG_REFRESH_SECONDS:
+            return
+        _analytics_last_refresh_started = now
+        thread = threading.Thread(target=_analytics_refresh_worker, daemon=True)
+        thread.start()
 
 
 def _log_request(response):
@@ -1506,10 +1767,11 @@ def _log_request(response):
         user_id = current_user.id if current_user.is_authenticated else ""
         with conn:
             conn.execute(
-                "INSERT INTO requests (ts, ip, path, method, user_id) VALUES (?,?,?,?,?)",
-                (ts, ip, path, request.method, user_id),
+                "INSERT INTO requests (ts, ip, path, method, user_id, source) VALUES (?,?,?,?,?,?)",
+                (ts, ip, path, request.method, user_id, "web"),
             )
         conn.close()
+        _maybe_start_analytics_refresh()
     except Exception:
         pass  # never break a response
     return response
@@ -1522,6 +1784,11 @@ def _classify_action(path: str, method: str) -> Optional[str]:
     if path == "/api/retrieve_start":       return "Spectrum → structure retrieval"
     if path == "/download_mgf":             return "Download predicted spectra (.mgf)"
     if path == "/api/event/download_ms":    return "Download spectra (.ms)"
+    if path.startswith("/sftp/auth"):       return "SFTP login"
+    if path.startswith("/sftp/realpath"):   return "SFTP resolve path"
+    if path.startswith("/sftp/listdir"):    return "SFTP browse directory"
+    if path.startswith("/sftp/stat"):       return "SFTP stat"
+    if path.startswith("/sftp/open"):       return "SFTP download file"
     if path == "/upload_ms":                return "Upload experimental spectrum"
     if path == "/upload_mgf":               return "Upload experimental spectrum (.mgf)"
     if path == "/load_example_ms":          return "Load example spectrum"
@@ -1634,6 +1901,76 @@ def change_password():
     return render_template("change_password.html", errors=errors, success=success)
 
 
+def _atlas_vfs() -> AtlasVirtualFS:
+    return AtlasVirtualFS(BASE_MGF_DIR, NIST_MGF_DIR)
+
+
+def _files_include_nist() -> bool:
+    return current_user.is_authenticated and current_user.can_access_nist
+
+
+def _files_breadcrumbs(vpath: str) -> List[Dict[str, str]]:
+    normalized = normalize_virtual_path(vpath)
+    crumbs = [{"name": "Files", "url": url_for("files_browser")}]
+    parts = [part for part in normalized.parts if part != "/"]
+    for idx, part in enumerate(parts, start=1):
+        crumb_path = "/".join(parts[:idx])
+        crumbs.append(
+            {
+                "name": part,
+                "url": url_for("files_browser", vpath=crumb_path),
+            }
+        )
+    return crumbs
+
+
+@app.route("/files", defaults={"vpath": ""}, strict_slashes=False)
+@app.route("/files/<path:vpath>", strict_slashes=False)
+@login_required
+def files_browser(vpath: str):
+    vpath = "/" + (vpath or "").strip("/")
+    fs = _atlas_vfs()
+    try:
+        normalized = normalize_virtual_path(vpath)
+        entries = fs.listdir(normalized, include_nist=_files_include_nist())
+        stat_entry = fs.stat(normalized, include_nist=_files_include_nist())
+    except PermissionError:
+        abort(403)
+    except VfsError:
+        abort(404)
+
+    return render_template(
+        "files.html",
+        current_path=str(normalized),
+        current_entry=stat_entry,
+        entries=entries,
+        breadcrumbs=_files_breadcrumbs(str(normalized)),
+    )
+
+
+@app.route("/files/download/<path:vpath>")
+@login_required
+def files_download(vpath: str):
+    vpath = "/" + (vpath or "").strip("/")
+    fs = _atlas_vfs()
+    try:
+        normalized = normalize_virtual_path(vpath)
+        real_path = fs.resolve_real_path(normalized, include_nist=_files_include_nist())
+        stat_entry = fs.stat(normalized, include_nist=_files_include_nist())
+    except PermissionError:
+        abort(403)
+    except VfsError:
+        abort(404)
+    if stat_entry.is_dir:
+        abort(404)
+    return send_file(
+        real_path,
+        mimetype="text/plain",
+        as_attachment=True,
+        download_name=real_path.name,
+    )
+
+
 # Register the analytics logging hook now that the app object exists
 app.after_request(_log_request)
 
@@ -1656,21 +1993,7 @@ def admin_dashboard():
             "created": record.get("created", "") if record else "",
             "last_login": record.get("last_login", "") if record else "",
         })
-    # Resolve any un-geocoded IPs on dashboard load
-    if _ANALYTICS_DB_PATH and _ANALYTICS_DB_PATH.exists():
-        try:
-            conn = _analytics_conn()
-            if conn:
-                cur = conn.execute(
-                    "SELECT DISTINCT ip FROM requests WHERE ip != '' "
-                    "AND ip NOT IN (SELECT ip FROM ip_geo)"
-                )
-                unresolved = [r[0] for r in cur.fetchall()]
-                conn.close()
-                if unresolved:
-                    _resolve_geo_ips(unresolved)
-        except Exception:
-            pass
+    _maybe_start_analytics_refresh(force=True)
     return render_template("admin.html", users=user_list, valid_roles=sorted(_VALID_ROLES),
                            geoip_available=bool(_GEOIP_DB_PATH))
 
@@ -1821,8 +2144,9 @@ def api_log_event(event: str):
 @app.route("/admin/api/stats")
 @admin_required
 def admin_api_stats():
-    """Return daily request counts + unique IPs, top paths, top countries."""
+    """Return daily request counts + unique IPs, top actions, top countries."""
     _ensure_analytics_schema()
+    _maybe_start_analytics_refresh(force=True)
     window = _analytics_window_arg()
     cached = _analytics_cache_get("stats", window)
     if cached is not None:
@@ -1832,43 +2156,43 @@ def admin_api_stats():
     if conn is None:
         return jsonify({"error": "Analytics DB not configured"}), 503
     try:
-        cutoff = _analytics_cutoff(window)
-        # Daily counts
-        if cutoff is None:
+        cutoff_day = _analytics_cutoff_day(window)
+        if cutoff_day is None:
             cur = conn.execute(
-                """SELECT substr(ts, 1, 10) AS day, COUNT(*) AS reqs, COUNT(DISTINCT ip) AS ips
-                   FROM requests
-                   GROUP BY day ORDER BY day"""
+                """SELECT day, SUM(requests) AS reqs,
+                          SUM(CASE WHEN ip != '' THEN 1 ELSE 0 END) AS ips
+                   FROM analytics_day_ip
+                   GROUP BY day
+                   ORDER BY day"""
             )
         else:
             cur = conn.execute(
-                """SELECT substr(ts, 1, 10) AS day, COUNT(*) AS reqs, COUNT(DISTINCT ip) AS ips
-                   FROM requests
-                   WHERE ts >= ?
-                   GROUP BY day ORDER BY day""",
-                (cutoff,),
+                """SELECT day, SUM(requests) AS reqs,
+                          SUM(CASE WHEN ip != '' THEN 1 ELSE 0 END) AS ips
+                   FROM analytics_day_ip
+                   WHERE day >= ?
+                   GROUP BY day
+                   ORDER BY day""",
+                (cutoff_day,),
             )
         daily = [{"day": r[0], "requests": r[1], "unique_ips": r[2]} for r in cur.fetchall()]
-        # Top actions (grouped by path+method+ip so unique visitors are exact per action)
-        if cutoff is None:
+
+        if cutoff_day is None:
             cur = conn.execute(
-                """SELECT path, method, ip, COUNT(*) AS n
-                   FROM requests
-                   GROUP BY path, method, ip"""
+                """SELECT action, ip, SUM(requests) AS n
+                   FROM analytics_action_day_ip
+                   GROUP BY action, ip"""
             )
         else:
             cur = conn.execute(
-                """SELECT path, method, ip, COUNT(*) AS n
-                   FROM requests
-                   WHERE ts >= ?
-                   GROUP BY path, method, ip""",
-                (cutoff,),
+                """SELECT action, ip, SUM(requests) AS n
+                   FROM analytics_action_day_ip
+                   WHERE day >= ?
+                   GROUP BY action, ip""",
+                (cutoff_day,),
             )
         buckets: Dict[str, Any] = {}
-        for path, method, ip, n in cur.fetchall():
-            label = _classify_action(path, method)
-            if label is None:
-                continue
+        for label, ip, n in cur.fetchall():
             b = buckets.setdefault(label, {"count": 0, "ips": set()})
             b["count"] += n
             if ip:
@@ -1878,29 +2202,31 @@ def admin_api_stats():
              for k, v in buckets.items()),
             key=lambda d: d["count"], reverse=True,
         )
-        # Top countries
-        if cutoff is None:
+
+        if cutoff_day is None:
             cur = conn.execute(
-                """SELECT g.country, COUNT(*) AS n
-                   FROM requests r JOIN ip_geo g ON r.ip = g.ip
+                """SELECT g.country, SUM(a.requests) AS n
+                   FROM analytics_day_ip a JOIN ip_geo g ON a.ip = g.ip
                    WHERE g.country != ''
                    GROUP BY g.country ORDER BY n DESC LIMIT 20"""
             )
         else:
             cur = conn.execute(
-                """SELECT g.country, COUNT(*) AS n
-                   FROM requests r JOIN ip_geo g ON r.ip = g.ip
-                   WHERE r.ts >= ? AND g.country != ''
+                """SELECT g.country, SUM(a.requests) AS n
+                   FROM analytics_day_ip a JOIN ip_geo g ON a.ip = g.ip
+                   WHERE a.day >= ? AND g.country != ''
                    GROUP BY g.country ORDER BY n DESC LIMIT 20""",
-                (cutoff,),
+                (cutoff_day,),
             )
         top_countries = [{"country": r[0], "count": r[1]} for r in cur.fetchall()]
+        aggregate_state = _analytics_aggregate_state(conn)
         payload = {
             "daily": daily,
             "top_actions": top_actions,
             "top_countries": top_countries,
             "window": window,
             "cached_seconds": _ANALYTICS_CACHE_TTL_SECONDS,
+            "aggregate": aggregate_state,
         }
         _analytics_cache_set("stats", window, payload)
         return jsonify(payload)
@@ -1913,6 +2239,7 @@ def admin_api_stats():
 def admin_api_geo():
     """Return aggregated geo points [{lat, lon, country, count}] for the map."""
     _ensure_analytics_schema()
+    _maybe_start_analytics_refresh(force=True)
     window = _analytics_window_arg()
     cached = _analytics_cache_get("geo", window)
     if cached is not None:
@@ -1922,31 +2249,33 @@ def admin_api_geo():
     if conn is None:
         return jsonify({"error": "Analytics DB not configured"}), 503
     try:
-        cutoff = _analytics_cutoff(window)
-        if cutoff is None:
+        cutoff_day = _analytics_cutoff_day(window)
+        if cutoff_day is None:
             cur = conn.execute(
-                """SELECT g.lat, g.lon, g.country, COUNT(*) AS n
-                   FROM requests r JOIN ip_geo g ON r.ip = g.ip
+                """SELECT g.lat, g.lon, g.country, SUM(a.requests) AS n
+                   FROM analytics_day_ip a JOIN ip_geo g ON a.ip = g.ip
                    WHERE g.lat IS NOT NULL AND g.lon IS NOT NULL
-                   GROUP BY g.ip
+                   GROUP BY a.ip
                    ORDER BY n DESC"""
             )
         else:
             cur = conn.execute(
-                """SELECT g.lat, g.lon, g.country, COUNT(*) AS n
-                   FROM requests r JOIN ip_geo g ON r.ip = g.ip
-                   WHERE r.ts >= ?
+                """SELECT g.lat, g.lon, g.country, SUM(a.requests) AS n
+                   FROM analytics_day_ip a JOIN ip_geo g ON a.ip = g.ip
+                   WHERE a.day >= ?
                      AND g.lat IS NOT NULL AND g.lon IS NOT NULL
-                   GROUP BY g.ip
+                   GROUP BY a.ip
                    ORDER BY n DESC""",
-                (cutoff,),
+                (cutoff_day,),
             )
         points = [{"lat": r[0], "lon": r[1], "country": r[2], "count": r[3]}
                   for r in cur.fetchall()]
+        aggregate_state = _analytics_aggregate_state(conn)
         payload = {
             "points": points,
             "window": window,
             "cached_seconds": _ANALYTICS_CACHE_TTL_SECONDS,
+            "aggregate": aggregate_state,
         }
         _analytics_cache_set("geo", window, payload)
         return jsonify(payload)
@@ -2705,6 +3034,21 @@ def api_query_smiles():
             break
 
     if not blocks:
+        if not include_nist and NIST_MGF_DIR is not None and adduct in NIST_ADDUCT_TO_DIR:
+            nist_subdir = common.get_formula_subdir(formula)
+            nist_mgf_path = NIST_ADDUCT_TO_DIR[adduct] / nist_subdir / f"{formula}.mgf"
+            if nist_mgf_path.exists() and inchikey_in_mgf(nist_mgf_path, inchikey):
+                return jsonify({
+                    "error": (
+                        "This structure is present in the NIST'23 atlas, "
+                        "which is available only to signed-in authorized users."
+                    ),
+                    "formula": formula,
+                    "canonical_smiles": canonical_smiles,
+                    "inchikey": inchikey,
+                    "adduct": adduct,
+                    "requires_nist_access": True,
+                }), 403
         return jsonify({
             "error": f"Structure not present in atlas for {formula} / {adduct}",
             "formula": formula,
@@ -2819,7 +3163,11 @@ def api_resolve_query():
         return []
 
     try:
-        compounds = _pcp_get(query, namespace)
+        compounds: List[Any] = []
+        if query_type == "inchikey" and len(query) == 14 and query.isalpha():
+            neutral_key = f"{query.upper()}-UHFFFAOYSA-N"
+            compounds.extend(_pcp_get(neutral_key, namespace))
+        compounds.extend(_pcp_get(query, namespace))
     except Exception as e:
         return jsonify({
             "candidates": [],
@@ -2874,5 +3222,43 @@ def api_resolve_query():
     return jsonify({"candidates": candidates, "error": None})
 
 
+def _run_analytics_backfill() -> int:
+    """CLI entry point for one-time/resumable aggregate backfills."""
+    _ensure_analytics_schema()
+    if _ANALYTICS_DB_PATH is None:
+        print("Analytics DB not configured", file=sys.stderr)
+        return 2
+
+    total_processed = 0
+    while True:
+        processed = _refresh_analytics_aggregates(max_batches=1)
+        total_processed += processed
+        conn = _analytics_conn()
+        if conn is None:
+            print("Analytics DB unavailable", file=sys.stderr)
+            return 2
+        try:
+            state = _analytics_aggregate_state(conn)
+        finally:
+            conn.close()
+
+        print(
+            "processed={processed} total_processed={total_processed} "
+            "last_request_id={last_request_id} max_request_id={max_request_id} "
+            "pending_requests={pending_requests} last_refresh_ts={last_refresh_ts}".format(
+                processed=processed,
+                total_processed=total_processed,
+                **state,
+            ),
+            flush=True,
+        )
+        if state["pending_requests"] <= 0:
+            return 0
+        if processed <= 0:
+            time.sleep(5)
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--analytics-backfill":
+        raise SystemExit(_run_analytics_backfill())
     app.run(host="0.0.0.0", port=4285, debug=True)

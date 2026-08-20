@@ -1,0 +1,18 @@
+name: iceberg-webui
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.10
+  - numpy
+  - rdkit
+  - pyyaml
+  - pip
+  - pip:
+    - flask>=3.0
+    - flask-login>=0.6
+    - werkzeug>=3.0
+    - pubchempy>=1.0
+    - gunicorn>=21.0
+    - geoip2>=4.0
+    - asyncssh>=2.14,<2.24
