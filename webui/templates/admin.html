@@ -72,6 +72,25 @@
         }
         .add-card .field input:focus, .add-card .field select:focus { border-color: #2563eb; background: #fff; }
         .add-card .field input[type="email"] { width: 280px; }
+        .users-toolbar { display: flex; justify-content: flex-end; gap: 1rem; align-items: center;
+                         margin: 0.25rem 0 0.75rem; flex-wrap: wrap; }
+        .users-summary { color: #6b7280; font-size: 0.82rem; }
+        .sort-link { display: inline-flex; align-items: center; gap: 0.25rem; color: inherit;
+                     text-decoration: none; }
+        .sort-link:hover { color: #2563eb; }
+        .sort-indicator { color: #2563eb; font-size: 0.75rem; min-width: 0.75rem; }
+        .column-filters th { background: #fff; padding: 0.45rem 0.55rem; }
+        .column-filters input, .column-filters select {
+            width: 100%; min-width: 8rem; padding: 0.35rem 0.45rem;
+            border: 1px solid #d1d5db; border-radius: 0.35rem;
+            font-size: 0.78rem; background: #fff; outline: none;
+        }
+        .column-filters input:focus, .column-filters select:focus { border-color: #2563eb; }
+        .filter-actions { display: flex; gap: 0.45rem; align-items: center; flex-wrap: wrap; }
+        .pagination { display: flex; justify-content: flex-end; gap: 0.5rem; align-items: center;
+                      margin: -0.6rem 0 1.5rem; font-size: 0.82rem; }
+        .pagination .page-status { color: #6b7280; padding: 0 0.2rem; }
+        .pagination .disabled { color: #9ca3af; cursor: default; opacity: 0.7; }
 
         /* Charts + map */
         .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 1.5rem; }
@@ -148,15 +167,91 @@
         </form>
     </div>
 
+    <form id="user-filter-form" method="get" action="{{ url_for('admin_dashboard') }}">
+        <input type="hidden" name="sort" value="{{ user_sort }}">
+        <input type="hidden" name="direction" value="{{ user_direction }}">
+    </form>
+
+    <div class="users-toolbar">
+        <div class="users-summary">
+            Showing {{ user_start }}-{{ user_end }} of {{ user_filtered_count }} users
+            {% if user_filtered_count != user_total_count %}
+            ({{ user_total_count }} total)
+            {% endif %}
+        </div>
+    </div>
+
     <div class="table-wrap">
         <table>
             <thead>
                 <tr>
-                    <th>Email</th>
-                    <th>Role</th>
-                    <th>Created</th>
-                    <th>Last login</th>
+                    <th>
+                        <a class="sort-link" href="{{ user_sort_urls.email }}">
+                            Email
+                            {% if user_sort == 'email' %}
+                            <span class="sort-indicator">{{ '▲' if user_direction == 'asc' else '▼' }}</span>
+                            {% endif %}
+                        </a>
+                    </th>
+                    <th>
+                        <a class="sort-link" href="{{ user_sort_urls.role }}">
+                            Role
+                            {% if user_sort == 'role' %}
+                            <span class="sort-indicator">{{ '▲' if user_direction == 'asc' else '▼' }}</span>
+                            {% endif %}
+                        </a>
+                    </th>
+                    <th>
+                        <a class="sort-link" href="{{ user_sort_urls.created }}">
+                            Created
+                            {% if user_sort == 'created' %}
+                            <span class="sort-indicator">{{ '▲' if user_direction == 'asc' else '▼' }}</span>
+                            {% endif %}
+                        </a>
+                    </th>
+                    <th>
+                        <a class="sort-link" href="{{ user_sort_urls.last_login }}">
+                            Last login
+                            {% if user_sort == 'last_login' %}
+                            <span class="sort-indicator">{{ '▲' if user_direction == 'asc' else '▼' }}</span>
+                            {% endif %}
+                        </a>
+                    </th>
                     <th>Actions</th>
+                </tr>
+                <tr class="column-filters">
+                    <th>
+                        <input form="user-filter-form" type="search" name="email"
+                               value="{{ user_filters.email }}" placeholder="Filter email"
+                               aria-label="Filter users by email">
+                    </th>
+                    <th>
+                        <select form="user-filter-form" name="role" aria-label="Filter users by role">
+                            <option value="">Any role</option>
+                            {% for r in valid_roles | sort %}
+                            <option value="{{ r }}" {% if user_filters.role == r %}selected{% endif %}>{{ r }}</option>
+                            {% endfor %}
+                        </select>
+                    </th>
+                    <th>
+                        <input form="user-filter-form" type="search" name="created"
+                               value="{{ user_filters.created }}" placeholder="YYYY-MM-DD"
+                               aria-label="Filter users by created date">
+                    </th>
+                    <th>
+                        <input form="user-filter-form" type="search" name="last_login"
+                               value="{{ user_filters.last_login }}" placeholder="YYYY-MM-DD"
+                               aria-label="Filter users by last login date">
+                    </th>
+                    <th>
+                        <div class="filter-actions">
+                            <button form="user-filter-form" type="submit" class="btn btn-secondary">Apply</button>
+                            {% if user_has_filters %}
+                            <a href="{{ url_for('admin_dashboard', sort=user_sort, direction=user_direction) }}"
+                               class="btn btn-secondary">Clear</a>
+                            {% endif %}
+                        </div>
+                    </th>
                 </tr>
             </thead>
             <tbody>
@@ -205,10 +300,23 @@
                 </td>
             </tr>
             {% else %}
-            <tr><td colspan="4" style="color:#6b7280;font-style:italic;">No users found.</td></tr>
+            <tr><td colspan="5" style="color:#6b7280;font-style:italic;">No users found.</td></tr>
             {% endfor %}
             </tbody>
         </table>
+    </div>
+    <div class="pagination">
+        {% if user_prev_url %}
+        <a class="btn btn-secondary" href="{{ user_prev_url }}">Previous</a>
+        {% else %}
+        <span class="btn btn-secondary disabled">Previous</span>
+        {% endif %}
+        <span class="page-status">Page {{ user_page }} of {{ user_total_pages }}</span>
+        {% if user_next_url %}
+        <a class="btn btn-secondary" href="{{ user_next_url }}">Next</a>
+        {% else %}
+        <span class="btn btn-secondary disabled">Next</span>
+        {% endif %}
     </div>
 
     <!-- ─── Analytics ───────────────────────────────────────────── -->

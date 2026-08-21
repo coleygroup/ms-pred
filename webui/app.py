@@ -1370,9 +1370,12 @@ def _send_email(to: str, subject: str, body: str) -> Optional[str]:
         return None
 
     try:
+        sender = _SMTP_FROM or _SMTP_USER
         msg = EmailMessage()
-        msg["From"] = _SMTP_FROM or _SMTP_USER
+        msg["From"] = sender
         msg["To"] = to
+        if sender:
+            msg["Bcc"] = sender
         msg["Subject"] = subject
         msg.set_content(body)
 
@@ -1983,6 +1986,7 @@ app.after_request(_log_request)
 @admin_required
 def admin_dashboard():
     """Admin landing page: user table + analytics."""
+    user_filter_fields = ("email", "role", "created", "last_login")
     users = _load_users()
     user_list = []
     for email, raw in sorted(users.items()):
@@ -1993,9 +1997,94 @@ def admin_dashboard():
             "created": record.get("created", "") if record else "",
             "last_login": record.get("last_login", "") if record else "",
         })
+
+    user_filters = {
+        field: (request.args.get(field) or "").strip()
+        for field in user_filter_fields
+    }
+    filtered_users = user_list
+
+    for field, query in user_filters.items():
+        if not query:
+            continue
+        needle = query.lower()
+        filtered_users = [
+            user for user in filtered_users
+            if needle in (user.get(field) or "").lower()
+        ]
+
+    user_sort = (request.args.get("sort") or "email").strip()
+    if user_sort not in user_filter_fields:
+        user_sort = "email"
+    user_direction = (request.args.get("direction") or "asc").strip().lower()
+    if user_direction not in ("asc", "desc"):
+        user_direction = "asc"
+    filtered_users = sorted(
+        filtered_users,
+        key=lambda user: (user.get(user_sort) or "").lower(),
+        reverse=user_direction == "desc",
+    )
+
+    page_size = 20
+    try:
+        user_page = int(request.args.get("page", "1"))
+    except ValueError:
+        user_page = 1
+    total_pages = max(1, (len(filtered_users) + page_size - 1) // page_size)
+    user_page = max(1, min(user_page, total_pages))
+    page_start = (user_page - 1) * page_size
+    page_end = page_start + page_size
+    paged_users = filtered_users[page_start:page_end]
+
+    def user_table_url_args(page=1, sort=None, direction=None):
+        args = {}
+        for field, query in user_filters.items():
+            if query:
+                args[field] = query
+        args["sort"] = sort or user_sort
+        args["direction"] = direction or user_direction
+        if page != 1:
+            args["page"] = page
+        return args
+
+    user_sort_urls = {}
+    for field in user_filter_fields:
+        next_direction = (
+            "desc" if user_sort == field and user_direction == "asc" else "asc"
+        )
+        user_sort_urls[field] = url_for(
+            "admin_dashboard",
+            **user_table_url_args(sort=field, direction=next_direction),
+        )
+
     _maybe_start_analytics_refresh(force=True)
-    return render_template("admin.html", users=user_list, valid_roles=sorted(_VALID_ROLES),
-                           geoip_available=bool(_GEOIP_DB_PATH))
+    return render_template(
+        "admin.html",
+        users=paged_users,
+        valid_roles=sorted(_VALID_ROLES),
+        geoip_available=bool(_GEOIP_DB_PATH),
+        user_filters=user_filters,
+        user_has_filters=bool(any(user_filters.values())),
+        user_sort=user_sort,
+        user_direction=user_direction,
+        user_sort_urls=user_sort_urls,
+        user_prev_url=(
+            url_for("admin_dashboard", **user_table_url_args(page=user_page - 1))
+            if user_page > 1
+            else ""
+        ),
+        user_next_url=(
+            url_for("admin_dashboard", **user_table_url_args(page=user_page + 1))
+            if user_page < total_pages
+            else ""
+        ),
+        user_page=user_page,
+        user_total_pages=total_pages,
+        user_filtered_count=len(filtered_users),
+        user_total_count=len(user_list),
+        user_start=page_start + 1 if filtered_users else 0,
+        user_end=min(page_end, len(filtered_users)),
+    )
 
 
 @app.route("/admin/users/add", methods=["POST"])
