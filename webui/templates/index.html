@@ -17,53 +17,105 @@
             background: #f5f5f7;
             color: #111827;
         }
+        /* ============================ HEADER ============================ */
         header {
             background: #111827;
             color: #f9fafb;
-            padding: 0.75rem 2rem;
+            padding: 0.85rem 2rem;
         }
         .header-inner {
             display: flex;
-            align-items: flex-start;
+            align-items: center;
             justify-content: space-between;
-            gap: 0.75rem 2rem;
+            gap: 0.5rem 1.75rem;
             flex-wrap: wrap;
         }
         .iceberg-brand {
-            flex: 1 1 42rem;
             min-width: 0;
         }
         .header-title {
             margin: 0;
-            display: flex;
-            flex-wrap: wrap;
-            align-items: baseline;
-            font-size: clamp(0.82rem, 1.35vw, 1.3rem);
+            font-size: clamp(1.25rem, 2vw, 1.65rem);
             font-weight: 600;
-            line-height: 1.45;
+            line-height: 1.3;
             letter-spacing: -0.01em;
+        }
+        /* The ghost holds the collapsed "ICEBERG" footprint in normal flow;
+           the animated name is layered on top of it and is absolutely
+           positioned, so expanding it can never reflow the header. */
+        .iceberg-anchor {
+            position: relative;
+            display: inline-block;
+            cursor: help;
+        }
+        .iceberg-anchor-ghost {
+            visibility: hidden;
+        }
+        .iceberg-anchor:focus-visible {
+            outline: 2px solid #93c5fd;
+            outline-offset: 4px;
+            border-radius: 0.25rem;
+        }
+        .iceberg-title-animation.is-overlay {
+            position: absolute;
+            inset: 0 auto auto 0;
+            /* inline-flex, not block: a flex container discards the source
+               whitespace between the word spans, so the letters sit flush
+               against each other exactly as in ordinary text. */
+            display: inline-flex;
+            flex-wrap: nowrap;
+            align-items: baseline;
+            transform-origin: left top;
+            transform: scale(var(--iceberg-scale, 1));
+            transition: transform 680ms cubic-bezier(0.22, 1, 0.36, 1),
+                        background-color 240ms ease,
+                        box-shadow 240ms ease;
+            z-index: 20;
+        }
+        /* Narrow viewports: the name wraps inside a floating panel instead of
+           being scaled down to an unreadable size. */
+        .iceberg-title-animation.is-overlay[data-wrap="true"] {
+            flex-wrap: wrap;
+            max-width: var(--iceberg-wrap-width, none);
+        }
+        .iceberg-title-animation.is-overlay[data-wrap="true"][data-expanded="true"] {
+            background: #111827;
+            box-shadow: 0 18px 34px rgba(0, 0, 0, 0.5);
+            border-radius: 0 0.5rem 0.5rem 0;
+            padding: 0 0.75rem 0.4rem 0;
         }
         .iceberg-word {
             display: inline-flex;
             align-items: baseline;
             flex: 0 0 auto;
-        }
-        .iceberg-title-animation {
-            display: inline-flex;
-            flex-wrap: wrap;
-            align-items: baseline;
-        }
-        .iceberg-inline-animation {
-            color: #4b5563;
-            font-weight: 600;
-            vertical-align: baseline;
+            /* Per-word stagger, shared by the tail and by its initial's rule. */
+            --iceberg-delay: 0ms;
         }
         .iceberg-initial {
             position: relative;
             z-index: 1;
             display: inline-block;
             line-height: 1.1;
-            border-bottom: 0.1em solid currentColor;
+        }
+        /* Collapsed, the seven rules overlap into one continuous underline, so
+           "ICEBERG" reads as an ordinary underlined word. On expansion each
+           rule retracts to its own letter and the acronym gives itself away. */
+        .iceberg-initial::after {
+            content: "";
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: -0.09em;
+            height: 0.075em;
+            background: currentColor;
+            transition: right 520ms cubic-bezier(0.22, 1, 0.36, 1);
+            transition-delay: var(--iceberg-delay, 0ms);
+        }
+        .iceberg-word:last-child .iceberg-initial::after {
+            right: 0;
+        }
+        .iceberg-title-animation[data-expanded="true"] .iceberg-initial::after {
+            right: 0;
         }
         .iceberg-tail {
             display: inline-block;
@@ -75,36 +127,118 @@
             transition-property: width, opacity, transform;
             transition-duration: 680ms, 320ms, 680ms;
             transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1), ease-out, cubic-bezier(0.22, 1, 0.36, 1);
+            transition-delay: var(--iceberg-delay, 0ms);
             will-change: width, opacity, transform;
+        }
+        /* Inline instance inside the "About ICEBERG" copy: flows with the text. */
+        .iceberg-inline-animation {
+            display: inline-flex;
+            flex-wrap: wrap;
+            align-items: baseline;
+            color: #4b5563;
+            font-weight: 600;
+            cursor: help;
         }
         .iceberg-title-animation[data-expanded="true"] .iceberg-tail {
             width: var(--iceberg-tail-width);
             opacity: 1;
             transform: translateX(0);
         }
+        /* Sits on the same line as the acronym; gets out of the way (rather
+           than being painted over) the moment the name unfurls. */
         .header-title-suffix {
-            margin-left: 0.35em;
+            margin-left: 0.45em;
+            font-size: 0.6em;
+            font-weight: 500;
+            letter-spacing: 0.01em;
+            color: #9ca3af;
             white-space: nowrap;
+            /* Returning: wait for the tails to retract before fading back in. */
+            transition: opacity 260ms ease 460ms;
+        }
+        header[data-iceberg-expanded="true"] .header-title-suffix {
+            opacity: 0;
+            transition: opacity 180ms ease 0ms;
+        }
+        /* While the easter egg is open, everything else steps aside. */
+        header[data-iceberg-expanded="true"] .header-actions {
+            opacity: 0.12;
+            pointer-events: none;
         }
         .header-actions {
             display: flex;
             align-items: center;
             justify-content: flex-end;
-            gap: 0.6rem 1rem;
-            flex: 0 1 auto;
+            gap: 0.45rem;
             flex-wrap: wrap;
+            font-size: 0.8rem;
             color: #9ca3af;
-            font-size: 0.85rem;
+            transition: opacity 320ms ease;
         }
-        @media (max-width: 760px) {
+        .header-sep {
+            width: 1px;
+            height: 1.1rem;
+            background: rgba(255, 255, 255, 0.16);
+        }
+        .header-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+            padding: 0.2rem 0.6rem;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.07);
+            color: #d1d5db;
+            white-space: nowrap;
+        }
+        .header-chip.is-authorized {
+            background: rgba(16, 185, 129, 0.14);
+            color: #6ee7b7;
+        }
+        .header-link {
+            color: #93c5fd;
+            text-decoration: none;
+            white-space: nowrap;
+        }
+        .header-link:hover {
+            text-decoration: underline;
+        }
+        .header-link.is-admin {
+            color: #f9a8d4;
+        }
+        .header-btn {
+            background: none;
+            border: 1px solid #4b5563;
+            color: #d1d5db;
+            padding: 0.2rem 0.65rem;
+            border-radius: 999px;
+            cursor: pointer;
+            font: inherit;
+            font-size: 0.78rem;
+        }
+        .header-btn:hover {
+            border-color: #9ca3af;
+            color: #f9fafb;
+        }
+        @media (max-width: 820px) {
             header {
                 padding-inline: 1rem;
             }
+            .header-inner {
+                gap: 0.6rem 1rem;
+            }
             .iceberg-brand {
-                flex-basis: 100%;
+                flex: 1 1 100%;
             }
             .header-actions {
+                flex: 1 1 100%;
                 justify-content: flex-start;
+            }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .iceberg-tail,
+            .iceberg-initial::after,
+            .iceberg-title-animation.is-overlay {
+                transition-duration: 1ms !important;
             }
         }
         main {
@@ -4270,40 +4404,43 @@
 <header>
     <div class="header-inner">
         <div class="iceberg-brand">
-            <h1 class="header-title"
-                aria-label="ICEBERG Spectral Retrieval and PubChem Atlas">
-                <span class="iceberg-title-animation" aria-hidden="true">
-                    <span class="iceberg-word"><span class="iceberg-initial">I</span><span class="iceberg-tail">nferring&nbsp;</span></span>
-                    <span class="iceberg-word"><span class="iceberg-initial">C</span><span class="iceberg-tail">ollision-induced-dissociation by&nbsp;</span></span>
-                    <span class="iceberg-word"><span class="iceberg-initial">E</span><span class="iceberg-tail">stimating&nbsp;</span></span>
-                    <span class="iceberg-word"><span class="iceberg-initial">B</span><span class="iceberg-tail">reakage&nbsp;</span></span>
-                    <span class="iceberg-word"><span class="iceberg-initial">E</span><span class="iceberg-tail">vents and&nbsp;</span></span>
-                    <span class="iceberg-word"><span class="iceberg-initial">R</span><span class="iceberg-tail">econstructing their&nbsp;</span></span>
-                    <span class="iceberg-word"><span class="iceberg-initial">G</span><span class="iceberg-tail">raphs</span></span>
-                </span>
-                <span class="header-title-suffix">Spectral Retrieval and PubChem Atlas</span>
+            <h1 class="header-title">
+                <span class="iceberg-anchor" tabindex="0" role="button"
+                      aria-label="ICEBERG: Inferring Collision-induced-dissociation by Estimating Breakage Events and Reconstructing their Graphs">
+                    <span class="iceberg-anchor-ghost" aria-hidden="true">ICEBERG</span>
+                    <span class="iceberg-title-animation is-overlay" aria-hidden="true">
+                        <span class="iceberg-word"><span class="iceberg-initial">I</span><span class="iceberg-tail">nferring&nbsp;</span></span>
+                        <span class="iceberg-word"><span class="iceberg-initial">C</span><span class="iceberg-tail">ollision-induced-dissociation by&nbsp;</span></span>
+                        <span class="iceberg-word"><span class="iceberg-initial">E</span><span class="iceberg-tail">stimating&nbsp;</span></span>
+                        <span class="iceberg-word"><span class="iceberg-initial">B</span><span class="iceberg-tail">reakage&nbsp;</span></span>
+                        <span class="iceberg-word"><span class="iceberg-initial">E</span><span class="iceberg-tail">vents and&nbsp;</span></span>
+                        <span class="iceberg-word"><span class="iceberg-initial">R</span><span class="iceberg-tail">econstructing their&nbsp;</span></span>
+                        <span class="iceberg-word"><span class="iceberg-initial">G</span><span class="iceberg-tail">raphs</span></span>
+                    </span>
+                </span><span class="header-title-suffix">Spectral Retrieval and PubChem Atlas</span>
             </h1>
         </div>
         <div class="header-actions">
-            <span>Please report any issues to {{ CONTACT_EMAIL }}</span>
+            <a class="header-link" href="mailto:{{ CONTACT_EMAIL }}"
+               title="{{ CONTACT_EMAIL }}">Report an issue</a>
             {% if current_user.is_authenticated %}
+            <span class="header-sep" aria-hidden="true"></span>
             {% if current_user.can_access_nist %}
-            <span style="color:#6ee7b7;">&#x2713; Authorized (NIST structures included) &mdash; {{ current_user.id }}</span>
+            <span class="header-chip is-authorized"
+                  title="Authorized: NIST structures included">&#x2713; {{ current_user.id }}</span>
             {% else %}
-            <span style="color:#9ca3af;">{{ current_user.id }}</span>
+            <span class="header-chip">{{ current_user.id }}</span>
             {% endif %}
             {% if current_user.is_admin %}
-            <a href="{{ url_for('admin_dashboard') }}" style="color:#f9a8d4;text-decoration:none;font-size:0.8rem;">Admin</a>
+            <a class="header-link is-admin" href="{{ url_for('admin_dashboard') }}">Admin</a>
             {% endif %}
-            <a href="{{ url_for('change_password') }}" style="color:#93c5fd;text-decoration:none;font-size:0.8rem;">Change password</a>
+            <a class="header-link" href="{{ url_for('change_password') }}">Change password</a>
             <form method="post" action="{{ url_for('logout') }}" style="margin:0;">
-                <button type="submit" style="background:none;border:1px solid #4b5563;color:#d1d5db;
-                    padding:0.25rem 0.6rem;border-radius:0.35rem;cursor:pointer;font-size:0.8rem;">
-                    Log out
-                </button>
+                <button class="header-btn" type="submit">Log out</button>
             </form>
             {% else %}
-            <a href="{{ url_for('login') }}" style="color:#93c5fd;text-decoration:none;">User login</a>
+            <span class="header-sep" aria-hidden="true"></span>
+            <a class="header-link" href="{{ url_for('login') }}">User login</a>
             {% endif %}
         </div>
     </div>
