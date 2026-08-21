@@ -8,7 +8,12 @@ import yaml
 from werkzeug.security import generate_password_hash
 
 from webui.vfs import AtlasVirtualFS, VfsNotFoundError, VfsPermissionError
-from webui.sftp_server import check_sftp_credentials, log_sftp_request, role_for_email
+from webui.sftp_server import (
+    IcebergSSHServer,
+    check_sftp_credentials,
+    log_sftp_request,
+    role_for_email,
+)
 
 
 def _write_users(path: Path, password: str = "Password!1") -> None:
@@ -87,6 +92,26 @@ def test_sftp_uses_webui_user_records(tmp_path):
     assert role_for_email(users_file, "plain@example.com", set()) == "user"
     assert role_for_email(users_file, "auth@example.com", set()) == "authorized_user"
     assert role_for_email(users_file, "override@example.com", {"override@example.com"}) == "admin"
+
+
+def test_sftp_login_updates_last_login(tmp_path):
+    users_file = tmp_path / "users.yaml"
+    _write_users(users_file)
+    server = IcebergSSHServer(users_file)
+
+    before = yaml.safe_load(users_file.read_text(encoding="utf-8"))
+    assert "last_login" not in before["auth@example.com"]
+
+    assert not server.validate_password("auth@example.com", "wrong")
+    failed = yaml.safe_load(users_file.read_text(encoding="utf-8"))
+    assert "last_login" not in failed["auth@example.com"]
+
+    assert server.validate_password("AUTH@example.com", "Password!1")
+
+    after = yaml.safe_load(users_file.read_text(encoding="utf-8"))
+    assert after["auth@example.com"]["last_login"]
+    assert after["auth@example.com"]["role"] == "authorized_user"
+    assert "last_login" not in after["plain@example.com"]
 
 
 def test_sftp_analytics_logs_to_requests_source(monkeypatch, tmp_path):

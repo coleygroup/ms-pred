@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import sqlite3
 import sys
+import tempfile
 from typing import Any
 from urllib.parse import quote
 
@@ -163,6 +164,22 @@ def _load_users(users_file: Path | None) -> dict[str, Any]:
         return {}
 
 
+def _save_users(users_file: Path | None, users: dict[str, Any]) -> None:
+    if users_file is None:
+        return
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=users_file.parent, suffix=".yaml.tmp")
+    try:
+        with os.fdopen(tmp_fd, "w") as fh:
+            yaml.safe_dump(users, fh, default_flow_style=False)
+        os.replace(tmp_path, users_file)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def _get_record(users: dict[str, Any], email: str) -> dict[str, Any] | None:
     raw = users.get(email)
     if raw is None:
@@ -183,6 +200,21 @@ def check_sftp_credentials(users_file: Path | None, email: str, password: str) -
         return check_password_hash(record["password"], password)
     except Exception:
         return False
+
+
+def record_sftp_login(users_file: Path | None, email: str) -> None:
+    normalized = email.strip().lower()
+    users = _load_users(users_file)
+    raw = users.get(normalized)
+    record = _get_record(users, normalized)
+    if record is None:
+        return
+    record["last_login"] = datetime.now(timezone.utc).isoformat()
+    if isinstance(raw, str):
+        record.setdefault("role", "user")
+        record.setdefault("created", "")
+    users[normalized] = record
+    _save_users(users_file, users)
 
 
 def role_for_email(users_file: Path | None, email: str, admin_emails: set[str]) -> str:
@@ -218,6 +250,10 @@ class IcebergSSHServer(asyncssh.SSHServer if asyncssh else object):  # type: ign
         ok = check_sftp_credentials(self.users_file, normalized, password)
         if ok:
             log_sftp_request(self.users_file, normalized, self.client_ip, "auth", "/")
+            try:
+                record_sftp_login(self.users_file, normalized)
+            except Exception:
+                pass
         return ok
 
     def connection_requested(self, *args, **kwargs):
