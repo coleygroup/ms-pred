@@ -70,7 +70,7 @@ class MultiheadAttention(nn.Module):
         attn = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=attn_bias,
-            dropout_p=self.dropout,
+            dropout_p=self.dropout if self.training else 0.0,
             is_causal=False
         )
 
