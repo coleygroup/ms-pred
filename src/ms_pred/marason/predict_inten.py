@@ -70,7 +70,7 @@ def predict():
 
     save_dir = kwargs["save_dir"]
     common.setup_logger(save_dir, log_name="inten_pred.log", debug=kwargs["debug"])
-    pl.utilities.seed.seed_everything(kwargs.get("seed"))
+    pl.seed_everything(kwargs.get("seed"))
     binned_out = kwargs["binned_out"]
 
     # Dump args

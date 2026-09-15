@@ -65,7 +65,7 @@ def run_hyperopt(
     common.setup_logger(
         save_dir, log_name="hyperopt.log", debug=kwargs.get("debug", False)
     )
-    pl.utilities.seed.seed_everything(kwargs.get("seed"))
+    pl.seed_everything(kwargs.get("seed"))
 
     # Define score function
     trainable = tune.with_parameters(
