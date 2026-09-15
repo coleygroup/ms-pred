@@ -1,4 +1,4 @@
-__version__ = "0.1.0"
+__version__ = "2.0.0"
 
 # Import all submodules in package
 # from . import common
