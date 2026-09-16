@@ -37,8 +37,8 @@ jobs:
           enable-cache: true
           cache-dependency-glob: pyproject.toml
 
-      - name: Install ms_pred (CPU + test extras)
-        run: uv pip install --system -e ".[cpu,test]"
+      - name: Install ms_pred (CPU + test + WebUI extras)
+        run: uv pip install --system -e ".[cpu,test,webui]"
 
       - name: Run pytest
         run: pytest -ra --durations=10 --maxfail=5
