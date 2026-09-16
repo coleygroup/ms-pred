@@ -1,3 +1,5 @@
+__version__ = "1.1.0"
+
 # Import all submodules in package
 # from . import common
 # from . import iceberg

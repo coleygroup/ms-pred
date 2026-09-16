@@ -3,8 +3,8 @@ requires = ["setuptools>=61", "wheel", "cython>=3", "numpy>=2"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ms-gen"
-version = "0.1.0"
+name = "ms_pred"
+dynamic = ["version"]
 description = "A package for computational tandem mass spectrometry simulation."
 authors = [
     { name = "Sam Goldman", email = "samlg@mit.edu" },
@@ -131,6 +131,9 @@ name = "pyg-cu118"
 url = "https://data.pyg.org/whl/torch-2.6.0+cu118.html"
 format = "flat"
 explicit = true
+
+[tool.setuptools.dynamic]
+version = { attr = "ms_pred.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
