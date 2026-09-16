@@ -74,7 +74,7 @@ def predict():
     common.setup_logger(
         save_dir, log_name="scarf_pred_binned.log", debug=kwargs["debug"]
     )
-    pl.utilities.seed.seed_everything(kwargs.get("seed"))
+    pl.seed_everything(kwargs.get("seed"))
 
     # Dump args
     yaml_args = yaml.dump(kwargs)

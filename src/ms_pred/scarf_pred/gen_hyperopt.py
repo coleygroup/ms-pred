@@ -38,7 +38,7 @@ def score_function(config, base_args, orig_dir=""):
 
     kwargs = copy.deepcopy(base_args)
     kwargs.update(config)
-    pl.utilities.seed.seed_everything(kwargs.get("seed"))
+    pl.seed_everything(kwargs.get("seed"))
 
     # Get dataset
     # Load smiles dataset and split into 3 subsets
