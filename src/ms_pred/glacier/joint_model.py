@@ -826,7 +826,7 @@ class JointModel(pl.LightningModule):
                     lr_decay_rate=self.lr_decay_rate, warmup=self.warmup)
         return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "frequency": 1, "interval": "step"}}
 
-    def lr_scheduler_step(self, scheduler, optimizer_idx, metric):
+    def lr_scheduler_step(self, scheduler, optimizer_idx, metric=None):  # fix lightning API mismatch for torch>=2.0
         # For LambdaLR, just call step() without arguments
         scheduler.step()
 
