@@ -290,18 +290,11 @@ def main():
         out_db.close()
 
     if len(arg_dicts) == 0:
-        print(
-            f"No matching entries found for pred DAGs ({pred_dag_path}) and true DAGs ({true_dag_path}). "
-            f"Creating empty output at {out_dag_path}."
+        raise ValueError(
+            f"No matching entries found for pred DAGs ({pred_dag_path}) and "
+            f"true DAGs ({true_dag_path}). Verify that spectrum IDs and "
+            "collision energies use matching conventions."
         )
-        if args.magma_output:
-            out_h5 = common.HDF5Dataset(out_dag_path, mode='w')
-            out_h5.close()
-        else:
-            out_db = common.PredSpecDB(out_dag_path, mode='w')
-            out_db.close()
-        print("success!")
-        return
 
     # Run
     wrapper_fn = lambda arg_dict: relabel_tree(**arg_dict)
