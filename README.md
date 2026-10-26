@@ -124,64 +124,71 @@ Rename ``nist20`` with ``nist23`` if you are working with the newer version.
 
 ### MassSpecGym Data Processing
 
-We support two MassSpecGym processing settings for ICEBERG:
+The same builder supports three strategies using the public
+[MassSpecGym 1.5 TSV](https://huggingface.co/datasets/roman-bushuiev/MassSpecGym/tree/main/data):
 
-1. `msg_simulation`: the official MassSpecGym simulation-challenge subset.
-2. `msg_all`: a streamlined ICEBERG workflow for using all MassSpecGym entries
-   in the main retrieval benchmark.
+| Strategy | Spectra selected | Collision energy |
+| --- | --- | --- |
+| `msg_all` | All source entries | Keep observed values; missing values remain unknown |
+| `msg_known_ce` | Entries with known collision energy | Observed values only |
+| `msg_simulation` (default) | `simulation_challenge == True` and known collision energy | Observed values only |
 
-#### `msg_simulation`: Official Simulation-Challenge Subset
+Choose the strategy explicitly when reproducing an experiment. These strategies
+select different evaluation cohorts, so their retrieval scores are not directly
+comparable. The builder preserves the official `fold` assignments, source spectrum
+IDs, peak values, and available collision energies. It does not normalize collision
+energy units or impute missing values. Unknown energies in `msg_all` are represented
+as `['nan']` in labels and `>collision nan eV` in stored spectra; prepare/impute these
+before using a model that requires known collision energy. `msg_known_ce` is an
+initial training subset for that imputation workflow, not the simulation challenge.
 
-The `msg_simulation` dataset is the MassSpecGym simulation-challenge subset. It is generated from the public
-MassSpecGym 1.5 data on Hugging Face and keeps only rows with
-`simulation_challenge == True` and known collision energies.
+#### Build directly from Hugging Face
 
-First, make sure the base MassSpecGym dataset resources are available under
-`data/spec_datasets/msg`. At minimum, this directory should contain the spectrum
-HDF5 and the retrieval candidate tables you want to reuse:
-
-```text
-data/spec_datasets/msg/
-├── labels.tsv
-├── spec_files.hdf5
-└── retrieval/
-    ├── cands_df_test_formula_256.tsv
-    └── cands_df_test_mass_256.tsv
-```
-
-Then run:
+No existing processed dataset is required. Run the desired command:
 
 ```shell
-python data_scripts/create_msg_simulation_dataset.py \
-  --source-table https://huggingface.co/datasets/roman-bushuiev/MassSpecGym/resolve/main/data/MassSpecGym1.5.tsv \
-  --source-dataset data/spec_datasets/msg \
-  --output-dataset data/spec_datasets/msg_simulation \
-  --force-output \
-  --overwrite \
+python data_scripts/create_msg_simulation_dataset.py --strategy msg_all \
+  --audit-out data/spec_datasets/msg_all/audit.json
+python data_scripts/create_msg_simulation_dataset.py --strategy msg_known_ce \
+  --audit-out data/spec_datasets/msg_known_ce/audit.json
+python data_scripts/create_msg_simulation_dataset.py --strategy msg_simulation \
   --audit-out data/spec_datasets/msg_simulation/audit.json
 ```
 
-The command writes `data/spec_datasets/msg_simulation/labels.tsv`,
-`data/spec_datasets/msg_simulation/splits/split.tsv`, filtered retrieval
-candidate tables, and small debug files for quick smoke checks. It also links or
-copies reusable resources from `data/spec_datasets/msg`, including
-`spec_files.hdf5`, `magma_outputs`, and `subformulae` when they are present.
+Each command writes `labels.tsv`, `spec_files.hdf5` (containing `.ms` text),
+`splits/split.tsv`, and small debug labels, spectra, and splits under
+`data/spec_datasets/<strategy>`. Use `--source-table /path/to/MassSpecGym1.5.tsv`
+to reuse a downloaded TSV or pin an exact source snapshot, and `--output-dataset`
+to choose a separate output directory. Existing generated files require
+`--overwrite` to replace. Check the audit's selected counts, split counts,
+`unknown_ce_rows`, `imputed_check`, and `pending_resources`; these base datasets
+still need MAGMA/subformula processing and retrieval candidate generation before
+training/retrieval workflows that require those resources. Empty debug candidate
+tables do not constitute a retrieval benchmark.
 
-After generation, check the audit:
+#### Reuse an existing processed dataset
+
+Supply `--source-dataset` to reuse its spectral HDF5 instead of converting TSV
+peaks. The selected labels and splits still come from `--source-table`. Available
+subformula annotations and candidate tables are filtered to the selected cohort;
+missing optional resources are listed in `pending_resources` instead of preventing
+base dataset creation. The source HDF5 must cover every selected spectrum.
 
 ```shell
-python - <<'PY'
-import json
-from pathlib import Path
-
-audit = json.loads(Path("data/spec_datasets/msg_simulation/audit.json").read_text())
-print(audit["output_rows"], audit["output_unique_specs"])
-print(audit["imputed_check"])
-PY
+python data_scripts/create_msg_simulation_dataset.py \
+  --strategy msg_simulation \
+  --source-dataset data/spec_datasets/msg_all \
+  --output-dataset data/spec_datasets/msg_simulation \
+  --audit-out data/spec_datasets/msg_simulation/audit.json
 ```
 
-For the current MassSpecGym 1.5 TSV, the expected output is 119,029 unique
-simulation-challenge spectra and zero imputed labels.
+The input and output directories must differ. The resulting spectral HDF5 is a
+relative symlink to the source HDF5, which may contain additional spectra; use
+`labels.tsv` and `splits/split.tsv` to define the selected cohort. Keep the source
+dataset available when moving or sharing such outputs. Explicit `--candidate-file`
+arguments require those files to exist. For the MassSpecGym 1.5 snapshot used in our
+simulation experiments, the expected selection was 119,029 unique spectra and zero
+imputed labels; verify counts for your pinned source version.
 
 #### `msg_all`: Full MassSpecGym ICEBERG Workflow
 
