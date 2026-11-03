@@ -26,6 +26,7 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 
 import ms_pred.common as common
+from ms_pred.common.adduct_validation import add_supported_condition_args, validate_training_declarations
 from ms_pred.glacier.dataset import IntenContrDataset, TreeProcessor
 from ms_pred.glacier.joint_model import JointModel
 from pytorch_lightning.strategies import DDPStrategy
@@ -129,6 +130,7 @@ def add_joint_train_args(parser):
     )
     parser.add_argument("--grad-accumulate", default=1, type=int, action="store")
 
+    add_supported_condition_args(parser)
     return parser
 
 
@@ -141,6 +143,7 @@ def get_args():
 def train_model():
     args = get_args()
     kwargs = args.__dict__
+    validate_training_declarations(kwargs)
 
     save_dir = kwargs["save_dir"]
     common.setup_logger(save_dir, log_name="joint_contr_finetune.log", debug=kwargs["debug"])
@@ -380,6 +383,7 @@ def train_model():
         model.upper_limit = kwargs["upper_limit"]
 
     if not kwargs["test_checkpoint"]:
+        model.set_supported_conditions(kwargs["supported_adducts"], kwargs["supported_instruments"])
         if kwargs["debug_overfit"]:
             trainer.fit(model, train_loader)
         else:

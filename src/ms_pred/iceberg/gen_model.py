@@ -9,12 +9,13 @@ import dgl.nn as dgl_nn
 
 
 import ms_pred.common as common
+from ms_pred.common.adduct_validation import TrainingConditionsMixin
 import ms_pred.nn_utils as nn_utils
 import ms_pred.magma.fragmentation as fragmentation
 import ms_pred.iceberg.dag_data as dag_data
 
 
-class FragGNN(pl.LightningModule):
+class FragGNN(TrainingConditionsMixin, pl.LightningModule):
     def __init__(
         self,
         hidden_size: int,
@@ -38,6 +39,8 @@ class FragGNN(pl.LightningModule):
         embed_elem_group=False,
         encode_forms: bool = False,
         add_hs: bool = False,
+        supported_adducts=None,
+        supported_instruments=None,
         **kwargs,
     ):
         """__init__ _summary_
@@ -70,6 +73,8 @@ class FragGNN(pl.LightningModule):
         """
         super().__init__()
         self.save_hyperparameters()
+        if supported_adducts is not None or supported_instruments is not None:
+            self.set_supported_conditions(supported_adducts, supported_instruments)
         self.hidden_size = hidden_size
         self.root_encode = root_encode
         self.pe_embed_k = pe_embed_k
@@ -503,6 +508,8 @@ class FragGNN(pl.LightningModule):
         Return:
             Dictionary containing results, root graph object
         """
+        self.validate_adducts(adduct)
+        self.validate_instruments(instrument)
         if type(root_smi) is str:
             batched_input = False
             root_smi = [root_smi]

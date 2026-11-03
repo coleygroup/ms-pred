@@ -370,6 +370,8 @@ def run_shard(entries, checkpoint, device, out_path, kwargs):
 
     # Keep the model on CPU for now -- see the iter()/`.to(device)` ordering below.
     model = joint_model.JointModel.load_from_checkpoint(checkpoint)
+    model.validate_adducts({entry[3] for entry in entries})
+    model.validate_instruments({entry[4] for entry in entries})
     model.eval()
     model.freeze()
 

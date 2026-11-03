@@ -11,13 +11,14 @@ import functools
 
 
 import ms_pred.common as common
+from ms_pred.common.adduct_validation import TrainingConditionsMixin
 import ms_pred.iceberg.dag_data as dag_data
 import ms_pred.nn_utils as nn_utils
 import ms_pred.magma.fragmentation as fragmentation
 import ms_pred.magma.run_magma as run_magma
 
 
-class IntenGNN(pl.LightningModule):
+class IntenGNN(TrainingConditionsMixin, pl.LightningModule):
     def __init__(
         self,
         hidden_size: int,
@@ -50,10 +51,14 @@ class IntenGNN(pl.LightningModule):
         sk_tau: float = 0.01,
         contr_weight: float = 1.,
         ppm_tol: float = 20,
+        supported_adducts=None,
+        supported_instruments=None,
         **kwargs,
     ):
         super().__init__()
         self.save_hyperparameters()
+        if supported_adducts is not None or supported_instruments is not None:
+            self.set_supported_conditions(supported_adducts, supported_instruments)
         self.hidden_size = hidden_size
         self.pe_embed_k = pe_embed_k
         self.root_encode = root_encode
@@ -392,6 +397,8 @@ class IntenGNN(pl.LightningModule):
         Returns:
             dict: _description_
         """
+        self.validate_adducts(adducts)
+        self.validate_instruments(instruments)
         # B x nodes x num outputs x inten items
         out = self.forward(
             graphs,

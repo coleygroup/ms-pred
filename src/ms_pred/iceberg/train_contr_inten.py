@@ -20,6 +20,7 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 
 import ms_pred.common as common
+from ms_pred.common.adduct_validation import add_supported_condition_args, validate_training_declarations
 from ms_pred.iceberg import dag_data, inten_model
 
 import torch
@@ -98,6 +99,7 @@ def add_frag_train_args(parser):
     parser.add_argument("--encode-forms", default=False, action="store_true")
     parser.add_argument("--add-hs", default=False, action="store_true")
 
+    add_supported_condition_args(parser)
     return parser
 
 
@@ -110,6 +112,7 @@ def get_args():
 def train_model():
     args = get_args()
     kwargs = args.__dict__
+    validate_training_declarations(kwargs)
 
     save_dir = kwargs["save_dir"]
     common.setup_logger(save_dir, log_name="dag_inten_train.log", debug=kwargs["debug"])
@@ -341,6 +344,7 @@ def train_model():
         logging.info(f"Resuming training from {ckpt_path}")
 
     if not kwargs["test_checkpoint"]:
+        model.set_supported_conditions(kwargs["supported_adducts"], kwargs["supported_instruments"])
         if kwargs["debug_overfit"]:
             trainer.fit(model, train_loader, ckpt_path=ckpt_path)
         else:

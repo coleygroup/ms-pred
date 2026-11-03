@@ -18,6 +18,7 @@ import torch_scatter as ts
 import torch.nn.functional as F
 import copy
 import ms_pred.common as common
+from ms_pred.common.adduct_validation import TrainingConditionsMixin
 from LinSATNet import linsat_layer, init_constraints
 import math
 import numpy as np
@@ -26,7 +27,7 @@ import dgl
 from rdkit import Chem  # type: ignore
 import functools
 
-class JointModel(pl.LightningModule):
+class JointModel(TrainingConditionsMixin, pl.LightningModule):
     def __init__(self, 
             frag_decoder_layers: int = 3,
             frag_encoder_layers: int = 0,
@@ -69,10 +70,14 @@ class JointModel(pl.LightningModule):
             warmup: int = 1000,
             num_bins: int = 15000,
             upper_limit: int = 1500,
+            supported_adducts=None,
+            supported_instruments=None,
             **kwargs,
         ):
         super().__init__()
         self.save_hyperparameters()
+        if supported_adducts is not None or supported_instruments is not None:
+            self.set_supported_conditions(supported_adducts, supported_instruments)
         self.frag_decoder_layers = frag_decoder_layers
         self.frag_encoder_layers = frag_encoder_layers
         self.frag_dropout = frag_dropout
@@ -831,6 +836,8 @@ class JointModel(pl.LightningModule):
         scheduler.step()
 
     def predict_mol(self, smi, collision_eng, adduct, device, instrument=None):
+        self.validate_adducts(adduct)
+        self.validate_instruments(instrument)
         if not getattr(self, "_predict_prepared", False):
             self.eval()
             self.freeze()
@@ -959,6 +966,8 @@ class JointModel(pl.LightningModule):
         Returns the same ``{"spec": [...], "frag": [...]}`` structure as
         ``predict_mol`` with ``batched_input=True``.
         """
+        self.validate_adducts(batch["adducts"])
+        self.validate_instruments(batch.get("instruments"))
         if not getattr(self, "_predict_prepared", False):
             self.eval()
             self.freeze()
@@ -991,6 +1000,8 @@ class JointModel(pl.LightningModule):
         where for molecule i only the first ``counts[i]`` rows are valid (matching the
         old behavior of taking ``min(sparse_k, n_rows)`` rows).
         """
+        self.validate_adducts(batch["adducts"])
+        self.validate_instruments(batch.get("instruments"))
         if not getattr(self, "_predict_prepared", False):
             self.eval()
             self.freeze()
@@ -1047,6 +1058,8 @@ class JointModel(pl.LightningModule):
     
     def predict_inten(self, graphormer_input, num_atoms, adducts, collision_engs, root_form_vecs, masses, 
                 adduct_mass_shifts, atom_form_vecs, adj_matrices, atom_hs, total_hs, instruments=None, binned_out=False):
+        self.validate_adducts(adducts)
+        self.validate_instruments(instruments)
         predict_obj = self.forward(graphormer_input, 
                         num_atoms, adducts, 
                         collision_engs, 

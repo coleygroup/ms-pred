@@ -34,6 +34,7 @@ GPU requests in _slurm_args use Slurm's --gpus style.  Use `gpus: 1`,
 
 from pathlib import Path
 import shutil
+import shlex
 import hashlib
 import subprocess
 import copy
@@ -166,7 +167,7 @@ def convert_flag(flag_key, flag_value):
     if isinstance(flag_value, bool):
         return_string = f"--{flag_key}" if flag_value else ""
     elif isinstance(flag_value, list):
-        flag_value = [str(i) for i in flag_value]
+        flag_value = [shlex.quote(str(i)) for i in flag_value]
         return_string = f"--{flag_key} {' '.join(flag_value)}"
     elif flag_value is None:
         return_string = ""

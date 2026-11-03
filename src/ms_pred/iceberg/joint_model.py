@@ -88,6 +88,10 @@ class JointModel(pl.LightningModule):
             max_nodes (int): max_nodes
             binned_out
         """
+        self.gen_model_obj.validate_adducts(adduct)
+        self.inten_model_obj.validate_adducts(adduct)
+        self.gen_model_obj.validate_instruments(instrument)
+        self.inten_model_obj.validate_instruments(instrument)
         self.eval()
         self.freeze()
 

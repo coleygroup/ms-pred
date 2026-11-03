@@ -5,6 +5,9 @@ launcher_args: {experiment_name: glacier_nist20,
   visible_devices: [0, 1]
 }
 universal_args:
+  # NIST20 labels omit instrument metadata; the loader uses Orbitrap.
+  supported-adducts: [["[M+H]+", "[M+Na]+", "[M+K]+", "[M+H-H2O]+", "[M+NH4]+", "[M+H-2H2O]+", "[M-H]-", "[M+Cl]-", "[M-H-H2O]-", "[M-H-CO2]-"]]
+  supported-instruments: [["Orbitrap"]]
   _slurm_args:
   - {_num_gpu: 1, cpus-per-task: 7, job-name: joint_train, mem-per-cpu: 8G,
     time: '1-12:00:00'}

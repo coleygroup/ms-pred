@@ -91,7 +91,7 @@ Please go through the following prerequisites to run the demo:
 * Get pretrained ICEBERG and GLACIER model weights.
     * You can either train the model by yourself (following instructions below);
     * Or if you have an NSIT'20/23/26 license, you can [email the maintainer with a proof of license](mailto:runzhong@mit.edu?subject=Inquiry%20of%20pretrianed%20ICEBERG%20on%20NIST20&body=My%20organization%20has%20a%20NIST'20%20(or%20newer)%20license%20and%20I%20would%20like%20to%20receive%20pretrained%20weights%20of%20ICEBERG%20on%20NIST'20.%20Please%20find%20the%20proof%20of%20purchase%20as%20attached.) and we will send you the weights;
-    * Or you can use the open-source MassSpecGym-trained weights for [ICERBERG](https://www.dropbox.com/scl/fo/kwm35ih8tlfnshfrcq8ot/AOeS4M0_v9MhqeEZys9sCRQ?rlkey=f1n6pbzx94g1k2el2wcbmee61&st=dcl9pbyp&dl=0) or [GLACIER](https://www.dropbox.com/scl/fo/ta99j0mp1w7qzek5zvy3w/AFCLQNO8W2EP7ZDMOj9nxWI?rlkey=563zxtyvvhwfu1uyz6n10n2ui&st=k8km33p3&e=1&dl=0). 
+    * Or you can use the open-source MassSpecGym-trained weights for [ICERBERG](https://www.dropbox.com/scl/fo/kwm35ih8tlfnshfrcq8ot/AOeS4M0_v9MhqeEZys9sCRQ?rlkey=f1n6pbzx94g1k2el2wcbmee61&st=dcl9pbyp&dl=0) or [GLACIER](https://www.dropbox.com/scl/fo/r82eluc6qhm48h9b4xgze/AK_SVKXUOcJlGk8TnC6na9I?rlkey=c4upk39c21h6go4rbzxfmd9jo&st=ej5jyzdp&dl=0).
 * Update [``the configuration file``](configs/iceberg/iceberg_elucidation.yaml) based your local setting. Change ``python_path`` to your Python excutiable, and update ``gen_ckpt`` and ``inten_ckpt`` to the path of your pretrained models.
     * When you have a GPU with smaller RAM, set smaller numbers for ``batch_size`` and ``num_workers`` to fit the model into GPU RAM (``batch_size: 8``, ``num_workers: 6`` tested on NVIDIA RTX 4070M 8GB; ``batch_size: 8``, ``num_workers: 12`` tested on NVIDIA RTX A5000 24GB).
     * CPU-only inference is also feasible if you set ``cuda_devices: None``.
@@ -376,9 +376,61 @@ GLACIER is the first ms/ms machine learning model that predicts multi-breakpoint
 3. *Predict spectral intensity*: `run_scripts/glacier/02_predict_inten.py`     
 4. *Retrieval*: `run_scripts/glacier/03_run_retrieval.py` 
 
-We provide a [checkpoint](https://www.dropbox.com/scl/fo/ta99j0mp1w7qzek5zvy3w/AFCLQNO8W2EP7ZDMOj9nxWI?rlkey=563zxtyvvhwfu1uyz6n10n2ui&st=k8km33p3&dl=0) of GLACIER trained on the MassSpecGym dataset. 
+We provide a [checkpoint](https://www.dropbox.com/scl/fo/r82eluc6qhm48h9b4xgze/AK_SVKXUOcJlGk8TnC6na9I?rlkey=c4upk39c21h6go4rbzxfmd9jo&st=ej5jyzdp&dl=0) of GLACIER trained on the MassSpecGym dataset.
 
 > You need two GPUs with at least 24GB RAM to train GLACIER (we used NVIDIA A5000 for development). 
+
+### Declared checkpoint support
+
+Declare supported adducts and instrument types in every ICEBERG or GLACIER
+training YAML. For example, a MassSpecGym simulation configuration declares:
+
+```yaml
+universal_args:
+  supported-adducts: [["[M+H]+"]]
+  supported-instruments: [[Orbitrap, QTOF]]
+```
+
+The outer list is the launcher's sweep dimension; the inner list is the complete
+support declaration for one run. Command-line training uses
+`--supported-adducts '[M+H]+' --supported-instruments Orbitrap QTOF`.
+Both declarations are required for new training, including resumed training and
+fine-tuning. Other dataset YAMLs must supply their intended support lists before
+launching. The MassSpecGym and NIST training YAMLs include explicit declarations.
+NIST20 declares Orbitrap because its labels omit instrument metadata and the
+loader uses that default.
+
+The declaration is saved inside each `.ckpt` under `training_metadata`, and in
+its hyperparameters. Training does not inspect data, infer supported types, or
+expand the lists. It does not filter training rows based on these declarations.
+The current run's YAML replaces the previous support policy when resuming or
+fine-tuning; include all types you intend the resulting checkpoint to support.
+The `embed-adduct` and `embed-instrument` flags still control model features.
+
+Inference raises `UntrainedAdductError` or `UntrainedInstrumentError` for types
+outside the saved lists. Equivalent adduct spellings and instrument aliases are
+accepted. ICEBERG checks both component checkpoints before tree generation.
+These are model-author support declarations, not automatically measured counts
+of what training encountered.
+
+Legacy checkpoints without declarations warn that support cannot be verified.
+The original adduct-only metadata schema remains readable. To upgrade an
+existing checkpoint using explicit declarations from a training YAML:
+
+```bash
+python -m ms_pred.common.annotate_checkpoint_adducts \
+  --checkpoint /path/to/best.ckpt \
+  --output /path/to/best_with_support.ckpt \
+  --training-config configs/iceberg/msg_simulation/dag_train_msg_simulation.yaml
+```
+
+Use a YAML that describes the intended support of those exact weights. For an
+individual checkpoint, a flat YAML with `supported-adducts: ["[M+H]+"]` and
+`supported-instruments: [Orbitrap, QTOF]` also works. Alternatively, pass both
+`--adducts` and `--instruments`, plus a `--source` description. The tool preserves
+the original file, optimizer state and hyperparameters, records the source
+checkpoint SHA-256, and verifies every model tensor after saving. No retraining
+is required.
 
 ### SCARF
 

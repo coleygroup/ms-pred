@@ -5,6 +5,8 @@ launcher_args: {experiment_name: iceberg_msg_all_iceberg,
   visible_devices: [0]
 }
 universal_args:
+  supported-adducts: [["[M+H]+", "[M+Na]+"]]
+  supported-instruments: [["Orbitrap", "QTOF"]]
   _slurm_args:
   - {nodes: 1, ntasks: 1, gpus: l40s:1, cpus-per-task: 16, job-name: forward_train, mem: 160G,
     time: '1-18:00:00'}

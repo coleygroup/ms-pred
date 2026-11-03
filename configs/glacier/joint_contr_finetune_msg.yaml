@@ -5,6 +5,8 @@ launcher_args: {experiment_name: glacier_msg,
   visible_devices: [0, 1]
 }
 universal_args:
+  supported-adducts: [["[M+H]+"]]
+  supported-instruments: [["Orbitrap", "QTOF"]]
   _slurm_args:
   - {_num_gpu: 1, cpus-per-task: 7, job-name: joint_train, mem-per-cpu: 8G,
     time: '1-12:00:00'}

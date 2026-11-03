@@ -259,6 +259,11 @@ def iceberg_prediction(
     else:
         instruments = instrument
 
+    # Enforce the checkpoint policy even when predictions are already cached.
+    from ms_pred.common.adduct_validation import validate_checkpoint_conditions
+    validate_checkpoint_conditions(gen_ckpt, adducts, instruments)
+    validate_checkpoint_conditions(inten_ckpt, adducts, instruments)
+
     # standardize collision energies
     if not common.is_iterable(collision_energies): # single value CE
         collision_energies = [[int(collision_energies)] for _ in adducts]
