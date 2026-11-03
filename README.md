@@ -90,7 +90,7 @@ Please go through the following prerequisites to run the demo:
 * Start a jupyter notebook server (by ``jupyter notebook``), and navigate to ``notebooks/iceberg_2025_biorxiv/iceberg_demo_pubchem_elucidation.ipynb`` in the web UI.
 * Get pretrained ICEBERG and GLACIER model weights.
     * You can either train the model by yourself (following instructions below);
-    * Or if you have an NSIT'20/23/26 license, you can [email the maintainer with a proof of license](mailto:runzhong@mit.edu?subject=Inquiry%20of%20pretrianed%20ICEBERG%20on%20NIST20&body=My%20organization%20has%20a%20NIST'20%20(or%20newer)%20license%20and%20I%20would%20like%20to%20receive%20pretrained%20weights%20of%20ICEBERG%20on%20NIST'20.%20Please%20find%20the%20proof%20of%20purchase%20as%20attached.) and we will send you the weights;
+    * Or if you have a NIST'20/23/26 license, you can [email the maintainer with a proof of license](mailto:coleyms@mit.edu?subject=Request%20for%20pretrained%20ICEBERG%20and%20GLACIER%20weights%20on%20NIST%2720&body=My%20organization%20has%20a%20NIST%2720%20%28or%20newer%29%20license%20and%20I%20would%20like%20to%20receive%20pretrained%20weights%20for%20ICEBERG%20and%20GLACIER%20on%20NIST%2720.%20Please%20find%20the%20proof%20of%20purchase%20attached.) and we will process your request;
     * Or you can use the open-source MassSpecGym-trained weights for [ICERBERG](https://www.dropbox.com/scl/fo/kwm35ih8tlfnshfrcq8ot/AOeS4M0_v9MhqeEZys9sCRQ?rlkey=f1n6pbzx94g1k2el2wcbmee61&st=dcl9pbyp&dl=0) or [GLACIER](https://www.dropbox.com/scl/fo/r82eluc6qhm48h9b4xgze/AK_SVKXUOcJlGk8TnC6na9I?rlkey=c4upk39c21h6go4rbzxfmd9jo&st=ej5jyzdp&dl=0).
 * Update [``the configuration file``](configs/iceberg/iceberg_elucidation.yaml) based your local setting. Change ``python_path`` to your Python excutiable, and update ``gen_ckpt`` and ``inten_ckpt`` to the path of your pretrained models.
     * When you have a GPU with smaller RAM, set smaller numbers for ``batch_size`` and ``num_workers`` to fit the model into GPU RAM (``batch_size: 8``, ``num_workers: 6`` tested on NVIDIA RTX 4070M 8GB; ``batch_size: 8``, ``num_workers: 12`` tested on NVIDIA RTX A5000 24GB).
@@ -380,58 +380,6 @@ We provide a [checkpoint](https://www.dropbox.com/scl/fo/r82eluc6qhm48h9b4xgze/A
 
 > You need two GPUs with at least 24GB RAM to train GLACIER (we used NVIDIA A5000 for development). 
 
-### Declared checkpoint support
-
-Declare supported adducts and instrument types in every ICEBERG or GLACIER
-training YAML. For example, a MassSpecGym simulation configuration declares:
-
-```yaml
-universal_args:
-  supported-adducts: [["[M+H]+"]]
-  supported-instruments: [[Orbitrap, QTOF]]
-```
-
-The outer list is the launcher's sweep dimension; the inner list is the complete
-support declaration for one run. Command-line training uses
-`--supported-adducts '[M+H]+' --supported-instruments Orbitrap QTOF`.
-Both declarations are required for new training, including resumed training and
-fine-tuning. Other dataset YAMLs must supply their intended support lists before
-launching. The MassSpecGym and NIST training YAMLs include explicit declarations.
-NIST20 declares Orbitrap because its labels omit instrument metadata and the
-loader uses that default.
-
-The declaration is saved inside each `.ckpt` under `training_metadata`, and in
-its hyperparameters. Training does not inspect data, infer supported types, or
-expand the lists. It does not filter training rows based on these declarations.
-The current run's YAML replaces the previous support policy when resuming or
-fine-tuning; include all types you intend the resulting checkpoint to support.
-The `embed-adduct` and `embed-instrument` flags still control model features.
-
-Inference raises `UntrainedAdductError` or `UntrainedInstrumentError` for types
-outside the saved lists. Equivalent adduct spellings and instrument aliases are
-accepted. ICEBERG checks both component checkpoints before tree generation.
-These are model-author support declarations, not automatically measured counts
-of what training encountered.
-
-Legacy checkpoints without declarations warn that support cannot be verified.
-The original adduct-only metadata schema remains readable. To upgrade an
-existing checkpoint using explicit declarations from a training YAML:
-
-```bash
-python -m ms_pred.common.annotate_checkpoint_adducts \
-  --checkpoint /path/to/best.ckpt \
-  --output /path/to/best_with_support.ckpt \
-  --training-config configs/iceberg/msg_simulation/dag_train_msg_simulation.yaml
-```
-
-Use a YAML that describes the intended support of those exact weights. For an
-individual checkpoint, a flat YAML with `supported-adducts: ["[M+H]+"]` and
-`supported-instruments: [Orbitrap, QTOF]` also works. Alternatively, pass both
-`--adducts` and `--instruments`, plus a `--source` description. The tool preserves
-the original file, optimizer state and hyperparameters, records the source
-checkpoint SHA-256, and verifies every model tensor after saving. No retraining
-is required.
-
 ### SCARF
 
 SCARF models trained in two parts: a prefix tree generator and an intensity predictor. The pipeline for training and evaluating this model can be accessed in `run_scripts/scarf_model/`. The internal pipeline used to conduct experiments can be followed below:
@@ -603,19 +551,46 @@ Forward models could be applied for structural elucidation tasks with a set of c
 
 We ask any user of this repository to cite the following works based upon the portion of the repository used.
 
-🧣SCARF:
+🏔️GLACIER: 
 ```
-@article{goldman2023prefix,
-  title={Prefix-tree decoding for predicting mass spectra from molecules},
-  author={Goldman, Samuel and Bradshaw, John and Xin, Jiayi and Coley, Connor},
+@article{wang2026glacier,
+  title={GLACIER: Rethinking Mass Spectrum Prediction as an Object Detection Problem},
+  author={Wang, Rui-Xi and Wang, Runzhong and Coley, Connor W},
   journal={Advances in neural information processing systems},
-  volume={36},
-  pages={48548--48572},
-  year={2023}
+  year={2026}
+}
+```
+
+🧊ICEBERG 2.0:
+
+If you use ICEBERG from the `main` branch (including ICEBERG 2.1), cite the ICEBERG 2.0 paper below.
+
+```
+@article{wang2025neuralspec,
+	author={Wang, Runzhong and Manjrekar, Mrunali and Mahjour, Babak and Avila-Pacheco, Julian and Provenzano, Joules and Reynolds, Erin and Lederbauer, Magdalena and Mashin, Eivgeni and Goldman, Samuel L. and Wang, Mingxun and Weng, Jing-Ke and Plata, Desir{\'e}e L. and Clish, Clary B. and Coley, Connor W.},
+	title={Neural Spectral Prediction for Structure Elucidation with Tandem Mass Spectrometry},
+	elocation-id = {2025.05.28.656653},
+	year={2025},
+	URL={https://www.biorxiv.org/content/early/2025/06/01/2025.05.28.656653},
+	eprint={https://www.biorxiv.org/content/early/2025/06/01/2025.05.28.656653.full.pdf},
+	journal={bioRxiv}
+}
+```
+
+🏃‍MARASON:
+```
+@article{wang2025neuralgraph,
+  title={Neural Graph Matching Improves Retrieval Augmented Generation in Molecular Machine Learning},
+  author={Wang, Runzhong and Wang, Rui-Xi and Manjrekar, Mrunali and Coley, Connor W},
+  journal={International Conference on Machine Learning},
+  year={2025}
 }
 ```
 
 🧊ICEBERG 1.0:
+
+If you use the legacy [`iceberg_1.0` branch](https://github.com/coleygroup/ms-pred/tree/iceberg_1.0), cite the ICEBERG 1.0 paper below.
+
 ```
 @article{goldman2024generating,
   title={Generating molecular fragmentation graphs with autoregressive neural networks},
@@ -629,36 +604,15 @@ We ask any user of this repository to cite the following works based upon the po
 }
 ```
 
-🧊ICEBERG 2.0:
+🧣SCARF:
 ```
-@article{wang2025neuralspec,
-	author={Wang, Runzhong and Manjrekar, Mrunali and Mahjour, Babak and Avila-Pacheco, Julian and Provenzano, Joules and Reynolds, Erin and Lederbauer, Magdalena and Mashin, Eivgeni and Goldman, Samuel L. and Wang, Mingxun and Weng, Jing-Ke and Plata, Desir{\'e}e L. and Clish, Clary B. and Coley, Connor W.},
-	title={Neural Spectral Prediction for Structure Elucidation with Tandem Mass Spectrometry},
-	elocation-id = {2025.05.28.656653},
-	year={2025},
-	URL={https://www.biorxiv.org/content/early/2025/06/01/2025.05.28.656653},
-	eprint={https://www.biorxiv.org/content/early/2025/06/01/2025.05.28.656653.full.pdf},
-	journal={bioRxiv}
-}
-```
-
-🏔️GLACIER: 
-```
-@article{wang2026glacier,
-  title={GLACIER: Rethinking Mass Spectrum Prediction as an Object Detection Problem},
-  author={Wang, Rui-Xi and Wang, Runzhong and Coley, Connor W},
-  journal={arXiv preprint arXiv:2606.29161},
-  year={2026}
-}
-```
-
-🏃‍MARASON:
-```
-@article{wang2025neuralgraph,
-  title={Neural Graph Matching Improves Retrieval Augmented Generation in Molecular Machine Learning},
-  author={Wang, Runzhong and Wang, Rui-Xi and Manjrekar, Mrunali and Coley, Connor W},
-  journal={International Conference on Machine Learning},
-  year={2025}
+@article{goldman2023prefix,
+  title={Prefix-tree decoding for predicting mass spectra from molecules},
+  author={Goldman, Samuel and Bradshaw, John and Xin, Jiayi and Coley, Connor},
+  journal={Advances in neural information processing systems},
+  volume={36},
+  pages={48548--48572},
+  year={2023}
 }
 ```
 
